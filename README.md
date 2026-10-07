@@ -96,6 +96,8 @@ and production target are still pending. No production deployment is included ye
 - Transactional authority validation under restricted ingestion privileges, with
   current/historical signature checks and locked database scope. Its success does
   not authorize a later write; inbox submission remains separate.
+- Immutable inbox headers and bounded batch storage with tenant isolation and
+  ingestion-only access. Atomic submission and receipt delivery remain pending.
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
 Pure admission validates a supplied snapshot. HTTP authentication, capture-side
@@ -121,6 +123,7 @@ For database tests, install Docker and fetch the pinned PostgreSQL fixture:
 ```sh
 docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
 bash scripts/test-postgres.sh
+python3 scripts/test-postgres-tls.py --authority
 ```
 
 The database test creates an isolated temporary container with no network or host

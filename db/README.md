@@ -88,9 +88,10 @@ library driver observes advisory waits, verifies fresh post-wait reads, prompt
 40001 errors, source-profile locking, rollback lock release and isolation rejection.
 Waits and execution are bounded, and cleanup targets owned sessions.
 
-Authentication, application signature/metadata verification, ingress transactions,
-receipts, retention, queue purge and backup/restore remain unimplemented. SQL
-credential holders remain trusted: they can choose a tenant setting or hold locks.
+HTTP authentication, atomic application submission and durable HTTP acceptance
+remain unimplemented. Retention cleanup, queue purge and backup/restore also
+remain unimplemented. SQL credential holders remain trusted: they can choose a
+tenant setting or hold locks.
 
 ## Native TLS transport
 
@@ -112,7 +113,8 @@ the client and waits within the deadline, then aborts on timeout. Driver cancell
 takes effect when Tokio next polls the task. Cancellation of close preserves this
 ownership. The public diagnostic query is a fixed bounded TLS health check.
 
-`python3 scripts/test-postgres-tls.py` is the separate required live TLS fixture.
+`python3 scripts/test-postgres-tls.py --authority` runs the required TLS and
+authority fixtures. Omitting the flag runs only transport tests.
 It requires the pinned local PostgreSQL image and installed OpenSSL, creates
 ephemeral synthetic credentials/certificates, and cleans its owned containers,
 network, files and protocol listeners. The existing no-network SQL fixture is
@@ -166,3 +168,45 @@ timeout cleanup while runtimes remain alive, fresh state after lock waits, and
 lease/record expiry during loading. Synthetic TLS also exercises cancellation
 while BEGIN is pending. Direct cancellation during ROLLBACK is inspected through
 guard ownership but is not deterministically executed by this fixture.
+
+## Durable inbox storage
+
+`0003_ingestion.sql` creates immutable `ingestion_batches` headers and
+`ingestion_payloads` bodies keyed by `(tenant_id, collector_id, batch_id)`. Headers
+reference the scoped collector and payloads reference the full header key. A
+header stores a 32-byte request digest with digest version 1, record count 1–500,
+a PostgreSQL 16 built-in `gen_random_uuid()` receipt default and server
+`clock_timestamp()` acceptance timestamp default. No UUID extension is required.
+The complete checked batch is bytea, format 1, bounded to 1–1,048,576 bytes.
+Arbitrary names can contain NUL; PostgreSQL JSONB or TEXT cannot represent that
+contract, so the application must use a lossless versioned byte encoding.
+
+Both tables belong to `contour_owner`, enable and force tenant RLS, and grant
+SELECT/INSERT only to `contour_ingestion`. Shared runtime and administrators have
+no inbox read or insert grant. UPDATE/DELETE triggers reject changes even for a
+privileged executor; no application role receives UPDATE, DELETE or TRUNCATE.
+Insert triggers reuse the collector guard and its READ COMMITTED/context checks.
+As with authority mutation, the try-lock guard cannot prove a separate earlier
+blocking statement or validate a signed lease. SQL credentials remain trusted.
+
+The application must derive and verify the digest, verify authenticated collector
+authority and signatures, set trusted local tenant context, acquire the collector
+lock in a separate statement, and read fresh authority afterward. It must insert
+the header and complete checked payload in one transaction, use
+`synchronous_commit=on`, and return a receipt only after known commit success.
+The schema permits a standalone header: the foreign key ensures payload ownership,
+while pair atomicity and digest/body agreement remain application obligations.
+A database receipt default alone does not establish durable HTTP acceptance.
+
+No cleanup is implemented. Initial deduplication headers are retained indefinitely,
+which exceeds the minimum seven-day receipt retention requirement. Payload
+processing and a bounded retention consumer are mandatory later work; there is
+no automatic expiry, queue processing, or deletion job in this migration.
+
+The existing PostgreSQL fixture additionally injects a mid-migration-3 error and
+verifies DDL, grants and ledger rollback, then upgrades to ledger versions 1–3.
+Real restricted logins exercise scoped identity reuse, joins and foreign keys,
+byte/count/version limits, default receipts, forbidden modification, and atomic
+header rollback on payload failure. NUL/control/Unicode bytes round-trip exactly;
+an actual JSONB NUL conversion is rejected. This verifies SQL storage behavior,
+not Rust submission, retry handling, crash recovery or HTTP integration.
