@@ -61,3 +61,80 @@ admin_sql < "$root/db/tests/setup.sql"
 docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
     -h /var/run/postgresql -U contour_test -d contour_fixture < "$root/db/tests/identity.sql"
 echo 'PostgreSQL identity fixture passed'
+admin_sql < "$root/db/provision_authority.sql"
+admin_sql <<'SQL'
+CREATE ROLE contour_provision_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_owner, contour_runtime TO contour_provision_test;
+SQL
+# A membership-only provisioning login cannot see every forced-RLS collector.
+if restricted_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -v VERBOSITY=verbose -h /var/run/postgresql -U contour_provision_test \
+    -d contour_fixture < "$root/db/migrations/0002_policy.sql" 2>&1); then
+    echo 'Restricted provisioning migration unexpectedly succeeded' >&2; exit 1
+fi
+if [[ "$restricted_output" != *"42501"* ]]; then
+    echo "$restricted_output" >&2
+    echo 'Restricted provisioning failed for an unexpected reason' >&2; exit 1
+fi
+admin_sql <<'SQL'
+DO $$ BEGIN
+    IF to_regclass('contour.policy_revisions') IS NOT NULL
+        OR to_regclass('contour.collector_authorization') IS NOT NULL
+        OR to_regclass('contour.source_authorization') IS NOT NULL
+        OR EXISTS (SELECT 1 FROM contour.schema_migrations WHERE version=2)
+        OR NOT has_table_privilege('contour_runtime','contour.sources','UPDATE')
+        OR (SELECT count(*) FROM contour.collectors) <> 4 THEN
+        RAISE EXCEPTION 'restricted provisioning failure left partial upgrade';
+    END IF;
+END $$;
+SQL
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0002_policy.sql" | admin_sql; then
+    echo 'Injected policy migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+DO $$ BEGIN
+    IF to_regclass('contour.policy_revisions') IS NOT NULL
+        OR to_regclass('contour.collector_authorization') IS NOT NULL
+        OR to_regclass('contour.source_authorization') IS NOT NULL
+        OR EXISTS (SELECT 1 FROM contour.schema_migrations WHERE version = 2)
+        OR NOT has_table_privilege('contour_runtime','contour.sources','UPDATE')
+        OR EXISTS (SELECT 1 FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+            WHERE c.oid='contour.collectors'::regclass
+            AND a.grantee='contour_admin'::regrole AND a.privilege_type='INSERT') THEN
+        RAISE EXCEPTION 'failed policy migration did not restore old state';
+    END IF;
+END $$;
+SQL
+admin_sql < "$root/db/migrations/0002_policy.sql"
+admin_sql <<'SQL'
+DO $$ BEGIN
+    IF (SELECT count(*) FROM contour.collectors) <> 4
+        OR (SELECT count(*) FROM contour.collector_authorization) <> 4
+        OR EXISTS (SELECT 1 FROM contour.collector_authorization
+            WHERE enabled OR active_revision IS NOT NULL OR revoked_at IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM contour.source_authorization) THEN
+        RAISE EXCEPTION 'policy backfill mismatch';
+    END IF;
+END $$;
+CREATE ROLE contour_admin_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_ingest_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_admin TO contour_admin_test;
+GRANT contour_ingestion TO contour_ingest_test;
+GRANT USAGE ON SCHEMA fixture TO contour_admin_test, contour_ingest_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_admin_test, contour_ingest_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_test -d contour_fixture < "$root/db/tests/policy.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.policy_revisions SET signed_envelope=signed_envelope','23514');
+SELECT fixture.expect_state('DELETE FROM contour.policy_revisions','23514');
+SELECT fixture.expect_state('UPDATE contour.sources SET source_nonce=source_nonce','23514');
+SELECT fixture.expect_state('DELETE FROM contour.collectors','23514');
+SQL
+python3 "$root/scripts/test-policy-concurrency.py" "$container_id"
+echo 'PostgreSQL policy authority fixture passed'
