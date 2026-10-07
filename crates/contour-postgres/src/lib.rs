@@ -1,8 +1,10 @@
-//! Checked deployment settings only; no connection or TLS connector yet.
-//! The configured socket timeout applies per address, not to total DNS/TLS/auth
-//! time. The later async connector must enforce the whole connection deadline.
+//! Checked deployment settings and owned PostgreSQL TLS transport.
+//! The async deadline covers DNS/socket/TLS/auth cooperatively; OS DNS helpers may
+//! outlive cancellation. Socket timeouts also apply separately per address.
 use std::{fmt, net::IpAddr, time::Duration};
 use tokio_postgres::{Config, config::SslMode};
+mod transport;
+pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsError {
@@ -42,7 +44,7 @@ impl DatabaseSettings {
     /// One ASCII DNS name or standard IPv4/IPv6 address, nonzero port, explicit
     /// database/user (1–63 UTF-8 bytes, no controls), password (1–4096 bytes),
     /// and deadline (1 ms–30 s). DNS terminal dots are rejected; no normalization.
-    /// Settings do not establish server identity or enforce a total deadline yet.
+    /// Use connect with explicit trust anchors to establish verified TLS transport.
     pub fn new(
         host: &str,
         port: u16,

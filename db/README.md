@@ -91,3 +91,38 @@ Waits and execution are bounded, and cleanup targets owned sessions.
 Authentication, application signature/metadata verification, ingress transactions,
 receipts, retention, queue purge and backup/restore remain unimplemented. SQL
 credential holders remain trusted: they can choose a tenant setting or hold locks.
+
+## Native TLS transport
+
+`contour-postgres` accepts checked deployment settings and an explicit PEM trust
+bundle (1–8 certificates, at most 64 KiB). It parses every certificate and rejects
+unconsumed non-whitespace input. System trust roots are disabled; TLS 1.2 is the
+minimum, with certificate/hostname verification and SNI enabled. Callers cannot
+choose plaintext, disable verification, pass a DSN/options string, or obtain a
+mutable driver configuration or raw client.
+
+Connection establishment runs under one cooperative async deadline covering DNS,
+socket connection, TLS and authentication. Per-address socket timeouts remain an
+additional bound. A Tokio runtime with I/O and timers enabled is required; a
+runtime with disabled facilities can panic inside Tokio. OS resolver work in its
+blocking pool may continue after cancellation, and a timeout cannot interrupt
+non-yielding native work. This is not a hard runtime or DNS-thread termination
+guarantee. The owned connection aborts its driver on drop; explicit close drops
+the client and waits within the deadline, then aborts on timeout. Driver cancellation
+takes effect when Tokio next polls the task. Cancellation of close preserves this
+ownership. The only public query is a fixed bounded TLS health check.
+
+`python3 scripts/test-postgres-tls.py` is the separate required live TLS fixture.
+It requires the pinned local PostgreSQL image and installed OpenSSL, creates
+ephemeral synthetic credentials/certificates, and cleans its owned containers,
+network, files and protocol listeners. The existing no-network SQL fixture is
+unchanged. Actual PostgreSQL proves trusted TLS, hostname/CA rejection and backend
+cleanup. The TLS fixture uses a dedicated bridge with IP masquerading disabled
+and a checked 127.0.0.1-only dynamic published port. It performs no externally
+directed operations; this configuration is not a comprehensive egress firewall.
+Synthetic protocol listeners separately prove refusal before credentials,
+TLS/authentication stalls, cooperative deadlines and transport EOF cleanup.
+An authenticated synthetic protocol session also stalls the fixed health query;
+unit tests cover close timeout and cancellation without detaching the driver.
+This transport does not implement authenticated application admission, authority
+fetching, ingestion transactions or receipts.
