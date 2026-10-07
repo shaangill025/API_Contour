@@ -1,0 +1,116 @@
+[
+  {
+    "id": "string",
+    "node": {
+      "kind": "string"
+    },
+    "canonical": "[\"string\"]"
+  },
+  {
+    "id": "null",
+    "node": {
+      "kind": "null"
+    },
+    "canonical": "[\"null\"]"
+  },
+  {
+    "id": "integer",
+    "node": {
+      "kind": "integer"
+    },
+    "canonical": "[\"integer\"]"
+  },
+  {
+    "id": "number",
+    "node": {
+      "kind": "number"
+    },
+    "canonical": "[\"number\"]"
+  },
+  {
+    "id": "empty_object",
+    "node": {
+      "kind": "object",
+      "fields": {},
+      "additional": null
+    },
+    "canonical": "[\"object\",[],null]"
+  },
+  {
+    "id": "empty_array",
+    "node": {
+      "kind": "array",
+      "items": {
+        "kind": "unknown",
+        "reason": "empty"
+      }
+    },
+    "canonical": "[\"array\",[\"unknown\",\"empty\"]]"
+  },
+  {
+    "id": "sort_fields",
+    "node": {
+      "kind": "object",
+      "fields": {
+        "z": {
+          "kind": "string"
+        },
+        "a": {
+          "kind": "integer"
+        }
+      },
+      "additional": null
+    },
+    "canonical": "[\"object\",[[\"a\",[\"integer\"]],[\"z\",[\"string\"]]],null]"
+  },
+  {
+    "id": "dynamic_keys",
+    "node": {
+      "kind": "object",
+      "fields": {},
+      "additional": {
+        "kind": "boolean"
+      }
+    },
+    "canonical": "[\"object\",[],[\"boolean\"]]"
+  },
+  {
+    "id": "union_order",
+    "node": {
+      "kind": "union",
+      "alternatives": [
+        {
+          "kind": "string"
+        },
+        {
+          "kind": "null"
+        }
+      ]
+    },
+    "canonical": "[\"union\",[[\"null\"],[\"string\"]]]"
+  },
+  {
+    "id": "unicode",
+    "node": {
+      "kind": "object",
+      "fields": {
+        "é": {
+          "kind": "string"
+        },
+        "a": {
+          "kind": "boolean"
+        }
+      },
+      "additional": null
+    },
+    "canonical": "[\"object\",[[\"a\",[\"boolean\"]],[\"é\",[\"string\"]]],null]"
+  },
+  {
+    "id": "partial",
+    "node": {
+      "kind": "unknown",
+      "reason": "limit"
+    },
+    "canonical": "[\"unknown\",\"limit\"]"
+  }
+]
