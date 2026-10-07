@@ -128,6 +128,7 @@ def main():
     run(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
     if "--authority" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = None

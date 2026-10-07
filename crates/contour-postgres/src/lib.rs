@@ -4,9 +4,11 @@
 use std::{fmt, net::IpAddr, time::Duration};
 use tokio_postgres::{Config, config::SslMode};
 mod authority;
+mod submit;
 mod transaction;
 mod transport;
 pub use authority::AuthorityError;
+pub use submit::{DurableReceipt, SubmitError};
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

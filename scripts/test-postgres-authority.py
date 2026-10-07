@@ -5,6 +5,7 @@ import datetime
 import json
 from pathlib import Path
 import queue
+import runpy
 import subprocess
 import threading
 import time
@@ -48,10 +49,10 @@ def run_cases(container, sql, probe, port, directory, environment):
         encode = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
         return json.dumps(dict(key_id='fixture', signature_profile='ed25519-v1', payload_base64url=encode(payload), signature_base64url=encode((directory / 'signature').read_bytes())), separators=(',', ':')).encode()
 
-    def setup(name, change=None, current=2, history=(1,), tenant=TENANT, padded=False):
+    def setup(name, change=None, current=2, history=(1,), tenant=TENANT, padded=False, collector_id=None):
         nonlocal counter
         counter += 1
-        collector = '00000000-0000-0000-0000-%012x' % counter
+        collector = collector_id or '00000000-0000-0000-0000-%012x' % counter
         source = collector
         micros = int(execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;'))
         now = datetime.datetime.fromtimestamp(micros // 1000000, datetime.timezone.utc) + datetime.timedelta(microseconds=micros % 1000000)
@@ -248,5 +249,7 @@ def run_cases(container, sql, probe, port, directory, environment):
         check(split)
     print('Restricted TLS authority scope/signature/revision/source/all-record/16MiB gate and split assertions passed')
     print('Authority lock-wait timeout/cancel invalidation, live-runtime cleanup, fresh disable and expiry refresh passed')
+    submit_probe = str(Path(probe).with_name('submit_probe'))
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-submit.py'))['run_cases'](container, execute, setup, submit_probe, port, directory, environment)
 if __name__ == '__main__':
     subprocess.run(['python3', str(ROOT / 'scripts/test-postgres-tls.py'), '--authority'], check=True)
