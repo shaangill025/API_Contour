@@ -25,5 +25,20 @@ Wire input and output each have a separate 65,536-byte limit. Wire unions requir
 unknown properties, observed values, malformed input and trailing content are
 rejected with static errors. Names still require caller policy approval.
 
-Raw payload extraction, policy enforcement, collection, persistence, WASM and FFI remain
-unimplemented. This slice is not a complete R1 product.
+Local JSON extraction uses borrowed raw tokens and explicit static-name/child
+policies. Explicit denied paths take precedence over dynamic inspection.
+Default policy exports no names. Dynamic keys become additional-value
+structure only. Numbers are classified exactly, without floating-point conversion.
+The profile bounds inspected bodies to 64 KiB, all inspected object keys to 256,
+array items to 64, numeric tokens to 256 bytes, and node depth to 32.
+
+Skipped policy subtrees yield partial/permission evidence; they have not been
+duplicate-validated. Detected malformed input or decoded duplicate keys yields
+unavailable/malformed. Any resource limit conservatively replaces the whole
+result with unknown/limit and partial status, including canonical or wire output
+overflow. A 2 ms cooperative deadline is
+checked around bounded serde scans; it is not a hard interruption guarantee.
+Raw tokens and decoded values exist only transiently and are never returned.
+
+Capture authorization, policy signature/lease enforcement, collection,
+persistence, WASM and FFI remain unimplemented. This is not a complete R1 product.

@@ -1,7 +1,9 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
 use std::fmt;
+mod extract;
 mod wire;
+pub use extract::{Completeness, ExtractionPolicy, Observation, ObservationReason, extract_json};
 
 pub const MAX_NAME_SCALARS: usize = 64;
 pub const MAX_FIELDS: usize = 256;
