@@ -1,0 +1,65 @@
+[
+  {
+    "id": "P12-01",
+    "phase": "P12",
+    "title": "Implement catalog and import export APIs",
+    "requirements": [
+      "R-GOVERNANCE"
+    ],
+    "depends_on": [
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04"
+    ],
+    "acceptance": [
+      "AT-P12-01"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement catalog and import export APIs with executable tests and versioned evidence"
+  },
+  {
+    "id": "P12-02",
+    "phase": "P12",
+    "title": "Implement review UI",
+    "requirements": [
+      "R-UI"
+    ],
+    "depends_on": [
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P12-01"
+    ],
+    "acceptance": [
+      "AT-P12-02",
+      "AT-UI-REVIEW-RELOAD"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement review UI with executable tests and versioned evidence"
+  },
+  {
+    "id": "P12-03",
+    "phase": "P12",
+    "title": "Implement health and audit views",
+    "requirements": [
+      "R-OPERATIONS"
+    ],
+    "depends_on": [
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P12-01"
+    ],
+    "acceptance": [
+      "AT-P12-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement health and audit views with executable tests and versioned evidence"
+  }
+]
