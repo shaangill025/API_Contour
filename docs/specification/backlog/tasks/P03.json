@@ -1,0 +1,83 @@
+[
+  {
+    "id": "P03-01",
+    "phase": "P03",
+    "title": "Implement Envoy integration",
+    "requirements": [
+      "R-PASSIVE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P03-01",
+      "AT-CAP-001",
+      "AT-CAP-002",
+      "AT-FAMILY-GATEWAY"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement Envoy integration with executable tests and versioned evidence"
+  },
+  {
+    "id": "P03-02",
+    "phase": "P03",
+    "title": "Implement NGINX integration",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P03-02",
+      "AT-CAP-003"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement NGINX integration with executable tests and versioned evidence"
+  },
+  {
+    "id": "P03-03",
+    "phase": "P03",
+    "title": "Validate gateway failure behavior",
+    "requirements": [
+      "R-PERFORMANCE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P03-01",
+      "P03-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P03-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate gateway failure behavior with executable tests and versioned evidence"
+  }
+]

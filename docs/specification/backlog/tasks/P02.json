@@ -1,0 +1,90 @@
+[
+  {
+    "id": "P02-01",
+    "phase": "P02",
+    "title": "Resolve operation identity",
+    "requirements": [
+      "R-IDENTITY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P02-01"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Resolve operation identity with executable tests and versioned evidence"
+  },
+  {
+    "id": "P02-02",
+    "phase": "P02",
+    "title": "Infer variants and evidence",
+    "requirements": [
+      "R-CANONICAL",
+      "R-COVERAGE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-01"
+    ],
+    "acceptance": [
+      "AT-P02-02"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Infer variants and evidence with executable tests and versioned evidence"
+  },
+  {
+    "id": "P02-03",
+    "phase": "P02",
+    "title": "Compare declared and observed contracts",
+    "requirements": [
+      "R-GOVERNANCE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-02"
+    ],
+    "acceptance": [
+      "AT-P02-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Compare declared and observed contracts with executable tests and versioned evidence"
+  },
+  {
+    "id": "P02-04",
+    "phase": "P02",
+    "title": "Implement approval transactions",
+    "requirements": [
+      "R-GOVERNANCE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-03"
+    ],
+    "acceptance": [
+      "AT-P02-04"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement approval transactions with executable tests and versioned evidence"
+  }
+]

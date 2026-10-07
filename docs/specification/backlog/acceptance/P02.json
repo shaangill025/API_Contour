@@ -1,0 +1,38 @@
+[
+  {
+    "id": "AT-P02-01",
+    "task": "P02-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Observe equal paths from different services and deployments",
+    "expected": "Services stay separate; deployment-aware comparison preserves stable operation identity.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P02-02",
+    "task": "P02-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Mix complete, sampled, truncated and duplicate source observations",
+    "expected": "Variants retain unknowns and per-source evidence; no false absence or unique-request total is inferred.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P02-03",
+    "task": "P02-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Change types, requiredness, nullability and request/response direction",
+    "expected": "Return typed differences and inconclusive results where evidence cannot decide compatibility.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P02-04",
+    "task": "P02-04",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Two reviewers approve against the same expected revision",
+    "expected": "Only one update succeeds; the other gets conflict; exact versions and audit association persist.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  }
+]
