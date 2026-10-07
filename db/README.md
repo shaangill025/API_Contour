@@ -169,6 +169,15 @@ lease/record expiry during loading. Synthetic TLS also exercises cancellation
 while BEGIN is pending. Direct cancellation during ROLLBACK is inspected through
 guard ownership but is not deterministically executed by this fixture.
 
+Transaction setup, cancellation ownership, context cleanup, absolute deadline
+checks and exact server-time conversion are private shared helpers. Scoped current
+revision lookup and row policy signature verification are also shared internally;
+they expose no public transaction or reusable authorization token. The existing
+validation API retains its full aggregate metadata preflight before any envelope
+fetch. Checked batches expose the same versioned digest as either 32 bytes or the
+original lowercase hex string. These helpers prepare atomic submission but do not
+implement a public submit method or prove commit outcomes or restart recovery.
+
 ## Durable inbox storage
 
 `0003_ingestion.sql` creates immutable `ingestion_batches` headers and

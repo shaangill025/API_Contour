@@ -1,4 +1,10 @@
-use crate::ConnectedDatabase;
+use crate::{
+    ConnectedDatabase,
+    transaction::{
+        CancellationGuard, begin, check_deadline, clock, configure_context, database_error,
+        empty_context,
+    },
+};
 use contour_core::{
     AdmissionInputs, Batch, PolicyKeys, SourceAssignment, UnsignedInteger, VerifiedPolicy,
     validate_admission,
@@ -9,7 +15,7 @@ use std::{
 };
 use time::OffsetDateTime;
 use tokio::time::{Instant, timeout_at};
-use tokio_postgres::{Error, IsolationLevel, Transaction};
+use tokio_postgres::Transaction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorityError {
@@ -32,18 +38,6 @@ impl fmt::Display for AuthorityError {
 }
 impl std::error::Error for AuthorityError {}
 
-// Armed before BEGIN. Transaction locals drop first; queued rollback is not enough.
-struct CancellationGuard<'a> {
-    connection: &'a mut ConnectedDatabase,
-    confirmed: bool,
-}
-impl Drop for CancellationGuard<'_> {
-    fn drop(&mut self) {
-        if !self.confirmed {
-            self.connection.invalidate();
-        }
-    }
-}
 struct LoadedAuthority {
     policies: BTreeMap<u64, VerifiedPolicy>,
     current: u64,
@@ -89,53 +83,31 @@ impl ConnectedDatabase {
             return Err(AuthorityError::Invalidated);
         }
         let deadline = Instant::now() + self.deadline;
-        let mut guard = CancellationGuard {
-            connection: self,
-            confirmed: false,
-        };
+        let mut guard = CancellationGuard::arm(self);
         let work = async {
             let client = guard
                 .connection
                 .client
                 .as_mut()
                 .ok_or(AuthorityError::Invalidated)?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(IsolationLevel::ReadCommitted)
-                .start()
-                .await
-                .map_err(database_error)?;
+            let transaction = begin(client).await?;
             let result = async {
-                let milliseconds = guard.connection.deadline.as_millis().to_string();
-                transaction.query_one("SELECT set_config('apicontour.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true), set_config('idle_in_transaction_session_timeout',$2,true)", &[&expected[0],&milliseconds]).await.map_err(database_error)?;
-                // A separate statement: the next authority read gets a fresh snapshot.
-                transaction.query_one("SELECT contour.lock_collector($1::text::uuid,$2::text::uuid)",&[&expected[0],&expected[1]]).await.map_err(database_error)?;
+                configure_context(&transaction, expected, guard.connection.deadline).await?;
                 let initial = clock(&transaction).await?;
-                let loaded = load(&transaction,batch,expected,keys,initial,deadline).await?;
-                loaded.validate(batch,expected,clock(&transaction).await?)?;
+                let loaded = load(&transaction, batch, expected, keys, initial, deadline).await?;
+                loaded.validate(batch, expected, clock(&transaction).await?)?;
                 check_deadline(deadline)?;
                 // Refresh every time-sensitive admission rule again before success.
-                loaded.validate(batch,expected,clock(&transaction).await?)?;
+                loaded.validate(batch, expected, clock(&transaction).await?)?;
                 check_deadline(deadline)
-            }.await;
+            }
+            .await;
             let rollback = transaction.rollback().await.map_err(database_error);
             rollback?;
-            let context = client
-                .query_one(
-                    "SELECT nullif(current_setting('apicontour.tenant_id',true),'') IS NULL",
-                    &[],
-                )
-                .await
-                .map_err(database_error)?;
-            if !context
-                .try_get::<_, bool>(0)
-                .map_err(|_| AuthorityError::Database)?
-            {
-                return Err(AuthorityError::Invalidated);
-            }
+            empty_context(client).await?;
             check_deadline(deadline)?;
             if result != Err(AuthorityError::Deadline) {
-                guard.confirmed = true;
+                guard.confirm();
             }
             result
         };
@@ -144,33 +116,6 @@ impl ConnectedDatabase {
             Err(_) => Err(AuthorityError::Deadline),
         }
     }
-}
-fn database_error(error: Error) -> AuthorityError {
-    match error.code().map(|code| code.code()) {
-        Some("57014" | "55P03" | "25P03") => AuthorityError::Deadline,
-        _ => AuthorityError::Database,
-    }
-}
-fn check_deadline(deadline: Instant) -> Result<(), AuthorityError> {
-    if Instant::now() >= deadline {
-        Err(AuthorityError::Deadline)
-    } else {
-        Ok(())
-    }
-}
-async fn clock(transaction: &Transaction<'_>) -> Result<OffsetDateTime, AuthorityError> {
-    let row = transaction
-        .query_one(
-            "SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint",
-            &[],
-        )
-        .await
-        .map_err(database_error)?;
-    let micros: i64 = row.try_get(0).map_err(|_| AuthorityError::Database)?;
-    let nanos = i128::from(micros)
-        .checked_mul(1000)
-        .ok_or(AuthorityError::Database)?;
-    OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| AuthorityError::Database)
 }
 fn revision(text: &str) -> Result<u64, AuthorityError> {
     UnsignedInteger::parse(text)
@@ -191,15 +136,11 @@ fn budget(sizes: impl IntoIterator<Item = usize>) -> Result<(), AuthorityError> 
     }
     Ok(())
 }
-// Private owned loader: a future inbox consumer must call it under its own held lock.
-async fn load(
+// Scoped database state only; a returned revision is not signed authorization.
+pub(crate) async fn current_revision(
     transaction: &Transaction<'_>,
-    batch: &Batch,
     expected: [&str; 2],
-    keys: &PolicyKeys,
-    initial: OffsetDateTime,
-    deadline: Instant,
-) -> Result<LoadedAuthority, AuthorityError> {
+) -> Result<u64, AuthorityError> {
     let row = transaction.query_opt("SELECT active_revision::numeric(20,0)::text,enabled,revoked_at IS NOT NULL FROM contour.collector_authorization WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid",&[&expected[0],&expected[1]]).await.map_err(database_error)?.ok_or(AuthorityError::Missing)?;
     if row
         .try_get::<_, bool>(2)
@@ -218,6 +159,36 @@ async fn load(
             .map_err(|_| AuthorityError::Database)?
             .ok_or(AuthorityError::Missing)?,
     )?;
+    Ok(current)
+}
+// Callers still apply enabled/current-capture and record-scope checks after verification.
+pub(crate) fn verify_policy(
+    bytes: &[u8],
+    keys: &PolicyKeys,
+    expected: [&str; 2],
+    row_revision: u64,
+    at: OffsetDateTime,
+    deadline: Instant,
+) -> Result<VerifiedPolicy, AuthorityError> {
+    check_deadline(deadline)?;
+    let policy = VerifiedPolicy::from_signed_json(bytes, keys, expected[0], expected[1], at)
+        .map_err(|_| AuthorityError::Policy)?;
+    check_deadline(deadline)?;
+    if policy.revision() != row_revision {
+        return Err(AuthorityError::Policy);
+    }
+    Ok(policy)
+}
+// Private owned loader: a future inbox consumer must call it under its own held lock.
+async fn load(
+    transaction: &Transaction<'_>,
+    batch: &Batch,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    initial: OffsetDateTime,
+    deadline: Instant,
+) -> Result<LoadedAuthority, AuthorityError> {
+    let current = current_revision(transaction, expected).await?;
     let mut requested = BTreeMap::new();
     let mut sources = BTreeSet::new();
     for request in batch.authority_requests() {
@@ -254,10 +225,8 @@ async fn load(
         )?;
         let at = *requested.get(&row_revision).ok_or(AuthorityError::Policy)?;
         let bytes: &[u8] = row.try_get(1).map_err(|_| AuthorityError::Database)?;
-        let policy = VerifiedPolicy::from_signed_json(bytes, keys, expected[0], expected[1], at)
-            .map_err(|_| AuthorityError::Policy)?;
-        check_deadline(deadline)?;
-        if policy.revision() != row_revision || policies.insert(row_revision, policy).is_some() {
+        let policy = verify_policy(bytes, keys, expected, row_revision, at, deadline)?;
+        if policies.insert(row_revision, policy).is_some() {
             return Err(AuthorityError::Policy);
         }
     }
@@ -301,6 +270,40 @@ async fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn policy_helper_enforces_deadline_and_static_failures() {
+        // Public verification key from RFC 8032, section 7.1, test 1.
+        let public = [
+            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64,
+            0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68,
+            0xf7, 0x07, 0x51, 0x1a,
+        ];
+        let keys = PolicyKeys::new(&[("unit", public)]).unwrap();
+        let identity = ["00000000-0000-0000-0000-000000000001"; 2];
+        assert_eq!(
+            verify_policy(
+                b"SYNTHETIC_SECRET",
+                &keys,
+                identity,
+                1,
+                OffsetDateTime::UNIX_EPOCH,
+                Instant::now()
+            )
+            .unwrap_err(),
+            AuthorityError::Deadline
+        );
+        let error = verify_policy(
+            b"SYNTHETIC_SECRET",
+            &keys,
+            identity,
+            1,
+            OffsetDateTime::UNIX_EPOCH,
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error, AuthorityError::Policy);
+        assert_eq!(error.to_string(), "Policy");
+    }
     #[test]
     fn aggregate_and_revision_boundaries() {
         assert_eq!(budget([1_048_576; 16]), Ok(()));

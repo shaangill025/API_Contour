@@ -4,6 +4,7 @@
 use std::{fmt, net::IpAddr, time::Duration};
 use tokio_postgres::{Config, config::SslMode};
 mod authority;
+mod transaction;
 mod transport;
 pub use authority::AuthorityError;
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};

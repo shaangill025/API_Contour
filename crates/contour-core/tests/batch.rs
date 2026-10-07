@@ -36,6 +36,37 @@ fn valid() -> Value {
 fn decode(value: &Value) -> Result<Batch, BatchError> {
     Batch::from_wire_json(&serde_json::to_vec(value).unwrap())
 }
+#[test]
+fn binary_digest_matches_independent_vector_and_existing_hex() {
+    let expected: [u8; 32] = [
+        0xb2, 0x55, 0xb4, 0x0f, 0x14, 0x73, 0x89, 0x6f, 0xb7, 0x64, 0xa4, 0x1f, 0x79, 0x5b, 0xe9,
+        0x43, 0xd8, 0x7d, 0xa2, 0x54, 0x7f, 0xed, 0x5e, 0xa8, 0xbd, 0x7d, 0x68, 0x77, 0xb5, 0xa4,
+        0xfa, 0x0b,
+    ];
+    let batch = decode(&valid()).unwrap();
+    assert_eq!(batch.request_digest_bytes().unwrap(), expected);
+    let bytes_hex = batch
+        .request_digest_bytes()
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(bytes_hex, batch.request_digest().unwrap());
+    let pretty = serde_json::to_vec_pretty(&valid()).unwrap();
+    assert_eq!(
+        Batch::from_wire_json(&pretty)
+            .unwrap()
+            .request_digest_bytes()
+            .unwrap(),
+        expected
+    );
+    let mut changed = valid();
+    changed["records"][0]["count"] = json!(13);
+    assert_ne!(
+        decode(&changed).unwrap().request_digest_bytes().unwrap(),
+        expected
+    );
+}
 
 #[test]
 fn committed_batch_fixtures() {

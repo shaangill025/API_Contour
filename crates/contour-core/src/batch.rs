@@ -65,13 +65,18 @@ impl Batch {
         encode(&self.envelope)
     }
     pub fn request_digest(&self) -> Result<String, BatchError> {
+        let digest: sha2::digest::Output<Sha256> = self.request_digest_bytes()?.into();
+        Ok(format!("{digest:x}"))
+    }
+    /// Exact domain-separated digest bytes for persistence; same format as the hex API.
+    pub fn request_digest_bytes(&self) -> Result<[u8; 32], BatchError> {
         let mut value = serde_json::to_value(&self.envelope).map_err(|_| BatchError::Invalid)?;
         value.sort_all_objects();
         let bytes = encode(&value)?;
         let mut digest = Sha256::new();
         digest.update(b"apicontour/batch/1\n");
         digest.update(bytes);
-        Ok(format!("{:x}", digest.finalize()))
+        Ok(digest.finalize().into())
     }
     pub fn validate_at(&self, now: OffsetDateTime) -> Result<(), BatchError> {
         let age = self.envelope.created_at.instant() - now;
