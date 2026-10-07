@@ -1,0 +1,57 @@
+# Privacy and security
+
+## Collection policy
+
+Capture starts disabled. A collector must have an enrolled identity and a valid signed policy. Policy fields include tenant, collector group, version, issue and expiry times, allowed services, enabled techniques, allowed structural names, denied paths, inspection limits, queue limits and retention.
+
+An expired or invalid policy stops new capture. Revocation stops collection and sending. Local queued records remain subject to policy retention and purge rules. A policy change that narrows collection must purge pending records that no longer comply. An old permissive policy cannot resume after a new version is accepted.
+
+Policy leases last at most 15 minutes. Renew normally every 5 minutes. An offline collector can capture only until its current lease expires; immediate offline revocation is impossible. The server rejects revoked identities immediately upon its revocation transaction. Customer-facing status must distinguish local lease exposure from server admission.
+
+Persist the highest accepted policy revision with the collector identity in protected local state. This state contains no observations. Where trustworthy persistent state is unavailable, restart requires an online policy refresh before capture. After restoring a local snapshot, renew online before capture. Reject lower revisions and signature profiles not installed in the trusted release configuration. Do not trust an algorithm selected solely by a received policy.
+
+Before committing ingestion, the server resolves the active policy, source and workload assignments from authenticated identity. The submitted revision must exist for that identity. The historical submitted revision must have been valid when each record was queued. The collector must also hold a currently valid enabled policy when sending. Validate records against both the historical revision and the current policy; a narrower current scope wins. An expired historical lease alone does not discard an otherwise admissible queued record, but expired or revoked current authorization rejects the whole batch before persistence. Old records are not grandfathered into a broader scope.
+
+The server independently checks field/header/query names against approved names, route literals against approved_route_segments, parser profile, technique, scope and resource limits. Routes consist only of approved literal segments and fixed placeholders such as {segment} or {id}; no arbitrary URL, query, fragment or authority is accepted. Unknown local segments become placeholders. Syntax checks alone are insufficient. Denied templates take precedence. Rejection logs contain safe codes and IDs only.
+
+Use a reviewed signature implementation and key rotation procedure. Exact library and algorithm pins are preflight outputs. Do not create custom cryptography. Collector enrollment uses a short-lived, single-use bootstrap credential delivered through the customer's secret-management process. The platform issues a scoped client identity. No bootstrap credential belongs in a package or source file.
+
+## Local sanitization
+
+1. Check the operation against policy before body inspection.
+2. Normalize the route from approved templates or safe local rules.
+3. Remove payload values and disallowed metadata.
+4. Convert approved content into structural nodes.
+5. Apply size, depth and field-count limits.
+6. Queue only the sanitized result.
+
+Field names, dynamic keys, URL segments, hostnames, topic names and error messages can contain secrets. Use approved static names or placeholders. Replace dynamic property names with a map node. Never export a value hash as a substitute for removing the value. Do not export enums, examples, defaults, descriptions or literal GraphQL arguments from observed traffic.
+
+Strip query values, user information and fragments from URLs. Store approved query parameter names only. Keep approved header names and coarse structural presence only; never header values. Routes with unresolved segments use placeholders and an uncertain-route flag. Untrusted identifiers must not become metric labels.
+
+For imported OpenAPI, AsyncAPI, GraphQL and protobuf definitions, remove examples, defaults, extensions and comments that can carry values before persistence. Approved contract constraints may be represented only by the separately reviewed declared-contract model. Observed structure must never copy those values.
+
+Raw data may exist transiently inside the original process or local bounded parser memory. Do not write it to spool files, temporary files, logs, traces, crash dumps, telemetry, database rows, backups or support bundles. Minimize copies and lifetime. Do not promise guaranteed memory erasure for every native runtime.
+
+## Access boundaries
+
+Authenticate collector traffic with mTLS and server certificate validation. Bind tenant and collector identity to credentials; reject conflicting body fields. Authenticate users through OIDC. Validate issuer, audience, expiry and authorization on every operation. Use scoped service identities for CI.
+
+Roles are viewer, service owner, policy administrator, operator and security reviewer. Permissions are additive only within assigned projects. Approving contracts requires service-owner permission. Changing capture scope requires policy-administrator permission. Audit both actions. Infrastructure administration does not automatically grant application approval rights.
+
+PostgreSQL application roles must not own tables, be superusers or have BYPASSRLS. Use tenant-scoped keys and row policies. Test queries, workers, imports, exports, backups and connection-pool reuse for isolation. See [PostgreSQL row security](https://www.postgresql.org/docs/current/ddl-rowsecurity.html).
+
+## Threat cases and controls
+
+| Threat | Required control and proof |
+|---|---|
+| Malicious body or schema | Bounded parsers; no XML external entities; no remote schema reference fetch; fuzz tests |
+| Collector impersonation | Scoped identities, revocation and replay tests |
+| Cross-tenant access | Authorization and database isolation tests with two tenants |
+| Value leakage | Seed synthetic secrets into all input surfaces; inspect every persistent and export sink |
+| Queue exhaustion | Hard quotas, drop counters and sustained overload tests |
+| Malicious import URL or webhook | No remote reference resolution; administrator-approved destinations and restricted egress |
+| Compromised collector | Ingress validation, per-collector quotas and quarantine; do not treat sanitization claims as trusted proof |
+| UI injection | Treat field names and imports as data; escape rendering; restrictive content policy |
+
+Data described as structure can remain confidential. Apply access controls and encryption to structural records too. Sanitization tests must include metadata, not only bodies. [OpenTelemetry sensitive-data guidance](https://opentelemetry.io/docs/security/handling-sensitive-data/) supports local minimization as a general practice; it does not certify APIContour.
