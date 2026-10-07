@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 tokio-postgres = "=0.7.18"
+tokio = { version = "=1.53.2", features = ["rt", "time", "net"] }
+native-tls = "=0.2.18"
+postgres-native-tls = { version = "=0.5.3", features = ["runtime"] }
