@@ -38,3 +38,16 @@ jobs:
         run: cargo +1.88.0 test --workspace --locked --offline
       - name: Build native workspace
         run: cargo +1.88.0 build --workspace --locked --offline
+
+  postgres:
+    name: PostgreSQL 16 identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch pinned database fixture
+        run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Test identity and tenant isolation
+        run: bash scripts/test-postgres.sh
