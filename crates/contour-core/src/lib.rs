@@ -1,6 +1,8 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
 use std::fmt;
+mod batch;
+pub use batch::{Batch, BatchError};
 mod extract;
 mod scalar;
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};

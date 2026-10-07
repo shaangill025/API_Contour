@@ -28,6 +28,24 @@ Each record has immutable queued_at and expires_at timestamps assigned when it f
 
 A batch ID is a random UUID created once. Retries preserve ID and exact content. The batch identity is scoped by tenant and collector. Same ID with different canonical content returns conflict. The server uses a server-computed canonical request digest, excluding no submitted semantic field. JSON key order is not a content change.
 
+The native v1 request digest is lowercase hexadecimal SHA-256 over UTF-8
+`apicontour/batch/1\n` followed by compact normalized JSON. Sort every object's
+keys by UTF-8 bytes, including structural field maps. Preserve every array's
+order and original timestamp text. Normalize accepted integral numbers to their
+exact unsigned decimal values and structures to their normalized wire form.
+Use JSON quote/backslash escapes, short escapes for backspace, tab, newline,
+form feed and carriage return, lowercase `\u00xx` for other controls, and leave
+other Unicode unchanged. Include every accepted field, including explicit nulls;
+exclude nothing. Whitespace and object key order do not change the digest.
+Equivalent timestamp instants with different original spellings do change it.
+Input and normalized output are independently bounded to 1 MiB. A digest proves
+neither authorization nor durable acceptance.
+
+Native consistency validation rejects complete observations whose structure
+contains unknown/unsupported, unknown/limit, unknown/malformed or
+unknown/encrypted at any depth. Unknown/empty is allowed for empty arrays.
+Skipped or incomplete content must remain partial or unavailable with a reason.
+
 Delivery is at least once within configured limits. There is no lossless guarantee. Server deduplication prevents retry-induced double counting. The collector cannot delete a batch based only on a TCP success or an uncommitted HTTP response.
 
 The server returns 200 only after durable inbox commit. Response fields are batch_id, status (accepted or duplicate), receipt_id and accepted_at. A worker can process later. An acknowledged inbox must be recoverable under the selected database recovery profile.

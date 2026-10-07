@@ -6,7 +6,7 @@ versioned domain-separated SHA-256 fingerprints. It stores field names and kinds
 values. Callers must approve names through policy before constructing objects;
 structural validation does not grant policy authorization.
 
-Requires Rust 1.88 or later. Dependencies are pinned serde, serde_json and sha2.
+Requires Rust 1.88 or later. Dependencies are pinned serde, serde_json, sha2 and time.
 
 ```sh
 cargo test --workspace --locked --offline
@@ -39,6 +39,11 @@ result with unknown/limit and partial status, including canonical or wire output
 overflow. A 2 ms cooperative deadline is
 checked around bounded serde scans; it is not a hard interruption guarantee.
 Raw tokens and decoded values exist only transiently and are never returned.
+
+Native sanitized batches have strict bounded decoding, exact metadata integers,
+checked timestamps, consistency and supplied-clock expiry checks, and a versioned
+canonical request digest. Batch validation checks syntax and consistency; names,
+routes, identities and capture scope still require independent policy admission.
 
 Capture authorization, policy signature/lease enforcement, collection,
 persistence, WASM and FFI remain unimplemented. This is not a complete R1 product.
