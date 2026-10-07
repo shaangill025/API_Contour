@@ -1,0 +1,40 @@
+name: Native checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Rust 1.88 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust tools
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked dependencies
+        run: cargo +1.88.0 fetch --locked
+      - name: Check formatting
+        run: cargo +1.88.0 fmt --all -- --check
+      - name: Check lint
+        run: cargo +1.88.0 clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Run native tests
+        run: cargo +1.88.0 test --workspace --locked --offline
+      - name: Build native workspace
+        run: cargo +1.88.0 build --workspace --locked --offline
