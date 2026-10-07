@@ -77,7 +77,7 @@ pub enum TlsVersion {
 pub struct ConnectedDatabase {
     pub(crate) client: Option<Client>,
     driver: Option<JoinHandle<Result<(), tokio_postgres::Error>>>,
-    deadline: Duration,
+    pub(crate) deadline: Duration,
 }
 impl fmt::Debug for ConnectedDatabase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -101,6 +101,12 @@ impl DatabaseSettings {
     }
 }
 impl ConnectedDatabase {
+    pub(crate) fn invalidate(&mut self) {
+        self.client.take();
+        if let Some(driver) = &self.driver {
+            driver.abort();
+        }
+    }
     /// Fixed health query proves the actual PostgreSQL session negotiated TLS.
     pub async fn health(&self) -> Result<TlsVersion, TransportError> {
         let client = self.client.as_ref().ok_or(TransportError::Shutdown)?;

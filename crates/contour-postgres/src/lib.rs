@@ -3,7 +3,9 @@
 //! outlive cancellation. Socket timeouts also apply separately per address.
 use std::{fmt, net::IpAddr, time::Duration};
 use tokio_postgres::{Config, config::SslMode};
+mod authority;
 mod transport;
+pub use authority::AuthorityError;
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

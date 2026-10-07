@@ -128,8 +128,10 @@ dependencies = [
 name = "contour-postgres"
 version = "0.1.0"
 dependencies = [
+ "contour-core",
  "native-tls",
  "postgres-native-tls",
+ "time",
  "tokio",
  "tokio-postgres",
 ]

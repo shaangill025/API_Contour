@@ -27,6 +27,23 @@ impl std::error::Error for BatchError {}
 pub struct Batch {
     envelope: Envelope,
 }
+/// Minimal immutable authority lookup projection from an already checked batch.
+pub struct AuthorityRequest<'a> {
+    source_id: &'a str,
+    revision: u64,
+    queued_at: OffsetDateTime,
+}
+impl AuthorityRequest<'_> {
+    pub fn source_id(&self) -> &str {
+        self.source_id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn queued_at(&self) -> OffsetDateTime {
+        self.queued_at
+    }
+}
 impl fmt::Debug for Batch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Batch")
@@ -82,6 +99,17 @@ impl Batch {
     }
     pub fn record_count(&self) -> usize {
         self.envelope.records.0.len()
+    }
+    pub fn authority_requests(&self) -> impl ExactSizeIterator<Item = AuthorityRequest<'_>> {
+        self.envelope
+            .records
+            .0
+            .iter()
+            .map(|record| AuthorityRequest {
+                source_id: &record.source_id,
+                revision: record.policy_revision.get(),
+                queued_at: record.queued_at.instant(),
+            })
     }
     pub(crate) fn records(&self) -> &[Record] {
         &self.envelope.records.0

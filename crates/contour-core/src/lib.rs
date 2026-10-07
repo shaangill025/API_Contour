@@ -4,7 +4,7 @@ use std::fmt;
 mod admission;
 pub use admission::{AdmissionError, AdmissionInputs, SourceAssignment, validate_admission};
 mod batch;
-pub use batch::{Batch, BatchError};
+pub use batch::{AuthorityRequest, Batch, BatchError};
 mod extract;
 mod policy;
 mod scalar;

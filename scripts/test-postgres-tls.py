@@ -2,6 +2,7 @@
 import json
 import os
 import queue
+import runpy
 from pathlib import Path
 import secrets
 import shutil
@@ -9,6 +10,7 @@ import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -61,7 +63,7 @@ class ProtocolServer:
                 if exact(stream, 8) != SSL_REQUEST:
                     raise AssertionError("unexpected SSL request")
                 stream.sendall(b"N" if self.mode == "refusal" else b"S")
-                if self.mode in ["auth", "health"]:
+                if self.mode in ["auth", "health", "begin"]:
                     stream = self.context.wrap_socket(stream, server_side=True)
                     self.connection = stream
                     length = struct.unpack("!I", exact(stream, 4))[0]
@@ -70,11 +72,15 @@ class ProtocolServer:
                     startup = exact(stream, length-4)
                     if startup[:4] != struct.pack("!I", 196608):
                         raise AssertionError("unexpected startup version")
-                    if self.mode == "health":
+                    if self.mode in ["health", "begin"]:
                         # Synthetic AuthenticationOk + ReadyForQuery, then no query reply.
                         stream.sendall(b"R"+struct.pack("!II", 8, 0)+b"Z"+struct.pack("!I", 5)+b"I")
-                        if exact(stream, 1) != b"P":
-                            raise AssertionError("fixed health query never began")
+                        if exact(stream, 1) != (b"P" if self.mode=="health" else b"Q"):
+                            raise AssertionError("expected query never began")
+                        if self.mode=="begin":
+                            length=struct.unpack("!I",exact(stream,4))[0]
+                            if not 4<length<8192 or not exact(stream,length-4).startswith(b"START TRANSACTION"):
+                                raise AssertionError("expected BEGIN never began")
                         while stream.recv(8192):
                             pass
                         stream.close()
@@ -120,6 +126,8 @@ def main():
             raise RuntimeError("required fixture tool missing")
     run(["docker", "image", "inspect", IMAGE])  # Never download images here.
     run(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
+    if "--authority" in sys.argv:
+        run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = None
@@ -212,6 +220,33 @@ def main():
             check("localhost", port, "untrusted.crt", "Connection")
             check("127.0.0.1", port, "ca.crt", "Connection")
             print("Actual PostgreSQL trusted CA, TLS health, bad CA, wrong hostname and backend cleanup passed")
+            if "--authority" in sys.argv:
+                authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
+                runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment)
+                server = ProtocolServer("begin", directory)
+                servers.append(server)
+                last = json.loads((directory/"batch.json").read_text())
+                process = subprocess.Popen([authority_probe,str(server.port),str(directory/"ca.crt"),str(directory/"signer.raw"),str(directory/"batch.json"),"Cancel",last["tenant_id"],last["collector_id"],"5000"],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
+                marker = queue.Queue()
+                reader = threading.Thread(target=lambda: marker.put(process.stdout.readline()), daemon=True)
+                reader.start()
+                try:
+                    if marker.get(timeout=12).strip() != "Invalidated":
+                        raise AssertionError("BEGIN cancellation did not invalidate")
+                    server.finish()
+                    if process.poll() is not None:
+                        raise AssertionError("BEGIN probe exited before EOF proof")
+                    out, errors = process.communicate(input="\n", timeout=3)
+                    if process.returncode or out or errors:
+                        raise AssertionError("unsafe BEGIN probe exit")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=3)
+                    reader.join(2)
+                    for pipe in [process.stdin, process.stdout, process.stderr]:
+                        pipe.close()
+                print("Synthetic BEGIN cancellation invalidation and EOF while runtime alive passed")
             for mode in ["refusal", "tls", "auth", "health"]:
                 server = ProtocolServer(mode, directory)
                 servers.append(server)

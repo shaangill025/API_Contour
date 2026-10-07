@@ -41,11 +41,11 @@ jobs:
       - name: Fetch pinned TLS database fixture
         if: runner.os == 'Linux'
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
-      - name: Test verified PostgreSQL TLS and transport failures
+      - name: Test PostgreSQL TLS, transport failures and authority validation
         if: runner.os == 'Linux'
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
-        run: python3 scripts/test-postgres-tls.py
+        run: python3 scripts/test-postgres-tls.py --authority
 
   postgres:
     name: PostgreSQL 16 identity
