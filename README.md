@@ -47,8 +47,11 @@ routes, identities and capture scope still require independent policy admission.
 
 Signed policies use installed Ed25519 keys, strict signature checks over the original
 payload bytes, bounded fields, identity checks, and a maximum 15-minute lease.
-Disabled policies cannot authorize capture. Enrollment, revocation, stored revision
-checks, and record admission must still be connected before capture is enabled.
+Disabled policies cannot authorize capture. Pure batch admission checks verified
+historical/current policy scope, exact source/workload assignments, names, routes,
+depth and retention against a caller-supplied authoritative snapshot. Enrollment,
+live revocation, persisted revision state, queue purge and transactional admission
+must still be connected before capture or persistence is enabled.
 
 PostgreSQL identity tables have tenant isolation and restricted runtime roles.
 Collection, batch persistence, WASM and FFI remain unimplemented.
