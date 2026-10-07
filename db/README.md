@@ -110,7 +110,7 @@ non-yielding native work. This is not a hard runtime or DNS-thread termination
 guarantee. The owned connection aborts its driver on drop; explicit close drops
 the client and waits within the deadline, then aborts on timeout. Driver cancellation
 takes effect when Tokio next polls the task. Cancellation of close preserves this
-ownership. The only public query is a fixed bounded TLS health check.
+ownership. The public diagnostic query is a fixed bounded TLS health check.
 
 `python3 scripts/test-postgres-tls.py` is the separate required live TLS fixture.
 It requires the pinned local PostgreSQL image and installed OpenSSL, creates
@@ -124,5 +124,45 @@ Synthetic protocol listeners separately prove refusal before credentials,
 TLS/authentication stalls, cooperative deadlines and transport EOF cleanup.
 An authenticated synthetic protocol session also stalls the fixed health query;
 unit tests cover close timeout and cancellation without detaching the driver.
-This transport does not implement authenticated application admission, authority
-fetching, ingestion transactions or receipts.
+The authority layer below uses this transport. HTTP authentication, transactional
+submission and durable receipts remain separate.
+
+## Authority validation
+
+`ConnectedDatabase::validate_authority` takes a checked batch, independently
+authenticated expected tenant/collector identity, and installed policy keys. It
+starts READ COMMITTED, binds tenant context locally, acquires the collector lock
+in a separate statement, and reads fresh database authority. It loads only the
+requested historical revisions, current revision and requested source assignments.
+Metadata preflight bounds each envelope to 1 MiB and the deduplicated aggregate
+to 16 MiB before any envelope-bearing query. Numeric revision projections use
+`numeric(20,0)::text`, preserving exact u64 values even when stored with a scale.
+
+Original envelope bytes are signature-verified and checked against row identity
+and revision. Historical policies are verified at queue time; their expiration
+at admission does not itself reject retained records. Current authorization must
+be enabled and nonrevoked, with a currently valid signed lease. Every record is
+checked against both policy scopes and its full enrolled source/workload tuple.
+Database time is refreshed after loading and before the final full admission
+check, including record expiry and batch age. Signed nanosecond timestamps are
+not projected through PostgreSQL timestamps.
+
+One absolute cooperative deadline covers BEGIN, settings, lock wait, reads,
+synchronous verification checks and rollback. Statement, lock and idle-transaction
+timeouts provide additional database bounds. A guard is armed before BEGIN and
+disarmed only after confirmed rollback and empty tenant context. Cancellation,
+deadline or uncertain cleanup invalidates the connection and aborts its driver.
+Ordinary errors can preserve the session after confirmed cleanup. Validation
+always rolls back and returns only `Result<(), AuthorityError>`; it provides no
+reusable authority token for later persistence. A future inbox consumer must reuse
+the private loader inside its own locked transaction.
+
+`AuthorityTooLarge` means split required, not revocation or signature rejection.
+Split into smaller batches with new batch IDs, retaining original record IDs,
+queue times and expiry times. Each split still includes current policy overhead.
+The `--authority` TLS fixture proves restricted-login admission, aggregate
+rejection before envelope fetch, split success, real lock-wait cancellation and
+timeout cleanup while runtimes remain alive, fresh state after lock waits, and
+lease/record expiry during loading. Synthetic TLS also exercises cancellation
+while BEGIN is pending. Direct cancellation during ROLLBACK is inspected through
+guard ownership but is not deterministically executed by this fixture.

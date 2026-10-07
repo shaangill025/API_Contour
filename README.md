@@ -93,11 +93,14 @@ and production target are still pending. No production deployment is included ye
 - Checked PostgreSQL deployment settings and owned TLS transport with explicit
   bounded CA trust, verified server identity, and cooperative DNS/TLS/auth deadlines.
   No arbitrary-query or raw-client public API is exposed.
+- Transactional authority validation under restricted ingestion privileges, with
+  current/historical signature checks and locked database scope. Its success does
+  not authorize a later write; inbox submission remains separate.
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
-Pure admission validates a supplied snapshot. Authentication, application
-signature/metadata verification of stored policies, live revocation integration,
-collector revision high-water storage, transactional ingestion, durable receipts, collector queues,
+Pure admission validates a supplied snapshot. HTTP authentication, capture-side
+revocation integration, collector revision high-water storage, transactional
+submission, durable receipts, collector queues,
 all collectors, contract comparison, and the UI still need implementation.
 Full platform, device, cloud, recovery, and performance acceptance is pending.
 

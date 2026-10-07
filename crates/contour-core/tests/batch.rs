@@ -7,6 +7,25 @@ fn fixtures() -> Vec<Value> {
     ))
     .unwrap()
 }
+#[test]
+fn authority_projection_is_minimal_borrowed_and_preserves_batch() {
+    let input = valid();
+    let batch = decode(&input).unwrap();
+    let digest = batch.request_digest().unwrap();
+    let mut requests = batch.authority_requests();
+    assert_eq!(requests.len(), batch.record_count());
+    let request = requests.next().unwrap();
+    assert_eq!(request.source_id(), input["records"][0]["source_id"]);
+    assert_eq!(request.revision(), 1);
+    assert_eq!(
+        request.queued_at(),
+        Timestamp::parse(input["records"][0]["queued_at"].as_str().unwrap())
+            .unwrap()
+            .instant()
+    );
+    assert!(requests.next().is_none());
+    assert_eq!(batch.request_digest().unwrap(), digest);
+}
 fn valid() -> Value {
     fixtures()
         .into_iter()
