@@ -1,0 +1,122 @@
+[
+  {
+    "id": "R-SCOPE",
+    "requirement": "All named collector families and all 16 workstreams are mandatory in one R1.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-STACK",
+    "requirement": "Rust backend/native core, PostgreSQL and TypeScript/React UI are fixed.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-PASSIVE",
+    "requirement": "No discovery probes, production replay, TLS bypass, key harvesting or business delivery changes.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-PRIVACY",
+    "requirement": "Only policy-sanitized structure and approved metadata may persist or leave a collector.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-POLICY",
+    "requirement": "Disabled-by-default capture requires enrolled identity and valid scoped signed policy.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-BOUNDS",
+    "requirement": "Every parser, queue, cache and callback has tested resource limits.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-IDENTITY",
+    "requirement": "Keep tenant, service, environment, deployment and source attribution distinct.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-CANONICAL",
+    "requirement": "Cross-runtime canonical structure handles null, missing, exact numbers, unions and limits.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-DELIVERY",
+    "requirement": "Bounded at-least-once delivery uses durable receipts and deduplication before counting.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-COVERAGE",
+    "requirement": "Show visibility, partial inspection, sampling, loss, unsupported profiles and stale health.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-GOVERNANCE",
+    "requirement": "Observed, declared and approved versions stay separate; approval is authorized and concurrent-safe.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-STORAGE",
+    "requirement": "PostgreSQL transactions, tenant isolation, retention and recovery are tested on a real server.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-PROTOCOLS",
+    "requirement": "HTTP, JSON, XML, forms, GraphQL, gRPC and WebSocket have bounded explicit semantics.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-PACKAGING",
+    "requirement": "Deployable versioned packages include all enabled-family options and offline installation.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-UI",
+    "requirement": "Actual UI interactions show evidence limits and support accessible review.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-SECURITY",
+    "requirement": "Identity, isolation, imports, egress, revocation and all persistent sinks receive negative tests.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-PERFORMANCE",
+    "requirement": "Measure defined latency, throughput, memory, overload and recovery targets.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-EVIDENCE",
+    "requirement": "Real platform results and exact versions are required; missing and mocked evidence cannot pass.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-OPERATIONS",
+    "requirement": "Health, audit, disable, upgrade, backup and recovery procedures are shipped.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  },
+  {
+    "id": "R-CI",
+    "requirement": "Contract checks and approved exports integrate with customer workflows without blocking live capture.",
+    "source": "supplied scope plus reconstructed detail",
+    "status": "REQUIRED"
+  }
+]
