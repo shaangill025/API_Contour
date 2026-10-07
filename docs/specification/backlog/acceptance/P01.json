@@ -1,0 +1,74 @@
+[
+  {
+    "id": "AT-P01-01",
+    "task": "P01-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Run shared golden vectors through Rust, WASM and FFI",
+    "expected": "Canonical bytes and hashes agree; invalid or value-bearing nodes are rejected.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P01-02",
+    "task": "P01-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Use absent, expired, revoked and replayed policies and identities",
+    "expected": "No unauthorized capture occurs; valid scoped enrollment succeeds.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P01-03",
+    "task": "P01-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Kill client and server at each commit and acknowledgment boundary",
+    "expected": "Accepted batches recover; retry counts are not doubled; bounded losses are reported.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P01-04",
+    "task": "P01-04",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Execute migrations and concurrent inbox writes on PostgreSQL",
+    "expected": "Constraints hold, duplicates resolve consistently and tenant-scoped foreign keys prevent cross-tenant records.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P01-05",
+    "task": "P01-05",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Submit valid, oversized, malformed and cross-scope batches",
+    "expected": "Valid batches receive durable receipts; invalid batches cause no partial data write.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-SEC-POLICY-ADMISSION",
+    "task": "P01-05",
+    "setup": "Isolated authorized integration fixture with real persistence and identity/policy state.",
+    "action": "Submit forbidden field/header names, a disallowed route, fabricated policy revision, and records permitted only by a replaced broader revision.",
+    "expected": "Reject each whole batch before any inbox/log/export persistence; reject wrong tenant, source, service and collector assignments.",
+    "evidence": "API results, absence/presence checks across sinks, state transitions and exact source/version references.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-SEC-POLICY-ROLLBACK",
+    "task": "P01-02",
+    "setup": "Isolated authorized integration fixture with real persistence and identity/policy state.",
+    "action": "Accept revision N, restart with N-1, restore an older snapshot, disconnect before revocation and wait past the policy lease.",
+    "expected": "No rollback capture occurs; untrusted restored state needs online refresh; offline capture stops within 15 minutes; server rejects revoked identity immediately.",
+    "evidence": "API results, absence/presence checks across sinks, state transitions and exact source/version references.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-SEC-RETENTION-SPLIT",
+    "task": "P01-03",
+    "setup": "Isolated authorized integration fixture with real persistence and identity/policy state.",
+    "action": "Split and re-split a pending batch just before expiry, then reenroll its collector.",
+    "expected": "Records keep original expiry; expired records cannot reach persistence; no data transfers to the new identity.",
+    "evidence": "API results, absence/presence checks across sinks, state transitions and exact source/version references.",
+    "status": "NOT_RUN"
+  }
+]

@@ -1,0 +1,115 @@
+[
+  {
+    "id": "P01-01",
+    "phase": "P01",
+    "title": "Implement shared structural types",
+    "requirements": [
+      "R-CANONICAL",
+      "R-STACK"
+    ],
+    "depends_on": [
+      "P00-01",
+      "P00-02",
+      "P00-03"
+    ],
+    "acceptance": [
+      "AT-P01-01"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement shared structural types with executable tests and versioned evidence"
+  },
+  {
+    "id": "P01-02",
+    "phase": "P01",
+    "title": "Implement signed policy and enrollment",
+    "requirements": [
+      "R-IDENTITY",
+      "R-POLICY",
+      "R-SECURITY"
+    ],
+    "depends_on": [
+      "P00-01",
+      "P00-02",
+      "P00-03",
+      "P01-01"
+    ],
+    "acceptance": [
+      "AT-P01-02",
+      "AT-SEC-POLICY-ROLLBACK"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement signed policy and enrollment with executable tests and versioned evidence"
+  },
+  {
+    "id": "P01-03",
+    "phase": "P01",
+    "title": "Implement queues and durable receipts",
+    "requirements": [
+      "R-BOUNDS",
+      "R-DELIVERY"
+    ],
+    "depends_on": [
+      "P00-01",
+      "P00-02",
+      "P00-03",
+      "P01-01",
+      "P01-02",
+      "P01-04"
+    ],
+    "acceptance": [
+      "AT-P01-03",
+      "AT-SEC-RETENTION-SPLIT"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement queues and durable receipts with executable tests and versioned evidence"
+  },
+  {
+    "id": "P01-04",
+    "phase": "P01",
+    "title": "Implement PostgreSQL foundation",
+    "requirements": [
+      "R-STORAGE"
+    ],
+    "depends_on": [
+      "P00-01",
+      "P00-02",
+      "P00-03",
+      "P01-01",
+      "P01-02"
+    ],
+    "acceptance": [
+      "AT-P01-04"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement PostgreSQL foundation with executable tests and versioned evidence"
+  },
+  {
+    "id": "P01-05",
+    "phase": "P01",
+    "title": "Implement bounded ingestion",
+    "requirements": [
+      "R-BOUNDS",
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P00-01",
+      "P00-02",
+      "P00-03",
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04"
+    ],
+    "acceptance": [
+      "AT-P01-05",
+      "AT-SEC-POLICY-ADMISSION"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement bounded ingestion with executable tests and versioned evidence"
+  }
+]

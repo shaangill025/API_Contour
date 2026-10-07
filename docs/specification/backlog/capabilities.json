@@ -1,0 +1,472 @@
+[
+  {
+    "id": "CAP-001",
+    "family": "gateway",
+    "scenario": "Envoy TLS termination",
+    "required_evidence_level": "structure",
+    "task": "P03-01",
+    "acceptance": "AT-CAP-001",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-002",
+    "family": "gateway",
+    "scenario": "TLS passthrough limit",
+    "required_evidence_level": "connection",
+    "task": "P03-01",
+    "acceptance": "AT-CAP-002",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-003",
+    "family": "gateway",
+    "scenario": "NGINX supported integration",
+    "required_evidence_level": "structure",
+    "task": "P03-02",
+    "acceptance": "AT-CAP-003",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-004",
+    "family": "ebpf",
+    "scenario": "Supported TLS boundary",
+    "required_evidence_level": "structure",
+    "task": "P04-01",
+    "acceptance": "AT-CAP-004",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-005",
+    "family": "ebpf",
+    "scenario": "Concurrent process attribution",
+    "required_evidence_level": "structure",
+    "task": "P04-01",
+    "acceptance": "AT-CAP-005",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-006",
+    "family": "ebpf",
+    "scenario": "Unsupported static TLS build",
+    "required_evidence_level": "connection",
+    "task": "P04-02",
+    "acceptance": "AT-CAP-006",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-007",
+    "family": "ebpf",
+    "scenario": "Application encrypted content",
+    "required_evidence_level": "operation",
+    "task": "P04-02",
+    "acceptance": "AT-CAP-007",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-008",
+    "family": "browser",
+    "scenario": "Managed authorized request capture",
+    "required_evidence_level": "structure",
+    "task": "P05-01",
+    "acceptance": "AT-CAP-008",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-009",
+    "family": "browser",
+    "scenario": "Authorized page response extraction",
+    "required_evidence_level": "structure",
+    "task": "P05-02",
+    "acceptance": "AT-CAP-009",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-010",
+    "family": "browser",
+    "scenario": "Denied host permission",
+    "required_evidence_level": "unavailable",
+    "task": "P05-03",
+    "acceptance": "AT-CAP-010",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-011",
+    "family": "browser",
+    "scenario": "Unsupported response visibility",
+    "required_evidence_level": "operation",
+    "task": "P05-03",
+    "acceptance": "AT-CAP-011",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-012",
+    "family": "android",
+    "scenario": "OkHttp request and response",
+    "required_evidence_level": "structure",
+    "task": "P06-01",
+    "acceptance": "AT-CAP-012",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-013",
+    "family": "android",
+    "scenario": "Pinned TLS remains unchanged",
+    "required_evidence_level": "structure",
+    "task": "P06-01",
+    "acceptance": "AT-CAP-013",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-014",
+    "family": "ios",
+    "scenario": "URLSession request and response",
+    "required_evidence_level": "structure",
+    "task": "P06-02",
+    "acceptance": "AT-CAP-014",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-015",
+    "family": "ios",
+    "scenario": "Application encrypted payload limit",
+    "required_evidence_level": "operation",
+    "task": "P06-02",
+    "acceptance": "AT-CAP-015",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-016",
+    "family": "aws",
+    "scenario": "Gateway log metadata",
+    "required_evidence_level": "operation",
+    "task": "P07-01",
+    "acceptance": "AT-CAP-016",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-017",
+    "family": "aws",
+    "scenario": "S3 management metadata",
+    "required_evidence_level": "operation",
+    "task": "P07-01",
+    "acceptance": "AT-CAP-017",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-018",
+    "family": "aws",
+    "scenario": "SDK structural observation",
+    "required_evidence_level": "structure",
+    "task": "P07-02",
+    "acceptance": "AT-CAP-018",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-019",
+    "family": "gcp",
+    "scenario": "Audit metadata",
+    "required_evidence_level": "operation",
+    "task": "P08-01",
+    "acceptance": "AT-CAP-019",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-020",
+    "family": "gcp",
+    "scenario": "Gateway metadata",
+    "required_evidence_level": "operation",
+    "task": "P08-01",
+    "acceptance": "AT-CAP-020",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-021",
+    "family": "gcp",
+    "scenario": "Client structural observation",
+    "required_evidence_level": "structure",
+    "task": "P08-02",
+    "acceptance": "AT-CAP-021",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-022",
+    "family": "azure",
+    "scenario": "API Management metadata",
+    "required_evidence_level": "operation",
+    "task": "P09-01",
+    "acceptance": "AT-CAP-022",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-023",
+    "family": "azure",
+    "scenario": "Monitor metadata",
+    "required_evidence_level": "operation",
+    "task": "P09-01",
+    "acceptance": "AT-CAP-023",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-024",
+    "family": "azure",
+    "scenario": "Runtime structural observation",
+    "required_evidence_level": "structure",
+    "task": "P09-02",
+    "acceptance": "AT-CAP-024",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-025",
+    "family": "messaging",
+    "scenario": "Kafka producer",
+    "required_evidence_level": "structure",
+    "task": "P10-01",
+    "acceptance": "AT-CAP-025",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-026",
+    "family": "messaging",
+    "scenario": "Kafka consumer",
+    "required_evidence_level": "structure",
+    "task": "P10-01",
+    "acceptance": "AT-CAP-026",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-027",
+    "family": "messaging",
+    "scenario": "MQTT publish",
+    "required_evidence_level": "structure",
+    "task": "P10-02",
+    "acceptance": "AT-CAP-027",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-028",
+    "family": "messaging",
+    "scenario": "MQTT receive",
+    "required_evidence_level": "structure",
+    "task": "P10-02",
+    "acceptance": "AT-CAP-028",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-029",
+    "family": "protocols",
+    "scenario": "JSON exact numbers and null",
+    "required_evidence_level": "structure",
+    "task": "P11-01",
+    "acceptance": "AT-CAP-029",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-030",
+    "family": "protocols",
+    "scenario": "Form and multipart",
+    "required_evidence_level": "structure",
+    "task": "P11-01",
+    "acceptance": "AT-CAP-030",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-031",
+    "family": "protocols",
+    "scenario": "XML with safe names",
+    "required_evidence_level": "structure",
+    "task": "P11-02",
+    "acceptance": "AT-CAP-031",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-032",
+    "family": "protocols",
+    "scenario": "GraphQL",
+    "required_evidence_level": "structure",
+    "task": "P11-03",
+    "acceptance": "AT-CAP-032",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-033",
+    "family": "protocols",
+    "scenario": "gRPC with supplied descriptors",
+    "required_evidence_level": "structure",
+    "task": "P11-03",
+    "acceptance": "AT-CAP-033",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-034",
+    "family": "protocols",
+    "scenario": "WebSocket messages",
+    "required_evidence_level": "structure",
+    "task": "P11-03",
+    "acceptance": "AT-CAP-034",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-035",
+    "family": "protocols",
+    "scenario": "gRPC unknown descriptor limit",
+    "required_evidence_level": "operation",
+    "task": "P11-03",
+    "acceptance": "AT-CAP-035",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-036",
+    "family": "runtime",
+    "scenario": "Java HTTP adapter",
+    "required_evidence_level": "structure",
+    "task": "P15-01",
+    "acceptance": "AT-CAP-036",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-037",
+    "family": "runtime",
+    "scenario": "Node.js HTTP adapter",
+    "required_evidence_level": "structure",
+    "task": "P15-01",
+    "acceptance": "AT-CAP-037",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-038",
+    "family": "runtime",
+    "scenario": "Rust HTTP adapter",
+    "required_evidence_level": "structure",
+    "task": "P15-01",
+    "acceptance": "AT-CAP-038",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-039",
+    "family": "serverless",
+    "scenario": "AWS Lambda",
+    "required_evidence_level": "structure",
+    "task": "P15-02",
+    "acceptance": "AT-CAP-039",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-040",
+    "family": "serverless",
+    "scenario": "Google Cloud function",
+    "required_evidence_level": "structure",
+    "task": "P15-02",
+    "acceptance": "AT-CAP-040",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-041",
+    "family": "serverless",
+    "scenario": "Azure Functions",
+    "required_evidence_level": "structure",
+    "task": "P15-02",
+    "acceptance": "AT-CAP-041",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-042",
+    "family": "kubernetes",
+    "scenario": "Namespace and workload attribution",
+    "required_evidence_level": "operation",
+    "task": "P15-03",
+    "acceptance": "AT-CAP-042",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-043",
+    "family": "docker",
+    "scenario": "Container lifecycle attribution",
+    "required_evidence_level": "operation",
+    "task": "P15-03",
+    "acceptance": "AT-CAP-043",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-044",
+    "family": "ci",
+    "scenario": "Declared versus approved comparison",
+    "required_evidence_level": "artifact",
+    "task": "P15-04",
+    "acceptance": "AT-CAP-044",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-045",
+    "family": "external",
+    "scenario": "Outbound partner API from client",
+    "required_evidence_level": "structure",
+    "task": "P07-02",
+    "acceptance": "AT-CAP-045",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-046",
+    "family": "external",
+    "scenario": "AI API without prompt values",
+    "required_evidence_level": "structure",
+    "task": "P07-02",
+    "acceptance": "AT-CAP-046",
+    "required": true,
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CAP-047",
+    "family": "external",
+    "scenario": "External SaaS-to-SaaS without telemetry",
+    "required_evidence_level": "unavailable",
+    "task": "P07-02",
+    "acceptance": "AT-CAP-047",
+    "required": true,
+    "status": "NOT_RUN"
+  }
+]

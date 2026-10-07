@@ -1,0 +1,238 @@
+[
+  {
+    "id": "P00",
+    "title": "Preflight",
+    "depends_on": [],
+    "tasks": [
+      "P00-01",
+      "P00-02",
+      "P00-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P01",
+    "title": "Foundation",
+    "depends_on": [
+      "P00"
+    ],
+    "tasks": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P02",
+    "title": "Intelligence",
+    "depends_on": [
+      "P01"
+    ],
+    "tasks": [
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P03",
+    "title": "Gateway",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P03-01",
+      "P03-02",
+      "P03-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P04",
+    "title": "Linux eBPF",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P04-01",
+      "P04-02",
+      "P04-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P05",
+    "title": "Browser",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P05-01",
+      "P05-02",
+      "P05-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P06",
+    "title": "Mobile",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P06-01",
+      "P06-02",
+      "P06-03",
+      "P06-04"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P07",
+    "title": "AWS",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P07-01",
+      "P07-02",
+      "P07-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P08",
+    "title": "GCP",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P08-01",
+      "P08-02",
+      "P08-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P09",
+    "title": "Azure",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P09-01",
+      "P09-02",
+      "P09-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P10",
+    "title": "Messaging",
+    "depends_on": [
+      "P01",
+      "P11"
+    ],
+    "tasks": [
+      "P10-01",
+      "P10-02",
+      "P10-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P11",
+    "title": "Protocols",
+    "depends_on": [
+      "P01"
+    ],
+    "tasks": [
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P12",
+    "title": "API and UI",
+    "depends_on": [
+      "P02"
+    ],
+    "tasks": [
+      "P12-01",
+      "P12-02",
+      "P12-03"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P13",
+    "title": "Security and operations",
+    "depends_on": [
+      "P01"
+    ],
+    "tasks": [
+      "P13-01",
+      "P13-02",
+      "P13-03",
+      "P13-04"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P15",
+    "title": "Runtime and platform",
+    "depends_on": [
+      "P01",
+      "P02",
+      "P11"
+    ],
+    "tasks": [
+      "P15-01",
+      "P15-02",
+      "P15-03",
+      "P15-04"
+    ],
+    "release_required": true
+  },
+  {
+    "id": "P14",
+    "title": "Integration and release",
+    "depends_on": [
+      "P02",
+      "P03",
+      "P04",
+      "P05",
+      "P06",
+      "P07",
+      "P08",
+      "P09",
+      "P10",
+      "P11",
+      "P12",
+      "P13",
+      "P15"
+    ],
+    "tasks": [
+      "P14-01",
+      "P14-02",
+      "P14-03",
+      "P14-04"
+    ],
+    "release_required": true
+  }
+]
