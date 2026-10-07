@@ -1,6 +1,7 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
 use std::fmt;
+mod wire;
 
 pub const MAX_NAME_SCALARS: usize = 64;
 pub const MAX_FIELDS: usize = 256;
@@ -42,6 +43,8 @@ pub enum Error {
     EmptyUnion,
     TooManyAlternatives,
     CanonicalTooLarge,
+    WireTooLarge,
+    InvalidWireJson,
 }
 
 impl fmt::Display for Error {
