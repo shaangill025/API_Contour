@@ -1,0 +1,10 @@
+{
+  "provenance": "OpenSSL 3.6.5 pkeyutl -sign -rawin; RFC 8410 PKCS8 seed 07 repeated 32 bytes (inert test seed); UTF8 domain LF plus exact JSON payload; generated 2026-10-07",
+  "public_key_base64url": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "envelope": {
+    "payload_base64url": "eyJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJjb2xsZWN0b3JfaWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJyZXZpc2lvbiI6MSwiaXNzdWVkX2F0IjoiMjAyNi0xMC0wN1QxMjowMDowMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMC0wN1QxMjoxNTowMFoiLCJlbmFibGVkIjp0cnVlLCJzZXJ2aWNlX2lkcyI6WyIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiXSwidGVjaG5pcXVlcyI6WyJydW50aW1lIl0sImFwcHJvdmVkX25hbWVzIjpbIkdFVCJdLCJkZW5pZWRfdGVtcGxhdGVzIjpbXSwiaW5zcGVjdGlvbl9ieXRlcyI6NjU1MzYsImRlcHRoX2xpbWl0IjozMiwicXVldWVfYnl0ZXMiOjI2ODQzNTQ1NiwicXVldWVfdHRsX3NlY29uZHMiOjg2NDAwLCJkdXJhYmxlX3F1ZXVlX2VuYWJsZWQiOmZhbHNlLCJhcHByb3ZlZF9yb3V0ZV9zZWdtZW50cyI6WyJhcGkiXSwicGFyc2VyX3Byb2ZpbGVzIjpbImpzb24tdjEiXX0",
+    "signature_base64url": "xCxgghzJmFE70m-2W1R3LdPJ25DjgrMj0SVdC5UiS5z9OH6WDXPW98PK03edFCBFu_JBhrDUU6fyovKH64iPDQ",
+    "key_id": "openssl-fixture",
+    "signature_profile": "ed25519-v1"
+  }
+}
