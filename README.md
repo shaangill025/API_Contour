@@ -9,7 +9,8 @@ only approved structural information to a central catalog. Teams will compare
 observed structures with declared and approved contracts, then review changes.
 
 **Status: under development.** This repository currently contains the Rust core
-and the first PostgreSQL migration. It does not yet provide a runnable platform,
+and two PostgreSQL identity/policy migrations with separated administrative and
+ingestion privileges. It does not yet provide a runnable platform,
 collector, ingestion service, or web UI. The architecture and packages below
 describe the intended release.
 
@@ -87,10 +88,13 @@ and production target are still pending. No production deployment is included ye
 - Signed Ed25519 policy verification, identity checks, and bounded policy leases.
 - Pure batch admission against historical and current policies and supplied source assignments.
 - PostgreSQL identity tables, tenant row security, and restricted runtime roles.
+- Immutable policy history, active collector revision/revocation state, enrolled
+  source profiles, separated administration/ingestion privileges, and advisory locks.
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
-Pure admission validates a supplied snapshot. Authentication, live revocation,
-stored policy state, transactional ingestion, durable receipts, collector queues,
+Pure admission validates a supplied snapshot. Authentication, application
+signature/metadata verification of stored policies, live revocation integration,
+collector revision high-water storage, transactional ingestion, durable receipts, collector queues,
 all collectors, contract comparison, and the UI still need implementation.
 Full platform, device, cloud, recovery, and performance acceptance is pending.
 
