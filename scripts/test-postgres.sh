@@ -138,3 +138,31 @@ SELECT fixture.expect_state('DELETE FROM contour.collectors','23514');
 SQL
 python3 "$root/scripts/test-policy-concurrency.py" "$container_id"
 echo 'PostgreSQL policy authority fixture passed'
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0003_ingestion.sql" | admin_sql; then
+    echo 'Injected inbox migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+DO $$ BEGIN
+    IF to_regclass('contour.ingestion_batches') IS NOT NULL
+        OR to_regclass('contour.ingestion_payloads') IS NOT NULL
+        OR EXISTS (SELECT 1 FROM contour.schema_migrations WHERE version=3)
+        OR has_function_privilege('contour_ingestion','contour.guard_collector(uuid,uuid)','EXECUTE') THEN
+        RAISE EXCEPTION 'failed inbox migration left DDL, grants or ledger';
+    END IF;
+END $$;
+SQL
+admin_sql < "$root/db/migrations/0003_ingestion.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3]::integer[], 'three migration ledger entries');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_ingest_test -d contour_fixture < "$root/db/tests/inbox.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.ingestion_batches SET request_digest=request_digest','23514');
+SELECT fixture.expect_state('DELETE FROM contour.ingestion_batches','23514');
+SELECT fixture.expect_state('UPDATE contour.ingestion_payloads SET checked_batch=checked_batch','23514');
+SELECT fixture.expect_state('DELETE FROM contour.ingestion_payloads','23514');
+SQL
+echo 'PostgreSQL durable inbox fixture passed'
