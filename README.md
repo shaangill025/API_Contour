@@ -90,6 +90,9 @@ and production target are still pending. No production deployment is included ye
 - PostgreSQL identity tables, tenant row security, and restricted runtime roles.
 - Immutable policy history, active collector revision/revocation state, enrolled
   source profiles, separated administration/ingestion privileges, and advisory locks.
+- Checked PostgreSQL deployment settings with bounded TCP destinations and required
+  TLS configuration. A TLS connector and total DNS/TLS/auth deadline remain pending;
+  the configured socket timeout alone does not enforce that deadline.
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
 Pure admission validates a supplied snapshot. Authentication, application

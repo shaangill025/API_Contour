@@ -1,0 +1,9 @@
+[package]
+name = "contour-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio-postgres = "=0.7.18"
