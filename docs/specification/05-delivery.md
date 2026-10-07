@@ -51,6 +51,24 @@ Default durable TTL is 24 hours. Server acceptance allows batches created within
 
 ## Aggregation and limits
 
+### Native batch scalar profile
+
+Wire timestamps use valid Gregorian dates with years 0001–9999, uppercase `T`
+and `Z`, required seconds and a mandatory `Z` or numeric `±HH:MM` offset.
+Hours and offset hours are 00–23; minutes and offset minutes are 00–59.
+Seconds are 00–59; leap seconds are rejected. An optional fractional second
+has 1–9 decimal digits. Timestamp text is at most 35 ASCII bytes. Reject excess
+precision instead of truncating it. Preserve original timestamp spelling for
+serialization and future request digests; compare parsed instants for chronology.
+
+Unsigned metadata numbers accept mathematically integral JSON decimal/exponent
+tokens, including `1.0`, `1e0`, `100e-2` and negative zero, without floating-point
+conversion. Tokens are at most 256 bytes and values must fit unsigned 64-bit
+integers (0–18446744073709551615). Field-specific minima and maxima still apply;
+`policy_revision` is 1–18446744073709551615. Serialization emits the exact integer
+value in plain decimal notation. These scalar checks do not establish batch
+admission, capture authorization or queue durability.
+
 Flush at 5 seconds, 500 records or 1 MiB serialized uncompressed data, whichever comes first. A new structural variant can trigger an earlier flush. Keep full structure in each transmitted record in v1; do not require server cache state to decode a fingerprint-only record.
 
 Aggregate equal structures only within the same operation, policy, deployment, source, visibility and time window. Freeze counters when a batch is created. Later observations belong to a new batch. A lost batch must not remove the structure from all future batches.
@@ -58,3 +76,5 @@ Aggregate equal structures only within the same operation, policy, deployment, s
 When full, drop new observation records instead of blocking the application. Expire old queued records at TTL. Reserve a separate bounded health accumulator for dropped, expired, malformed and sampled counts. Send health through a separate authenticated endpoint with independent quota. Health reporting may itself be unavailable; the UI must then show stale health rather than zero loss.
 
 Cloud collection checkpoints advance only after sanitized data is durably queued, or after durable server receipt in memory mode. Source rereads can cause duplicates distinct from delivery retries; use safe source event identity where available and document cases where unique counts cannot be established. Never commit a business consumer offset or acknowledge a business message for discovery.
+
+Enforce the enclosing batch byte limit before serde decoding. Scalar serde implementations cannot stop the decoder from scanning a token or unescaping a string before scalar validation. Direct scalar parse methods check their input length first.
