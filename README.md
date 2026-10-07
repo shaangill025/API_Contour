@@ -6,7 +6,7 @@ versioned domain-separated SHA-256 fingerprints. It stores field names and kinds
 values. Callers must approve names through policy before constructing objects;
 structural validation does not grant policy authorization.
 
-Requires Rust 1.88 or later. Dependencies are pinned serde, serde_json, sha2 and time.
+Requires Rust 1.88 or later. Dependencies are pinned in Cargo.lock.
 
 ```sh
 cargo test --workspace --locked --offline
@@ -45,5 +45,11 @@ checked timestamps, consistency and supplied-clock expiry checks, and a versione
 canonical request digest. Batch validation checks syntax and consistency; names,
 routes, identities and capture scope still require independent policy admission.
 
-Capture authorization, policy signature/lease enforcement, collection,
-persistence, WASM and FFI remain unimplemented. This is not a complete R1 product.
+Signed policies use installed Ed25519 keys, strict signature checks over the original
+payload bytes, bounded fields, identity checks, and a maximum 15-minute lease.
+Disabled policies cannot authorize capture. Enrollment, revocation, stored revision
+checks, and record admission must still be connected before capture is enabled.
+
+PostgreSQL identity tables have tenant isolation and restricted runtime roles.
+Collection, batch persistence, WASM and FFI remain unimplemented.
+This is not a complete R1 product.

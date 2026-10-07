@@ -16,6 +16,34 @@ The server independently checks field/header/query names against approved names,
 
 Use a reviewed signature implementation and key rotation procedure. Exact library and algorithm pins are preflight outputs. Do not create custom cryptography. Collector enrollment uses a short-lived, single-use bootstrap credential delivered through the customer's secret-management process. The platform issues a scoped client identity. No bootstrap credential belongs in a package or source file.
 
+### Native signed policy profile
+
+The installed profile is `ed25519-v1`: Ed25519 with strict verification using
+ed25519-dalek 2.2.0. Trusted release configuration supplies at most eight distinct
+key IDs (1–64 Unicode scalars) and validated, non-weak 32-byte public keys. The
+envelope cannot install keys or select another algorithm. Rotation and revocation
+still require an authenticated configuration update and their own integration.
+
+Signing bytes are the UTF-8 bytes `apicontour/policy/1` followed by one LF byte,
+then the exact decoded payload bytes. Do not canonicalize, parse or reserialize
+the payload before verification. Payload and 64-byte signature use canonical
+unpadded URL-safe base64. Both envelope and payload reject unknown, missing and
+duplicate decoded field names. The combined encoded JSON envelope is limited to
+1,048,576 bytes before JSON decoding, even when individual schema field limits
+would permit a larger sum. Arrays and decoded string lengths are checked before
+growing the owned policy model; JSON scanning/unescaping is bounded by that outer
+byte limit.
+
+Native policy UUIDs use 36-character lowercase hexadecimal spelling and exact
+identity comparison. Revisions and resource integers use exact unsigned values
+through u64 maximum, including mathematically integral JSON decimal/exponent
+tokens. Timestamps use the existing bounded RFC 3339 profile: uppercase T/Z,
+1–9 fractional digits when present, numeric offsets, no leap seconds or year zero.
+The lease must be positive and at most 900 seconds; acceptance requires
+`issued_at <= now < expires_at`. A verified disabled policy does not enable
+capture. Verification alone does not establish enrollment, revocation status,
+persistent highest revision, source admission or queue purge.
+
 ## Local sanitization
 
 1. Check the operation against policy before body inspection.
