@@ -272,10 +272,12 @@ mod tests {
     use super::*;
     #[test]
     fn policy_helper_enforces_deadline_and_static_failures() {
-        let key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
-        let public = std::array::from_fn(|index| {
-            u8::from_str_radix(&key[index * 2..index * 2 + 2], 16).unwrap()
-        });
+        // Public verification key from RFC 8032, section 7.1, test 1.
+        let public = [
+            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64,
+            0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68,
+            0xf7, 0x07, 0x51, 0x1a,
+        ];
         let keys = PolicyKeys::new(&[("unit", public)]).unwrap();
         let identity = ["00000000-0000-0000-0000-000000000001"; 2];
         assert_eq!(
