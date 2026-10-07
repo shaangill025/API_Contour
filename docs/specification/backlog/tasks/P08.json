@@ -1,0 +1,83 @@
+[
+  {
+    "id": "P08-01",
+    "phase": "P08",
+    "title": "Implement GCP telemetry connector",
+    "requirements": [
+      "R-COVERAGE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P08-01",
+      "AT-CAP-019",
+      "AT-CAP-020",
+      "AT-FAMILY-GCP"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement GCP telemetry connector with executable tests and versioned evidence"
+  },
+  {
+    "id": "P08-02",
+    "phase": "P08",
+    "title": "Implement GCP structural adapter",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P08-02",
+      "AT-CAP-021"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement GCP structural adapter with executable tests and versioned evidence"
+  },
+  {
+    "id": "P08-03",
+    "phase": "P08",
+    "title": "Validate GCP checkpoints and limits",
+    "requirements": [
+      "R-DELIVERY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P08-01",
+      "P08-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P08-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate GCP checkpoints and limits with executable tests and versioned evidence"
+  }
+]
