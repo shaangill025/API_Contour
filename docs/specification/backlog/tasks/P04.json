@@ -1,0 +1,85 @@
+[
+  {
+    "id": "P04-01",
+    "phase": "P04",
+    "title": "Implement TLS-boundary probes",
+    "requirements": [
+      "R-PASSIVE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P04-01",
+      "AT-CAP-004",
+      "AT-CAP-005",
+      "AT-FAMILY-EBPF"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement TLS-boundary probes with executable tests and versioned evidence"
+  },
+  {
+    "id": "P04-02",
+    "phase": "P04",
+    "title": "Implement kernel and ABI limits",
+    "requirements": [
+      "R-COVERAGE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P04-01",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P04-02",
+      "AT-CAP-006",
+      "AT-CAP-007"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement kernel and ABI limits with executable tests and versioned evidence"
+  },
+  {
+    "id": "P04-03",
+    "phase": "P04",
+    "title": "Validate host isolation and overhead",
+    "requirements": [
+      "R-SECURITY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P04-01",
+      "P04-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P04-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate host isolation and overhead with executable tests and versioned evidence"
+  }
+]

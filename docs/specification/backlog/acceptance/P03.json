@@ -1,0 +1,65 @@
+[
+  {
+    "id": "AT-P03-01",
+    "task": "P03-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise real Envoy TLS termination and passthrough fixtures",
+    "expected": "Capture sanitized structure after termination; passthrough reports no body; routing is unchanged.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P03-02",
+    "task": "P03-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise supported real NGINX build with seeded body and metadata secrets",
+    "expected": "Capture supported structure, reject unsupported profile and leak no seeded values.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P03-03",
+    "task": "P03-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Stop collector and saturate its queue during load",
+    "expected": "Application outcomes stay unchanged and overhead meets the declared profile.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-001",
+    "task": "P03-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Envoy TLS termination with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-002",
+    "task": "P03-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise TLS passthrough limit with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report connection evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-003",
+    "task": "P03-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise NGINX supported integration with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-GATEWAY",
+    "task": "P03-01",
+    "setup": "All real positive profiles of gateway with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  }
+]

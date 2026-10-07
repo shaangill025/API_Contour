@@ -1,0 +1,47 @@
+[
+  {
+    "id": "P00-01",
+    "phase": "P00",
+    "title": "Inventory runtime and permissions",
+    "requirements": [
+      "R-STACK"
+    ],
+    "depends_on": [],
+    "acceptance": [
+      "AT-P00-01"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Inventory runtime and permissions with executable tests and versioned evidence"
+  },
+  {
+    "id": "P00-02",
+    "phase": "P00",
+    "title": "Review dependencies and supported profiles",
+    "requirements": [
+      "R-EVIDENCE"
+    ],
+    "depends_on": [],
+    "acceptance": [
+      "AT-P00-02"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Review dependencies and supported profiles with executable tests and versioned evidence"
+  },
+  {
+    "id": "P00-03",
+    "phase": "P00",
+    "title": "Validate executable contract baseline",
+    "requirements": [
+      "R-CANONICAL"
+    ],
+    "depends_on": [],
+    "acceptance": [
+      "AT-P00-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Validate executable contract baseline with executable tests and versioned evidence"
+  }
+]

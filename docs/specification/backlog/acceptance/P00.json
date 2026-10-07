@@ -1,0 +1,29 @@
+[
+  {
+    "id": "AT-P00-01",
+    "task": "P00-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Inspect versions, installed tools and managed permissions",
+    "expected": "Record exact observed tool versions and inaccessible prerequisites without claiming runtime conformance.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P00-02",
+    "task": "P00-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Resolve candidate dependencies and select exact platform tuples",
+    "expected": "Record pins, license/security review and authorized test-resource references; unresolved tuples remain blocked.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P00-03",
+    "task": "P00-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Run schema, fixture, link and DAG checks",
+    "expected": "All valid fixtures pass and each negative fixture fails for its specified cause.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  }
+]
