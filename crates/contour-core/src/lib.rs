@@ -2,6 +2,8 @@
 
 use std::fmt;
 mod extract;
+mod scalar;
+pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
 mod wire;
 pub use extract::{Completeness, ExtractionPolicy, Observation, ObservationReason, extract_json};
 
