@@ -44,6 +44,48 @@ The lease must be positive and at most 900 seconds; acceptance requires
 capture. Verification alone does not establish enrollment, revocation status,
 persistent highest revision, source admission or queue purge.
 
+### Pure native admission
+
+The native admission validator takes a checked batch and a caller-supplied
+authoritative snapshot: exact tenant/collector identity, a verified current policy,
+verified historical policies by revision, and source assignments by source ID.
+Each registry has at most 500 unique entries. A source assignment binds tenant,
+collector, project, service, environment and deployment together with a closed
+technique and 1–128 unique parser profiles. Request fields never establish these
+assignments. The caller must authenticate the identity, check revocation and
+recheck the snapshot in the eventual persistence transaction.
+
+Historical authorization must be enabled and valid at each record's queued_at;
+historical expiry at admission does not invalidate that record. Current
+authorization must be enabled and valid at admission. Revisions cannot exceed
+the current revision; current and historical entries sharing a revision must
+have identical original signed payload bytes, compared by private SHA-256 digest.
+This in-memory guard does not persist the highest accepted revision.
+
+Both policies must approve the service, authoritative source technique, parser,
+operation (through approved_names), every header/query name and every structural
+field recursively, including additional-value nodes, arrays and union branches.
+Both depth limits apply. Record expiry may not exceed queued_at plus either
+policy's queue TTL. Inspection bytes and total queue bytes cannot be inferred
+from a sanitized shape and are not validated by this pure function. Structural
+fingerprints are recomputed, but transaction binding and persistence remain later
+consumer responsibilities.
+
+Routes use one exact interpretation: root `/` or an absolute slash path with no
+trailing or repeated slash. Dot segments, controls, backslashes, percent escapes,
+authority/colon syntax, query and fragment syntax are rejected. Only whole-segment
+`{segment}` and `{id}` placeholders are allowed; all literal segments require
+approval under both policies. There is no decoding, case folding or normalization.
+Denied templates use the same grammar; an invalid denial rule rejects the input
+snapshot. For paths with the same segment count, denial overlaps when each pair
+is equal or either member is a placeholder. Consequently `/admin/{id}` denies
+`/admin/{segment}`, and `/admin` denies `/{segment}`. Information lost by
+placeholder substitution requires conservative rejection.
+
+Admission does not authenticate, check live revocation, persist data or revision
+state, purge queues, or guarantee a database transaction. It returns only a safe
+error code or successful validation of the supplied snapshot.
+
 ## Local sanitization
 
 1. Check the operation against policy before body inspection.

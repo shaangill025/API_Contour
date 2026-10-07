@@ -1,6 +1,8 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
 use std::fmt;
+mod admission;
+pub use admission::{AdmissionError, AdmissionInputs, SourceAssignment, validate_admission};
 mod batch;
 pub use batch::{Batch, BatchError};
 mod extract;

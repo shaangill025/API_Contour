@@ -5,6 +5,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{self, SeqAccess, Visitor},
 };
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fmt, marker::PhantomData};
 use time::{Duration, OffsetDateTime};
 
@@ -61,7 +62,7 @@ impl PolicyKeys {
 
 /// Signature-authenticated, schema-checked and identity-bound policy.
 /// Verification is not enrollment, revocation checking or anti-rollback storage.
-pub struct VerifiedPolicy(Policy);
+pub struct VerifiedPolicy(Policy, [u8; 32]);
 impl fmt::Debug for VerifiedPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("VerifiedPolicy")
@@ -121,7 +122,7 @@ impl VerifiedPolicy {
         {
             return Err(PolicyError::Identity);
         }
-        let result = Self(policy);
+        let result = Self(policy, Sha256::digest(&payload).into());
         result.validate_at(now)?;
         Ok(result)
     }
@@ -157,6 +158,33 @@ impl VerifiedPolicy {
             return Err(PolicyError::Disabled);
         }
         Ok(())
+    }
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+    pub(crate) fn approves(&self, service: &str, technique: &str, parser: &str) -> bool {
+        self.0.service_ids.0.iter().any(|id| id == service)
+            && self.0.techniques.0.iter().any(|name| name == technique)
+            && self.0.parser_profiles.0.iter().any(|name| name == parser)
+    }
+    pub(crate) fn approves_name(&self, name: &str) -> bool {
+        self.0.approved_names.0.iter().any(|item| item == name)
+    }
+    pub(crate) fn approves_segment(&self, name: &str) -> bool {
+        self.0
+            .approved_route_segments
+            .0
+            .iter()
+            .any(|item| item == name)
+    }
+    pub(crate) fn denied_templates(&self) -> &[String] {
+        &self.0.denied_templates.0
+    }
+    pub(crate) fn depth_limit(&self) -> usize {
+        self.0.depth_limit.get() as usize
+    }
+    pub(crate) fn ttl(&self) -> u64 {
+        self.0.queue_ttl_seconds.get()
     }
 }
 
@@ -248,7 +276,7 @@ impl Policy {
         Ok(())
     }
 }
-fn uuid(text: &str) -> bool {
+pub(crate) fn uuid(text: &str) -> bool {
     text.len() == 36
         && text.bytes().enumerate().all(|(i, byte)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -261,7 +289,7 @@ fn uuid(text: &str) -> bool {
 fn text_bound(text: &str, max: usize) -> bool {
     !text.is_empty() && text.chars().take(max + 1).count() <= max
 }
-fn profile(text: &str) -> bool {
+pub(crate) fn profile(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 64
         && text.bytes().enumerate().all(|(i, byte)| {

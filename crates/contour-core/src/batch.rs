@@ -83,6 +83,9 @@ impl Batch {
     pub fn record_count(&self) -> usize {
         self.envelope.records.0.len()
     }
+    pub(crate) fn records(&self) -> &[Record] {
+        &self.envelope.records.0
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,23 +101,23 @@ struct Envelope {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Record {
+pub(crate) struct Record {
     record_id: String,
-    project_id: String,
-    service_id: String,
-    environment_id: String,
-    deployment_id: String,
+    pub(crate) project_id: String,
+    pub(crate) service_id: String,
+    pub(crate) environment_id: String,
+    pub(crate) deployment_id: String,
     protocol: String,
     direction: String,
-    operation: String,
-    route_template: String,
+    pub(crate) operation: String,
+    pub(crate) route_template: String,
     route_uncertain: bool,
-    parser_profile: String,
-    policy_revision: UnsignedInteger,
+    pub(crate) parser_profile: String,
+    pub(crate) policy_revision: UnsignedInteger,
     visibility: String,
     completeness: String,
     reasons: Bounded<String, 8>,
-    structure: WireShape,
+    pub(crate) structure: WireShape,
     count: UnsignedInteger,
     first_seen: Timestamp,
     last_seen: Timestamp,
@@ -122,12 +125,12 @@ struct Record {
     sample_denominator: UnsignedInteger,
     #[serde(deserialize_with = "nullable_status")]
     status_code: Option<UnsignedInteger>,
-    source_id: String,
-    request_header_names: Bounded<String, 128>,
-    response_header_names: Bounded<String, 128>,
-    query_parameter_names: Bounded<String, 128>,
-    queued_at: Timestamp,
-    expires_at: Timestamp,
+    pub(crate) source_id: String,
+    pub(crate) request_header_names: Bounded<String, 128>,
+    pub(crate) response_header_names: Bounded<String, 128>,
+    pub(crate) query_parameter_names: Bounded<String, 128>,
+    pub(crate) queued_at: Timestamp,
+    pub(crate) expires_at: Timestamp,
 }
 
 fn nullable_status<'de, D: Deserializer<'de>>(
@@ -302,7 +305,7 @@ fn incomplete(shape: &Shape) -> bool {
     }
 }
 
-struct WireShape(Shape);
+pub(crate) struct WireShape(pub(crate) Shape);
 impl<'de> Deserialize<'de> for WireShape {
     fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
         let raw = <&RawValue>::deserialize(decoder)?;
@@ -319,7 +322,7 @@ impl Serialize for WireShape {
 
 #[derive(Serialize)]
 #[serde(transparent)]
-struct Bounded<T, const N: usize>(Vec<T>);
+pub(crate) struct Bounded<T, const N: usize>(pub(crate) Vec<T>);
 impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for Bounded<T, N> {
     fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
         struct List<T, const N: usize>(PhantomData<T>);
