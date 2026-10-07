@@ -1,0 +1,87 @@
+[
+  {
+    "id": "P07-01",
+    "phase": "P07",
+    "title": "Implement AWS telemetry connector",
+    "requirements": [
+      "R-COVERAGE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P07-01",
+      "AT-CAP-016",
+      "AT-CAP-017",
+      "AT-FAMILY-AWS"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement AWS telemetry connector with executable tests and versioned evidence"
+  },
+  {
+    "id": "P07-02",
+    "phase": "P07",
+    "title": "Implement AWS structural adapter",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P07-02",
+      "AT-CAP-018",
+      "AT-CAP-045",
+      "AT-CAP-046",
+      "AT-CAP-047",
+      "AT-FAMILY-EXTERNAL"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement AWS structural adapter with executable tests and versioned evidence"
+  },
+  {
+    "id": "P07-03",
+    "phase": "P07",
+    "title": "Validate AWS checkpoints and limits",
+    "requirements": [
+      "R-DELIVERY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P07-01",
+      "P07-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P07-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate AWS checkpoints and limits with executable tests and versioned evidence"
+  }
+]

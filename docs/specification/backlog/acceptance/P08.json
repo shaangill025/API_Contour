@@ -1,0 +1,65 @@
+[
+  {
+    "id": "AT-P08-01",
+    "task": "P08-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Read authorized audit/gateway fixture",
+    "expected": "Distinguish operation-only evidence from body structure.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P08-02",
+    "task": "P08-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise client or function fixture with synthetic content",
+    "expected": "Sanitized structure is captured through the shared contract.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P08-03",
+    "task": "P08-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Retry, throttle and revoke the test identity",
+    "expected": "Report gaps and duplicates without unauthorized reads.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-019",
+    "task": "P08-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Audit metadata with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report operation evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-020",
+    "task": "P08-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Gateway metadata with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report operation evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-021",
+    "task": "P08-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Client structural observation with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-GCP",
+    "task": "P08-01",
+    "setup": "All real positive profiles of gcp with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  }
+]

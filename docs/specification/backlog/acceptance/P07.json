@@ -1,0 +1,101 @@
+[
+  {
+    "id": "AT-P07-01",
+    "task": "P07-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Read authorized API Gateway/log fixture with body-free records",
+    "expected": "Record operation metadata without inventing body fields; permissions stay scoped.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P07-02",
+    "task": "P07-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise SDK or Lambda fixture with synthetic request/response content",
+    "expected": "Local extraction supplies structure and no raw values leave the collection boundary.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P07-03",
+    "task": "P07-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Retry, throttle, revoke access and reread source records",
+    "expected": "Checkpoints do not silently lose records; duplicate/unknown count semantics and revocation are correct.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-016",
+    "task": "P07-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Gateway log metadata with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report operation evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-017",
+    "task": "P07-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise S3 management metadata with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report operation evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-018",
+    "task": "P07-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise SDK structural observation with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-045",
+    "task": "P07-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Outbound partner API from client with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-046",
+    "task": "P07-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise AI API without prompt values with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-047",
+    "task": "P07-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise External SaaS-to-SaaS without telemetry with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report unavailable evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-AWS",
+    "task": "P07-01",
+    "setup": "All real positive profiles of aws with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-EXTERNAL",
+    "task": "P07-02",
+    "setup": "All real positive profiles of external with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  }
+]
