@@ -122,7 +122,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--https-only'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--https-only','--delivery-only'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     for tool in ["docker", "openssl", "cargo"]:
         if not shutil.which(tool):
@@ -132,8 +132,10 @@ def main():
     if "--authority" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
-    elif "--https-only" in sys.argv:
+    elif "--https-only" in sys.argv or "--delivery-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
+    if "--delivery-only" in sys.argv:
+        run(["cargo", "build", "-p", "contour-delivery", "--example", "delivery_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = volume = None
@@ -161,7 +163,7 @@ def main():
             if network_settings["Driver"] != "bridge" or network_settings["Options"].get("com.docker.network.bridge.enable_ip_masquerade") != "false":
                 raise AssertionError("fixture bridge configuration mismatch")
             data_mount = ["--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m"]
-            if "--authority" in sys.argv or "--https-only" in sys.argv:
+            if "--authority" in sys.argv or "--https-only" in sys.argv or "--delivery-only" in sys.argv:
                 volume = "contour-recovery-" + secrets.token_hex(12)
                 run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
@@ -251,9 +253,9 @@ def main():
             check("localhost", port, "untrusted.crt", "Connection")
             check("127.0.0.1", port, "ca.crt", "Connection")
             print("Actual PostgreSQL trusted CA, TLS health, bad CA, wrong hostname and backend cleanup passed")
-            if "--https-only" in sys.argv:
+            if "--https-only" in sys.argv or "--delivery-only" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
-                runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,https_only=True)
+                runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,https_only=True,delivery_only="--delivery-only" in sys.argv)
             elif "--authority" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment)

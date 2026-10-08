@@ -62,6 +62,57 @@ impl FrozenView<'_> {
         self.frozen.binding
     }
 }
+/// Exclusive queue borrow for one bounded transport copy of the frozen payload.
+/// Not Clone; no owned payload is exported. A transport consumer must take
+/// `&mut DeliveryReservation` and drop all body/driver owners before returning,
+/// cancellation, acknowledgment or releasing this borrow. Upfront charges stay
+/// reserved when this handle is dropped; the same frozen batch can be retried.
+#[must_use]
+pub struct DeliveryReservation<'q> {
+    queue: &'q mut MemoryQueue,
+    valid_until: OffsetDateTime,
+}
+impl fmt::Debug for DeliveryReservation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DeliveryReservation")
+    }
+}
+impl DeliveryReservation<'_> {
+    /// Verified current authority lease clipped to the frozen records' deadline.
+    pub fn valid_until(&self) -> OffsetDateTime {
+        self.valid_until
+    }
+    /// Local identity established by queue admission, without decoding payload.
+    pub fn identity(&self) -> [&str; 2] {
+        self.queue.identity.each_ref().map(String::as_str)
+    }
+    /// Borrow for one consumer; two outstanding mutable attempt borrows cannot coexist.
+    /// ```compile_fail,E0499
+    /// use contour_core::DeliveryReservation;
+    /// async fn send_once(_: &mut DeliveryReservation<'_>) {}
+    /// async fn concurrent(attempt: &mut DeliveryReservation<'_>) {
+    ///     let first = send_once(attempt);
+    ///     let second = send_once(attempt);
+    ///     first.await;
+    ///     second.await;
+    /// }
+    /// ```
+    pub fn view(&mut self) -> FrozenView<'_> {
+        FrozenView {
+            frozen: self
+                .queue
+                .frozen
+                .as_ref()
+                .expect("active delivery reservation"),
+        }
+    }
+    /// Consume only after independently authenticated, known-commit receipt
+    /// validation and after the transport's body/socket/driver owners are dropped.
+    pub fn acknowledge(self, receipt: Acknowledgement<'_>) -> Result<(), QueueError> {
+        self.queue.acknowledge(receipt)
+    }
+}
+
 /// Parsed receipt plus request routing evidence supplied by trusted transport.
 /// Syntax/binding checks are not authentication or proof of server commitment.
 pub struct Acknowledgement<'a> {
@@ -126,6 +177,35 @@ impl MemoryQueue {
     ) -> Result<Option<FrozenView<'_>>, QueueError> {
         let now = self.now()?;
         self.delivery_at(inputs, now)
+    }
+    /// Recheck current authority and lend exclusive ownership for one attempt.
+    /// The reservation does not authenticate transport or discover revocation.
+    pub fn reserve_delivery(
+        &mut self,
+        inputs: &AdmissionInputs<'_>,
+    ) -> Result<Option<DeliveryReservation<'_>>, QueueError> {
+        let now = self.now()?;
+        self.reserve_delivery_at(inputs, now)
+    }
+    pub(super) fn reserve_delivery_at(
+        &mut self,
+        inputs: &AdmissionInputs<'_>,
+        now: OffsetDateTime,
+    ) -> Result<Option<DeliveryReservation<'_>>, QueueError> {
+        self.delivery_at(inputs, now)?;
+        if self.frozen.is_none() {
+            return Ok(None);
+        }
+        let valid_until = self
+            .frozen
+            .as_ref()
+            .expect("checked frozen")
+            .deadline
+            .min(inputs.current.expires_at());
+        Ok(Some(DeliveryReservation {
+            queue: self,
+            valid_until,
+        }))
     }
     pub fn acknowledge(&mut self, receipt: Acknowledgement<'_>) -> Result<(), QueueError> {
         let frozen = self.frozen.as_ref().ok_or(QueueError::Ownership)?;
@@ -208,16 +288,19 @@ impl MemoryQueue {
         )
         .map_err(|_| QueueError::Record)?;
         let length = batch.length().map_err(|_| QueueError::Record)?;
-        let quota = self.limits.bytes.min(inputs.current.queue_bytes() as usize);
-        if self
-            .stats
-            .bytes
-            .checked_add(length)
-            .is_none_or(|total| total > quota)
-        {
-            return Err(QueueError::Full);
+        let allowance = self
+            .entries
+            .iter()
+            .take(count)
+            .try_fold(0usize, |total, entry| {
+                total.checked_add(entry.base_allowance)
+            })
+            .ok_or(QueueError::Limits)?;
+        if length > allowance {
+            return Err(QueueError::Record);
         }
-        // Exclusive ownership reserves this exact additional retained buffer first.
+        // Admission reserved 3C: records plus this wire plus one transport copy.
+        // W <= selected C guarantees that even a full queue needs no headroom.
         let digest = batch.digest().map_err(|_| QueueError::Record)?;
         let wire = batch.encode().map_err(|_| QueueError::Record)?;
         if wire.len() != length {
@@ -267,8 +350,7 @@ impl MemoryQueue {
                 .frozen
                 .as_ref()
                 .map_or(0, |frozen| frozen.entries.len());
-        self.stats.bytes = retained.map(|entry| entry.charge).sum::<usize>()
-            + self.frozen.as_ref().map_or(0, |frozen| frozen.wire.len());
+        self.stats.bytes = retained.map(|entry| entry.charge).sum::<usize>();
     }
     pub(super) fn cancel_frozen(&mut self, now: OffsetDateTime) {
         if let Some(frozen) = self.frozen.take() {

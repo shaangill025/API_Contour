@@ -64,6 +64,12 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 scripts/test-postgres-tls.py --https-only
+      - name: Test bounded collector delivery through HTTPS and PostgreSQL
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 -u scripts/test-postgres-tls.py --delivery-only
 
   postgres:
     name: PostgreSQL 16 identity
