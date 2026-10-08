@@ -42,7 +42,7 @@ enum Outcome {
     ),
     Authority(
         oneshot::Sender<Result<AuthorityRead, AuthorityError>>,
-        Result<AuthorityRead, AuthorityError>,
+        Box<Result<AuthorityRead, AuthorityError>>,
     ),
 }
 impl Outcome {
@@ -52,7 +52,7 @@ impl Outcome {
                 let _ = reply.send(result);
             }
             Self::Authority(reply, result) => {
-                let _ = reply.send(result);
+                let _ = reply.send(*result);
             }
         }
     }
@@ -256,7 +256,7 @@ impl DatabasePool {
                         }
                         Err(_) => Err(AuthorityError::Database),
                     };
-                    Outcome::Authority(reply, result)
+                    Outcome::Authority(reply, Box::new(result))
                 }
             };
             let mut returned = connected.ok();
