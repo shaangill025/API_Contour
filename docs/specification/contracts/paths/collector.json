@@ -1,0 +1,348 @@
+{
+  "/v1/enrollments": {
+    "post": {
+      "operationId": "enrollCollector",
+      "security": [
+        {
+          "bootstrapToken": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/EnrollmentResult"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/collector.json#/EnrollmentRequest"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/collector-policy": {
+    "get": {
+      "operationId": "getCollectorPolicy",
+      "security": [
+        {
+          "collectorMtls": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/SignedPolicy"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/collector-sources": {
+    "post": {
+      "operationId": "registerCollectorSource",
+      "security": [
+        {
+          "collectorMtls": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Source"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/collector.json#/SourceRequest"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/batches": {
+    "post": {
+      "operationId": "ingestBatch",
+      "security": [
+        {
+          "collectorMtls": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Receipt"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../batch.schema.json"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/collector-health": {
+    "post": {
+      "operationId": "reportCollectorHealth",
+      "security": [
+        {
+          "collectorMtls": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Health"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/collector.json#/Health"
+            }
+          }
+        }
+      }
+    },
+    "get": {
+      "operationId": "listCollectorHealth",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/HealthList"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      ]
+    }
+  },
+  "/v1/policies": {
+    "post": {
+      "operationId": "publishPolicy",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/SignedPolicy"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/collector.json#/Policy"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/collectors/{id}/revocation": {
+    "post": {
+      "operationId": "revokeCollector",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/RevocationResult"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/collector.json#/Revocation"
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    }
+  }
+}
