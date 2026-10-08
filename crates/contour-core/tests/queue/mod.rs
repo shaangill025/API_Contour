@@ -861,17 +861,20 @@ fn bounded_freeze_exact_prefix_limits_loss_and_sticky_exposure() {
     assert_eq!(inspected.len(), 4);
     for (i, (id, queued, expires)) in inspected.iter().enumerate() {
         assert_eq!(*id, format!("00000000-0000-4000-8000-{:012x}", i + 1));
-        assert_eq!((*queued, *expires), (&original[i].0, &original[i].1));
+        assert_eq!(
+            (queued.as_str(), expires.as_str()),
+            (original[i].0.as_str(), original[i].1.as_str())
+        );
     }
     let frozen = q.frozen.as_ref().unwrap();
     for (entry, before) in frozen.entries.iter().chain(q.entries.iter()).zip(&original) {
         assert_eq!(
             (
-                entry.record.queued_at(),
-                entry.record.expires_at(),
+                entry.record.queued_at().as_str(),
+                entry.record.expires_at().as_str(),
                 entry.charge
             ),
-            (&before.0, &before.1, before.2)
+            (before.0.as_str(), before.1.as_str(), before.2)
         );
     }
     let (binding, wire) = {
