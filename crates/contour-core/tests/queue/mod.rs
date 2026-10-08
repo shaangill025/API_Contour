@@ -812,3 +812,106 @@ fn expiry_maintenance_keeps_authority_and_exact_ttl_boundary() {
     assert!(queue.revoked);
     assert_eq!(queue.high_water, high_water);
 }
+
+#[test]
+fn bounded_freeze_exact_prefix_limits_loss_and_sticky_exposure() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut q = queue(4, 100000);
+    for i in 1..=4 {
+        admit(&mut q, draft(i), &inputs, time(i as i64)).unwrap();
+    }
+    let original = q
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.record.queued_at().clone(),
+                e.record.expires_at().clone(),
+                e.charge,
+            )
+        })
+        .collect::<Vec<_>>();
+    let created = Timestamp::from_instant(time(6)).unwrap();
+    let records = q
+        .entries
+        .iter()
+        .take(2)
+        .map(|e| &e.record.record)
+        .collect::<Vec<_>>();
+    let exact = crate::batch::BorrowedBatch::new(ID, [ID; 2], &created, &records)
+        .unwrap()
+        .length()
+        .unwrap();
+    let full = q.stats().bytes;
+    q.freeze_with_limits_at(ID, 4, exact, &inputs, time(6))
+        .unwrap();
+    assert_eq!(q.frozen.as_ref().unwrap().entries.len(), 2);
+    assert_eq!(
+        q.delivery_at(&inputs, time(6))
+            .unwrap()
+            .unwrap()
+            .wire()
+            .len(),
+        exact
+    );
+    assert_eq!(q.stats().bytes, full);
+    let inspected = q.retained_record_times().collect::<Vec<_>>();
+    assert_eq!(inspected.len(), 4);
+    for (i, (id, queued, expires)) in inspected.iter().enumerate() {
+        assert_eq!(*id, format!("00000000-0000-4000-8000-{:012x}", i + 1));
+        assert_eq!((*queued, *expires), (&original[i].0, &original[i].1));
+    }
+    let frozen = q.frozen.as_ref().unwrap();
+    for (entry, before) in frozen.entries.iter().chain(q.entries.iter()).zip(&original) {
+        assert_eq!(
+            (
+                entry.record.queued_at(),
+                entry.record.expires_at(),
+                entry.charge
+            ),
+            (&before.0, &before.1, before.2)
+        );
+    }
+    let (binding, wire) = {
+        let v = q.delivery_at(&inputs, time(7)).unwrap().unwrap();
+        (v.binding(), v.wire().to_vec())
+    };
+    // Dropping a reservation/controller never clears queue-owned exposure.
+    drop(q.reserve_delivery_at(&inputs, time(7)).unwrap());
+    assert_eq!(
+        q.freeze_with_limits_at(
+            "00000000-0000-4000-8000-000000000002",
+            1,
+            exact,
+            &inputs,
+            time(7)
+        ),
+        Err(QueueError::Ownership)
+    );
+    let v = q.delivery_at(&inputs, time(7)).unwrap().unwrap();
+    assert_eq!(v.binding(), binding);
+    assert_eq!(v.wire(), wire);
+    q.discard_frozen(binding).unwrap();
+    // One byte below a two-record envelope chooses exactly one surviving record.
+    q.freeze_with_limits_at(ID, 2, exact - 1, &inputs, time(6))
+        .unwrap();
+    assert_eq!(q.frozen.as_ref().unwrap().entries.len(), 1);
+    let binding = q.frozen.as_ref().unwrap().binding;
+    q.discard_frozen(binding).unwrap();
+    // A tiny operator limit explicitly loses the last record without re-admission.
+    q.freeze_with_limits_at(ID, 1, 1, &inputs, time(6)).unwrap();
+    assert!(q.frozen.is_none());
+    assert_eq!(q.stats().oversized, 1);
+    assert_eq!(q.stats().records, 0);
+    assert_eq!(q.stats().bytes, 0);
+    assert_eq!(
+        q.freeze_with_limits_at(ID, 0, 100, &inputs, time(6)),
+        Err(QueueError::Limits)
+    );
+    assert_eq!(
+        q.freeze_with_limits_at(ID, 1, 1048577, &inputs, time(6)),
+        Err(QueueError::Limits)
+    );
+}
