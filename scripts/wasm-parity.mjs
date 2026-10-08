@@ -59,6 +59,10 @@ for (let round = 0; round < 3; round++) {
   // A legal growth detaches prior host views; the same offsets must still work.
   if (round === 0) e.memory.grow(1);
 }
-assert.throws(() => e.memory.grow(257), RangeError, 'module memory ceiling missing');
+const remaining = 256 - e.memory.buffer.byteLength / 65536;
+assert.ok(remaining >= 0, 'module exceeded memory ceiling');
+e.memory.grow(remaining);
+assert.equal(e.memory.buffer.byteLength, 16777216, 'memory ceiling boundary unavailable');
+assert.throws(() => e.memory.grow(1), RangeError, 'module memory ceiling missing');
 process.stdout.write(JSON.stringify({ results, node: process.version,
   memory_bytes: e.memory.buffer.byteLength, imports: [], rounds: 3 }));
