@@ -1,0 +1,113 @@
+[
+  {
+    "id": "P06-01",
+    "phase": "P06",
+    "title": "Implement Android library",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P06-01",
+      "AT-CAP-012",
+      "AT-CAP-013",
+      "AT-FAMILY-ANDROID"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement Android library with executable tests and versioned evidence"
+  },
+  {
+    "id": "P06-02",
+    "phase": "P06",
+    "title": "Implement iOS library",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P06-02",
+      "AT-CAP-014",
+      "AT-CAP-015",
+      "AT-FAMILY-IOS"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement iOS library with executable tests and versioned evidence"
+  },
+  {
+    "id": "P06-03",
+    "phase": "P06",
+    "title": "Validate mobile lifecycle and resources",
+    "requirements": [
+      "R-PERFORMANCE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P06-01",
+      "P06-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P06-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate mobile lifecycle and resources with executable tests and versioned evidence"
+  },
+  {
+    "id": "P06-04",
+    "phase": "P06",
+    "title": "Package mobile bindings",
+    "requirements": [
+      "R-PACKAGING"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P06-01",
+      "P06-02",
+      "P06-03",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P06-04"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Package mobile bindings with executable tests and versioned evidence"
+  }
+]

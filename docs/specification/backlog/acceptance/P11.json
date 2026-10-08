@@ -1,0 +1,110 @@
+[
+  {
+    "id": "AT-P11-01",
+    "task": "P11-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Run exact-number, duplicate-key, multipart and malformed fixtures",
+    "expected": "Extract deterministic bounded nodes; preserve unknown and partial semantics.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P11-02",
+    "task": "P11-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise external entities, expansion and depth attacks",
+    "expected": "No network/file entity access occurs; limits are enforced.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P11-03",
+    "task": "P11-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise arguments, descriptors, binary frames and encryption limits",
+    "expected": "Only approved structure persists; unsupported content has explicit reasons.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P11-04",
+    "task": "P11-04",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Run identical semantic cases across all bindings",
+    "expected": "Canonical bytes agree including Unicode, maps, unions and empty arrays.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-029",
+    "task": "P11-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise JSON exact numbers and null with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-030",
+    "task": "P11-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Form and multipart with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-031",
+    "task": "P11-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise XML with safe names with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-032",
+    "task": "P11-03",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise GraphQL with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-033",
+    "task": "P11-03",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise gRPC with supplied descriptors with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-034",
+    "task": "P11-03",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise WebSocket messages with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-035",
+    "task": "P11-03",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise gRPC unknown descriptor limit with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report operation evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-PROTOCOLS",
+    "task": "P11-01",
+    "setup": "All real positive profiles of protocols with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  }
+]

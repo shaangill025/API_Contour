@@ -1,0 +1,97 @@
+[
+  {
+    "id": "P11-01",
+    "phase": "P11",
+    "title": "Implement HTTP JSON and form parsing",
+    "requirements": [
+      "R-PROTOCOLS"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P11-01",
+      "AT-CAP-029",
+      "AT-CAP-030",
+      "AT-FAMILY-PROTOCOLS"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement HTTP JSON and form parsing with executable tests and versioned evidence"
+  },
+  {
+    "id": "P11-02",
+    "phase": "P11",
+    "title": "Implement XML parsing",
+    "requirements": [
+      "R-SECURITY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P11-02",
+      "AT-CAP-031"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement XML parsing with executable tests and versioned evidence"
+  },
+  {
+    "id": "P11-03",
+    "phase": "P11",
+    "title": "Implement GraphQL gRPC and WebSocket parsing",
+    "requirements": [
+      "R-PROTOCOLS"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P11-03",
+      "AT-CAP-032",
+      "AT-CAP-033",
+      "AT-CAP-034",
+      "AT-CAP-035"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement GraphQL gRPC and WebSocket parsing with executable tests and versioned evidence"
+  },
+  {
+    "id": "P11-04",
+    "phase": "P11",
+    "title": "Build cross-runtime golden corpus",
+    "requirements": [
+      "R-CANONICAL"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03"
+    ],
+    "acceptance": [
+      "AT-P11-04"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Build cross-runtime golden corpus with executable tests and versioned evidence"
+  }
+]

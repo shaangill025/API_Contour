@@ -1,0 +1,38 @@
+[
+  {
+    "id": "AT-P12-01",
+    "task": "P12-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise filtering, cursors, malicious imports and selected exports",
+    "expected": "Scope and pagination hold; imported values and remote references do not persist or execute.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P12-02",
+    "task": "P12-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise keyboard and browser review workflows with conflicts and partial data",
+    "expected": "Required states are readable and accessible; stale/unknown evidence is never shown as full coverage.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P12-03",
+    "task": "P12-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Disconnect collectors, drop records and change policies",
+    "expected": "UI shows accurate health age, loss, actor and policy version.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-UI-REVIEW-RELOAD",
+    "task": "P12-02",
+    "setup": "Isolated authorized integration fixture with real persistence and identity/policy state.",
+    "action": "Create an observed/declaration comparison and review, then open it from a fresh client.",
+    "expected": "Retrieve exact immutable comparison, direction, baseline, differences, sampling/limit context and revision before deciding.",
+    "evidence": "API results, absence/presence checks across sinks, state transitions and exact source/version references.",
+    "status": "NOT_RUN"
+  }
+]

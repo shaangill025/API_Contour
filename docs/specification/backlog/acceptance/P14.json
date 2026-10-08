@@ -1,0 +1,38 @@
+[
+  {
+    "id": "AT-P14-01",
+    "task": "P14-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Execute every required capability and every family cross-cutting case",
+    "expected": "All cases pass with exact version tuples; unavailable resources block release.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P14-02",
+    "task": "P14-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Seed secrets at each collector and inspect every sink through backup/export",
+    "expected": "No prohibited data escapes; cross-tenant and revocation tests pass.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P14-03",
+    "task": "P14-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Execute defined load, overload, failure and restore scenarios",
+    "expected": "Measured budgets hold and failures do not alter business traffic.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P14-04",
+    "task": "P14-04",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Try incomplete, stale, mismatched and failed evidence manifests",
+    "expected": "Release checker rejects each; complete real evidence and independently reviewed packages are required.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  }
+]
