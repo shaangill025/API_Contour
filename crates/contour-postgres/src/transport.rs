@@ -2,7 +2,10 @@ use crate::DatabaseSettings;
 use native_tls::{Certificate, Protocol, TlsConnector};
 use postgres_native_tls::MakeTlsConnector;
 use std::{fmt, time::Duration};
-use tokio::{task::JoinHandle, time::timeout};
+use tokio::{
+    task::JoinHandle,
+    time::{Instant, timeout, timeout_at},
+};
 use tokio_postgres::Client;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,7 @@ pub struct ConnectedDatabase {
     pub(crate) client: Option<Client>,
     driver: Option<JoinHandle<Result<(), tokio_postgres::Error>>>,
     pub(crate) deadline: Duration,
+    pub(crate) reusable: bool,
 }
 impl fmt::Debug for ConnectedDatabase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,6 +89,61 @@ impl fmt::Debug for ConnectedDatabase {
     }
 }
 impl DatabaseSettings {
+    /// One resolved IP only, preserving the configured TLS hostname and port.
+    /// IPv4 is preferred before connecting; there is no address retry/fallback.
+    /// Caller budget can only shorten the configured connection deadline.
+    pub async fn connect_single_until(
+        &self,
+        trust: &TrustedCa,
+        deadline: Instant,
+    ) -> Result<ConnectedDatabase, TransportError> {
+        tokio::runtime::Handle::try_current().map_err(|_| TransportError::Runtime)?;
+        let deadline = deadline.min(Instant::now() + self.deadline);
+        if Instant::now() >= deadline {
+            return Err(TransportError::Deadline);
+        }
+        let work = async {
+            let host = match self.config.get_hosts().first() {
+                Some(tokio_postgres::config::Host::Tcp(host)) => host,
+                _ => return Err(TransportError::Connection),
+            };
+            let port = *self
+                .config
+                .get_ports()
+                .first()
+                .ok_or(TransportError::Connection)?;
+            let mut addresses = tokio::net::lookup_host((host.as_str(), port))
+                .await
+                .map_err(|_| TransportError::Connection)?;
+            let first = addresses.next().ok_or(TransportError::Connection)?;
+            let address = if first.is_ipv4() {
+                first
+            } else {
+                addresses.find(|address| address.is_ipv4()).unwrap_or(first)
+            };
+            if Instant::now() >= deadline {
+                return Err(TransportError::Deadline);
+            }
+            let mut config = self.config.clone();
+            config.hostaddr(address.ip());
+            let (client, connection) = config
+                .connect(trust.0.clone())
+                .await
+                .map_err(|_| TransportError::Connection)?;
+            if Instant::now() >= deadline {
+                return Err(TransportError::Deadline);
+            }
+            Ok(ConnectedDatabase {
+                client: Some(client),
+                driver: Some(tokio::spawn(connection)),
+                deadline: self.deadline,
+                reusable: false,
+            })
+        };
+        timeout_at(deadline, work)
+            .await
+            .map_err(|_| TransportError::Deadline)?
+    }
     /// Requires a Tokio runtime with I/O and timers enabled. Timeout is cooperative;
     /// OS DNS work in Tokio's blocking pool may outlive cancellation of this future.
     pub async fn connect(&self, trust: &TrustedCa) -> Result<ConnectedDatabase, TransportError> {
@@ -97,11 +156,26 @@ impl DatabaseSettings {
             client: Some(client),
             driver: Some(tokio::spawn(connection)),
             deadline: self.deadline,
+            reusable: false,
         })
     }
 }
 impl ConnectedDatabase {
+    /// Read-only reuse evidence, not authentication or reusable policy authority.
+    /// Only confirmed transaction completion with empty context marks readiness.
+    pub fn is_reusable(&self) -> bool {
+        self.reusable
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|client| !client.is_closed())
+            && self
+                .driver
+                .as_ref()
+                .is_some_and(|driver| !driver.is_finished())
+    }
     pub(crate) fn invalidate(&mut self) {
+        self.reusable = false;
         self.client.take();
         if let Some(driver) = &self.driver {
             driver.abort();
@@ -123,6 +197,7 @@ impl ConnectedDatabase {
     }
     /// Drop the client and await driver shutdown within the configured deadline.
     pub async fn close(mut self) -> Result<(), TransportError> {
+        self.reusable = false;
         self.client.take();
         // Retain ownership across await so cancellation also aborts the driver.
         let driver = self.driver.as_mut().ok_or(TransportError::Shutdown)?;
@@ -163,6 +238,7 @@ mod tests {
                     client: None,
                     driver: Some(driver),
                     deadline: Duration::from_millis(1),
+                    reusable: false,
                 };
                 assert_eq!(session.close().await, Err(TransportError::Deadline));
                 tokio::task::yield_now().await;
@@ -184,6 +260,7 @@ mod tests {
                     client: None,
                     driver: Some(driver),
                     deadline: Duration::from_secs(1),
+                    reusable: false,
                 };
                 let mut close = Box::pin(session.close());
                 std::future::poll_fn(|cx| {
@@ -237,5 +314,37 @@ yhJX38TR9DM9wPkeA7ciTipLCzu5OKdtuWDX1jxxwCw=
     #[test]
     fn empty_ca_bundle_is_rejected() {
         assert_eq!(TrustedCa::from_pem(b"").unwrap_err(), TransportError::Trust);
+    }
+    #[test]
+    fn expired_single_address_deadline_opens_no_tcp_connection() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let settings = DatabaseSettings::new(
+                    "127.0.0.1",
+                    listener.local_addr().unwrap().port(),
+                    "fixture",
+                    "fixture",
+                    b"inert",
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                let trust = TrustedCa::from_pem(CERT.as_bytes()).unwrap();
+                assert_eq!(
+                    settings
+                        .connect_single_until(&trust, Instant::now() - Duration::from_secs(1))
+                        .await
+                        .unwrap_err(),
+                    TransportError::Deadline
+                );
+                assert!(
+                    timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
     }
 }

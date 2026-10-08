@@ -1,4 +1,5 @@
 use crate::CollectorTls;
+use crate::pool::{DatabaseCapacity, DatabasePool};
 use bytes::Bytes;
 use contour_core::{Batch, PolicyKeys};
 use contour_postgres::{AuthorityError, DatabaseSettings, SubmitError, TrustedCa};
@@ -75,6 +76,7 @@ impl PrincipalRegistry {
 #[derive(Clone, Copy, Debug)]
 pub struct HttpLimits {
     connections: usize,
+    database_sessions: usize,
     deadline: Duration,
 }
 impl HttpLimits {
@@ -86,16 +88,22 @@ impl HttpLimits {
         }
         Ok(Self {
             connections,
+            database_sessions: connections,
             deadline,
         })
+    }
+    pub fn with_database_sessions(mut self, capacity: usize) -> Result<Self, IngressError> {
+        if !(1..=64).contains(&capacity) {
+            return Err(IngressError::Configuration);
+        }
+        self.database_sessions = capacity;
+        Ok(self)
     }
 }
 struct State {
     tls: CollectorTls,
     registry: PrincipalRegistry,
-    database: DatabaseSettings,
-    trust: TrustedCa,
-    keys: PolicyKeys,
+    database: DatabasePool,
 }
 /// Owns TLS authentication and HTTP dispatch. No public principal/SQL bypass.
 pub struct IngestionServer {
@@ -120,12 +128,13 @@ impl IngestionServer {
             state: Arc::new(State {
                 tls,
                 registry,
-                database,
-                trust,
-                keys,
+                database: DatabasePool::new(database, trust, keys, limits.database_sessions),
             }),
             limits,
         }
+    }
+    pub fn database_capacity(&self) -> DatabaseCapacity {
+        self.state.database.capacity()
     }
     /// One HTTP request per owned connection. Explicit shutdown aborts and joins
     /// every task; dropping this future also aborts the owned JoinSet.
@@ -134,6 +143,11 @@ impl IngestionServer {
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), IngressError> {
+        let _serving = self
+            .state
+            .database
+            .serving()
+            .map_err(|_| IngressError::Configuration)?;
         tokio::pin!(shutdown);
         let mut tasks = JoinSet::new();
         let result = loop {
@@ -166,14 +180,15 @@ impl IngestionServer {
             let deadline = Instant::now() + self.limits.deadline;
             let duration = self.limits.deadline;
             tasks.spawn(async move {
-                let _ = timeout_at(deadline, connection(state, socket, duration)).await;
+                let _ = timeout_at(deadline, connection(state, socket, duration, deadline)).await;
             });
         };
         tasks.shutdown().await;
+        self.state.database.shutdown().await;
         result
     }
 }
-async fn connection(state: Arc<State>, socket: TcpStream, duration: Duration) {
+async fn connection(state: Arc<State>, socket: TcpStream, duration: Duration, deadline: Instant) {
     let Ok(stream) = state.tls.accept(socket).await else {
         return;
     };
@@ -184,7 +199,8 @@ async fn connection(state: Arc<State>, socket: TcpStream, duration: Duration) {
         .peer_certificates()
         .and_then(|chain| chain.first())
         .and_then(|leaf| state.registry.lookup(leaf.as_ref()));
-    let service = service_fn(move |request| handle(state.clone(), principal.clone(), request));
+    let service =
+        service_fn(move |request| handle(state.clone(), principal.clone(), request, deadline));
     let mut builder = http1::Builder::new();
     builder
         .keep_alive(false)
@@ -201,6 +217,7 @@ async fn handle(
     state: Arc<State>,
     principal: Option<[String; 2]>,
     request: Request<Incoming>,
+    deadline: Instant,
 ) -> Result<Reply, IngressError> {
     let id = request_id()?;
     let fail = |status, code, retryable| error(status, code, retryable, &id);
@@ -279,17 +296,16 @@ async fn handle(
         return fail(StatusCode::FORBIDDEN, "not_authorized", false);
     }
     // Do not precheck validate_at: committed expired-record retries are legitimate.
-    let Ok(mut database) = state.database.connect(&state.trust).await else {
+    drop(bytes);
+    let batch_id = batch.batch_id().to_owned();
+    let Ok(receive) = state.database.submit(batch, principal, deadline) else {
         return fail(
             StatusCode::SERVICE_UNAVAILABLE,
-            "database_unavailable",
+            "database_capacity_unavailable",
             true,
         );
     };
-    let result = database
-        .submit_batch(&batch, [&principal[0], &principal[1]], &state.keys)
-        .await;
-    drop(database); // Driver ownership is never detached, including known cleanup failure.
+    let result = receive.await.map_err(|_| IngressError::Connection)?;
     match result {
         Ok(receipt) => {
             let accepted = receipt
@@ -298,7 +314,7 @@ async fn handle(
                 .map_err(|_| IngressError::Connection)?;
             reply(
                 StatusCode::OK,
-                json!({"batch_id":batch.batch_id(),"status":receipt.status().as_str(),"receipt_id":receipt.id(),"accepted_at":accepted}),
+                json!({"batch_id":batch_id,"status":receipt.status().as_str(),"receipt_id":receipt.id(),"accepted_at":accepted}),
             )
         }
         Err(SubmitError::Conflict) => fail(StatusCode::CONFLICT, "batch_conflict", false),
