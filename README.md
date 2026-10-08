@@ -9,8 +9,9 @@ only approved structural information to a central catalog. Teams will compare
 observed structures with declared and approved contracts, then review changes.
 
 **Status: under development.** This repository currently contains the Rust core
-and two PostgreSQL identity/policy migrations with separated administrative and
-ingestion privileges. It does not yet provide a runnable platform,
+and three PostgreSQL migrations for identity, policy, and inbox storage. The Rust
+database adapter validates authority, stores batches, and returns durable receipts.
+It does not yet provide a runnable platform,
 collector, ingestion service, or web UI. The architecture and packages below
 describe the intended release.
 
@@ -95,16 +96,19 @@ and production target are still pending. No production deployment is included ye
   No arbitrary-query or raw-client public API is exposed.
 - Transactional authority validation under restricted ingestion privileges, with
   current/historical signature checks and locked database scope. Its success does
-  not authorize a later write; inbox submission remains separate.
+  not authorize a later write; submission checks authority again while holding the
+  collector lock.
 - Immutable inbox headers and bounded batch storage with tenant isolation and
-  ingestion-only access. Atomic submission and receipt delivery remain pending.
+  ingestion-only access. Atomic submission returns server-generated receipts; exact
+  retries verify stored content and return the original receipt.
+- Real PostgreSQL process-crash recovery and lost COMMIT reply tests. A confirmed
+  commit retains its receipt even if connection cleanup then fails.
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
 Pure admission validates a supplied snapshot. HTTP authentication, capture-side
-revocation integration, collector revision high-water storage, transactional
-submission, durable receipts, collector queues,
+revocation integration, collector revision high-water storage, collector queues,
 all collectors, contract comparison, and the UI still need implementation.
-Full platform, device, cloud, recovery, and performance acceptance is pending.
+Full platform, device, cloud, backup/restore, and performance acceptance is pending.
 
 ## Build and test the current code
 
@@ -126,10 +130,12 @@ bash scripts/test-postgres.sh
 python3 scripts/test-postgres-tls.py --authority
 ```
 
-The database test creates an isolated temporary container with no network or host
-mounts. It removes that container when the test exits. See [database setup and
-security boundaries](db/README.md). These commands test the current foundation;
-they do not start an APIContour service.
+The SQL test uses a temporary container without network access. The TLS test uses
+a verified loopback-only port and synthetic certificates. Its authority and
+recovery cases use a fresh, owned Docker volume to test PostgreSQL restart. Tests
+remove their owned containers, volumes, and networks; no host data directory is
+mounted. See [database setup and security boundaries](db/README.md). These commands
+test the current foundation; they do not start an APIContour service.
 
 ## Design documents
 

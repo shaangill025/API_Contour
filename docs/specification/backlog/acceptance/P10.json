@@ -1,0 +1,74 @@
+[
+  {
+    "id": "AT-P10-01",
+    "task": "P10-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Run real Kafka producer/consumer fixtures before and after instrumentation",
+    "expected": "Capture structure without joining business groups or changing offsets, ordering or acknowledgments.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P10-02",
+    "task": "P10-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Exercise real MQTT broker with QoS profiles",
+    "expected": "Capture structure without additional subscriptions or changed delivery semantics.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P10-03",
+    "task": "P10-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Use secret-bearing topic/key/header names and overload collectors",
+    "expected": "Normalize names; remove values; application delivery results remain equivalent.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-025",
+    "task": "P10-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Kafka producer with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-026",
+    "task": "P10-01",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise Kafka consumer with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-027",
+    "task": "P10-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise MQTT publish with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-CAP-028",
+    "task": "P10-02",
+    "setup": "Real supported profile in an isolated authorized environment; record exact version and policy.",
+    "action": "Exercise MQTT receive with synthetic known structure, then remove the required permission or visibility.",
+    "expected": "Report structure evidence for the named case, exact limits for the negative control, and no prohibited values. Structural cases require real positive payload-structure capture.",
+    "evidence": "Fixture expectation, captured sanitized output, visibility record, platform versions and privacy-sink inspection.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-FAMILY-MESSAGING",
+    "task": "P10-01",
+    "setup": "All real positive profiles of messaging with baseline application behavior recorded.",
+    "action": "Disable policy; deny permission; stop collector; disconnect ingestion; overload; send malformed input and seeded secrets; restore service.",
+    "expected": "No unauthorized capture or changed business semantics. Bounds hold. Loss, partial visibility and recovery are accurate. No seed appears in persistent/export sinks.",
+    "evidence": "Before/after application outcomes, queue metrics, raw-seed scan results, sanitized records and resource measurements.",
+    "status": "NOT_RUN"
+  }
+]

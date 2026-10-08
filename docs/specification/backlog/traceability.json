@@ -1,0 +1,118 @@
+{
+  "baseline": "reconstructed-0.1",
+  "original_counts_not_recovered": {
+    "requirements": 46,
+    "tasks": 122,
+    "capabilities": 47,
+    "acceptance": 169
+  },
+  "requirements": {
+    "$ref": "requirements.json"
+  },
+  "phases": {
+    "$ref": "phases.json"
+  },
+  "tasks": [
+    {
+      "$ref": "tasks/P00.json"
+    },
+    {
+      "$ref": "tasks/P01.json"
+    },
+    {
+      "$ref": "tasks/P02.json"
+    },
+    {
+      "$ref": "tasks/P03.json"
+    },
+    {
+      "$ref": "tasks/P04.json"
+    },
+    {
+      "$ref": "tasks/P05.json"
+    },
+    {
+      "$ref": "tasks/P06.json"
+    },
+    {
+      "$ref": "tasks/P07.json"
+    },
+    {
+      "$ref": "tasks/P08.json"
+    },
+    {
+      "$ref": "tasks/P09.json"
+    },
+    {
+      "$ref": "tasks/P10.json"
+    },
+    {
+      "$ref": "tasks/P11.json"
+    },
+    {
+      "$ref": "tasks/P12.json"
+    },
+    {
+      "$ref": "tasks/P13.json"
+    },
+    {
+      "$ref": "tasks/P15.json"
+    },
+    {
+      "$ref": "tasks/P14.json"
+    }
+  ],
+  "capabilities": {
+    "$ref": "capabilities.json"
+  },
+  "acceptance": [
+    {
+      "$ref": "acceptance/P00.json"
+    },
+    {
+      "$ref": "acceptance/P01.json"
+    },
+    {
+      "$ref": "acceptance/P02.json"
+    },
+    {
+      "$ref": "acceptance/P03.json"
+    },
+    {
+      "$ref": "acceptance/P04.json"
+    },
+    {
+      "$ref": "acceptance/P05.json"
+    },
+    {
+      "$ref": "acceptance/P06.json"
+    },
+    {
+      "$ref": "acceptance/P07.json"
+    },
+    {
+      "$ref": "acceptance/P08.json"
+    },
+    {
+      "$ref": "acceptance/P09.json"
+    },
+    {
+      "$ref": "acceptance/P10.json"
+    },
+    {
+      "$ref": "acceptance/P11.json"
+    },
+    {
+      "$ref": "acceptance/P12.json"
+    },
+    {
+      "$ref": "acceptance/P13.json"
+    },
+    {
+      "$ref": "acceptance/P15.json"
+    },
+    {
+      "$ref": "acceptance/P14.json"
+    }
+  ]
+}

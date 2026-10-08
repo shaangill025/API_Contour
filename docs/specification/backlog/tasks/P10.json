@@ -1,0 +1,84 @@
+[
+  {
+    "id": "P10-01",
+    "phase": "P10",
+    "title": "Implement Kafka runtime hooks",
+    "requirements": [
+      "R-PASSIVE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P10-01",
+      "AT-CAP-025",
+      "AT-CAP-026",
+      "AT-FAMILY-MESSAGING"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement Kafka runtime hooks with executable tests and versioned evidence"
+  },
+  {
+    "id": "P10-02",
+    "phase": "P10",
+    "title": "Implement MQTT runtime hooks",
+    "requirements": [
+      "R-PASSIVE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P10-02",
+      "AT-CAP-027",
+      "AT-CAP-028"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement MQTT runtime hooks with executable tests and versioned evidence"
+  },
+  {
+    "id": "P10-03",
+    "phase": "P10",
+    "title": "Validate messaging privacy and failures",
+    "requirements": [
+      "R-PRIVACY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P10-01",
+      "P10-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P10-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Validate messaging privacy and failures with executable tests and versioned evidence"
+  }
+]

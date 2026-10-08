@@ -5,6 +5,7 @@ import itertools
 import json
 from pathlib import Path
 import queue
+import runpy
 import subprocess
 import threading
 import time
@@ -25,16 +26,16 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         if counts != '%d|%d' % (wanted, wanted):
             raise AssertionError('inbox atomic pair count mismatch')
 
-    def check(body, wanted='Accepted', deadline=5000, discard=False):
+    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None):
         path = directory / ('submit-%d.json' % next(sequence))
         path.write_text(json.dumps(body))
-        process = subprocess.Popen([probe, port, str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        process = subprocess.Popen([probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda: output.put(process.stdout.readline()), daemon=True)
         reader.start()
         try:
             actual = output.get(timeout=15).strip()
-            expected = 'Invalidated' if wanted == 'Cancel' else wanted
+            expected = 'Invalidated' if wanted == 'Cancel' else 'Accepted' if wanted == 'AcceptedInvalidated' else wanted
             if not (actual == expected or expected == 'Accepted' and actual.startswith('Accepted ')):
                 raise AssertionError('submission marker mismatch')
             until = time.monotonic() + 5
@@ -242,3 +243,4 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     pairs(candidate, 1)
     print('Restricted TLS atomic inbox, concurrent/retry/conflict/integrity/scope/expiry and bytea assertions passed')
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment)

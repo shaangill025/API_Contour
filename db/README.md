@@ -248,5 +248,24 @@ authority and expiry rules, all-record/payload-failure atomicity, and NUL/contro
 Unicode bytea round trips. It observes cancellation cleanup while the probe runtime
 remains alive, a timeout during real deferred-trigger COMMIT, and replay after
 discarding an application result. That discard is not dropped server COMMIT
-acknowledgement proof. PostgreSQL restart recovery and server acknowledgement fault
-injection remain mandatory next-slice evidence; no HTTP integration is claimed.
+acknowledgement proof. The additional recovery cases below exercise actual server
+acknowledgement faults and process restart; no HTTP integration is claimed.
+
+The default TLS profile retains disposable tmpfs data. Mandatory `--authority`
+uses a fresh Docker-managed named volume, verifies its exact PGDATA mount and
+ownership label, and removes the owned container, volume and network on completion.
+No host data directory is mounted. An owned loopback TLS proxy verifies the real
+backend CA/hostname and uses the same leaf certificate on both sides to preserve
+SCRAM channel binding. It bounds startup packets, message lengths and execution,
+observes PostgreSQL `CommandComplete COMMIT` plus idle `ReadyForQuery`, and drops
+that server acknowledgement. The client must report `OutcomeUnknown` and refuse
+session reuse; exact replay returns the original persisted receipt and changed
+content conflicts. A separate fault forwards COMMIT success then cuts the context
+cleanup query, proving acceptance survives with an invalidated connection.
+
+The fixture also SIGKILLs its owned PostgreSQL container during another uncommitted
+COMMIT, starts the same container/volume, waits for the actual PostgreSQL process
+and rechecks the loopback port binding. A previously accepted complete pair retains
+the exact header, digest, payload bytes and receipt; the interrupted pair is absent.
+This proves PostgreSQL process crash recovery for the fixture, not power-loss,
+backup/restore, replication or high availability guarantees.
