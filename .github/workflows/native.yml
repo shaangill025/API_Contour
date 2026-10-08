@@ -39,7 +39,7 @@ jobs:
       - name: Validate schema and OpenAPI standards
         run: /tmp/apicontour-spec-validation/bin/python docs/specification/validate-standard.py
       - name: Install pinned Rust tools
-        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
       - name: Fetch locked dependencies
         run: cargo +1.88.0 fetch --locked
       - name: Check formatting
@@ -55,6 +55,11 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 scripts/test-native-abi.py
+      - name: Test native and WebAssembly structural parity
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 scripts/test-wasm-parity.py
       - name: Fetch pinned TLS database fixture
         if: runner.os == 'Linux'
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
