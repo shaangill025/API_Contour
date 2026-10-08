@@ -28,6 +28,13 @@ pub struct Timestamp {
     instant: OffsetDateTime,
 }
 impl Timestamp {
+    pub(crate) fn from_instant(instant: OffsetDateTime) -> Result<Self, ScalarError> {
+        let text = instant
+            .to_offset(time::UtcOffset::UTC)
+            .format(&Rfc3339)
+            .map_err(|_| ScalarError::InvalidTimestamp)?;
+        Self::parse(&text)
+    }
     pub fn parse(text: &str) -> Result<Self, ScalarError> {
         if text.len() > 35 {
             return Err(ScalarError::TimestampTooLong);

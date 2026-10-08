@@ -58,11 +58,11 @@ pub struct RecordMetadata<'a> {
 /// A future queue must accept drafts, check policy/source/full metadata approval,
 /// reserve capacity, then privately stamp actual queue/expiry times on success.
 pub struct RecordDraft {
-    record: Record,
+    pub(crate) record: Record,
 }
 /// Immutable record with explicitly declared times, not proof of actual enqueue.
 pub struct CheckedRecord {
-    record: Record,
+    pub(crate) record: Record,
 }
 impl fmt::Debug for RecordMetadata<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -80,6 +80,14 @@ impl fmt::Debug for CheckedRecord {
     }
 }
 impl RecordDraft {
+    // Conservative per-entry wire charge: timestamp replacements (2*35), comma,
+    // and a complete batch envelope (320). Never retained as an extra byte buffer.
+    pub(crate) fn retention_charge(&self) -> Result<usize, BatchError> {
+        encode(&self.record)?
+            .len()
+            .checked_add(391)
+            .ok_or(BatchError::Size)
+    }
     pub fn from_observation(
         metadata: RecordMetadata<'_>,
         observation: Observation,
@@ -394,6 +402,9 @@ impl Envelope {
 }
 
 impl Record {
+    pub(crate) fn record_id(&self) -> &str {
+        &self.record_id
+    }
     fn validate(&self, created: OffsetDateTime) -> Result<(), BatchError> {
         let reasons = &self.reasons.0;
         if [

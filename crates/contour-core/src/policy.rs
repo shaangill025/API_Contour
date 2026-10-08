@@ -162,6 +162,12 @@ impl VerifiedPolicy {
     pub(crate) fn same_content(&self, other: &Self) -> bool {
         self.1 == other.1
     }
+    pub(crate) fn content_digest(&self) -> [u8; 32] {
+        self.1
+    }
+    pub(crate) fn queue_bytes(&self) -> u64 {
+        self.0.queue_bytes.get()
+    }
     pub(crate) fn approves(&self, service: &str, technique: &str, parser: &str) -> bool {
         self.0.service_ids.0.iter().any(|id| id == service)
             && self.0.techniques.0.iter().any(|name| name == technique)
