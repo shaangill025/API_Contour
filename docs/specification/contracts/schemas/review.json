@@ -1,0 +1,457 @@
+{
+  "ComparisonRequest": {
+    "type": "object",
+    "properties": {
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "left_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "left_kind": {
+        "type": "string",
+        "enum": [
+          "observed",
+          "declared",
+          "approved"
+        ]
+      },
+      "right_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "right_kind": {
+        "type": "string",
+        "enum": [
+          "observed",
+          "declared",
+          "approved"
+        ]
+      }
+    },
+    "required": [
+      "operation_id",
+      "left_id",
+      "left_kind",
+      "right_id",
+      "right_kind"
+    ],
+    "additionalProperties": false
+  },
+  "Difference": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "kind": {
+        "type": "string",
+        "enum": [
+          "added",
+          "removed",
+          "type_changed",
+          "nullability_changed",
+          "requiredness_changed",
+          "unknown"
+        ]
+      },
+      "assessment": {
+        "type": "string",
+        "enum": [
+          "compatible",
+          "incompatible",
+          "inconclusive"
+        ]
+      },
+      "reason": {
+        "type": "string",
+        "enum": [
+          "directional_constraint",
+          "insufficient_evidence",
+          "unsupported_construct",
+          "structural_difference"
+        ]
+      }
+    },
+    "required": [
+      "path",
+      "kind",
+      "assessment",
+      "reason"
+    ],
+    "additionalProperties": false
+  },
+  "Comparison": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "left_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "right_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "result": {
+        "type": "string",
+        "enum": [
+          "compatible",
+          "incompatible",
+          "inconclusive"
+        ]
+      },
+      "differences": {
+        "type": "array",
+        "maxItems": 10000,
+        "items": {
+          "$ref": "#/Difference"
+        }
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "request",
+          "response",
+          "publish",
+          "consume",
+          "operation",
+          "connection"
+        ]
+      },
+      "left_kind": {
+        "type": "string",
+        "enum": [
+          "observed",
+          "declared",
+          "approved"
+        ]
+      },
+      "right_kind": {
+        "type": "string",
+        "enum": [
+          "observed",
+          "declared",
+          "approved"
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "operation_id",
+      "left_id",
+      "right_id",
+      "result",
+      "differences",
+      "direction",
+      "left_kind",
+      "right_kind"
+    ],
+    "additionalProperties": false
+  },
+  "ReviewRequest": {
+    "type": "object",
+    "properties": {
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "comparison_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "candidate_contract_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "expected_baseline_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "operation_id",
+      "comparison_id",
+      "candidate_contract_id",
+      "expected_baseline_id"
+    ],
+    "additionalProperties": false
+  },
+  "Review": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "comparison_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "candidate_contract_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected"
+        ]
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "expected_baseline_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "deciding_actor_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "decided_at": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "operation_id",
+      "comparison_id",
+      "candidate_contract_id",
+      "revision",
+      "status",
+      "created_at",
+      "expected_baseline_id",
+      "deciding_actor_id",
+      "decided_at"
+    ],
+    "additionalProperties": false
+  },
+  "Decision": {
+    "type": "object",
+    "properties": {
+      "decision": {
+        "type": "string",
+        "enum": [
+          "approve",
+          "reject"
+        ]
+      },
+      "expected_revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "required": [
+      "decision",
+      "expected_revision"
+    ],
+    "additionalProperties": false
+  },
+  "AuditEvent": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "actor_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "action": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "target_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "outcome": {
+        "type": "string",
+        "enum": [
+          "success",
+          "denied",
+          "conflict",
+          "failure"
+        ]
+      },
+      "occurred_at": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "required": [
+      "id",
+      "actor_id",
+      "action",
+      "target_id",
+      "outcome",
+      "occurred_at"
+    ],
+    "additionalProperties": false
+  },
+  "CiRequest": {
+    "type": "object",
+    "properties": {
+      "candidate_contract_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "approved_baseline_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "required": [
+      "candidate_contract_id",
+      "approved_baseline_id",
+      "operation_id"
+    ],
+    "additionalProperties": false
+  },
+  "CiResult": {
+    "type": "object",
+    "properties": {
+      "comparison_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "result": {
+        "type": "string",
+        "enum": [
+          "pass",
+          "fail",
+          "inconclusive"
+        ]
+      },
+      "differences": {
+        "type": "array",
+        "maxItems": 10000,
+        "items": {
+          "$ref": "#/Difference"
+        }
+      }
+    },
+    "required": [
+      "comparison_id",
+      "result",
+      "differences"
+    ],
+    "additionalProperties": false
+  },
+  "AuditEventList": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "#/AuditEvent"
+        }
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "additionalProperties": false
+  },
+  "ReviewList": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "#/Review"
+        }
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "additionalProperties": false
+  }
+}

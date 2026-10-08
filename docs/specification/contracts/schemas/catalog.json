@@ -1,0 +1,418 @@
+{
+  "Operation": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "project_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "service_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "environment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "protocol": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32
+      },
+      "operation": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32
+      },
+      "route_template": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "approved_contract_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "last_seen": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "visibility": {
+        "type": "string",
+        "enum": [
+          "structure",
+          "operation",
+          "connection"
+        ]
+      },
+      "completeness": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "partial",
+          "unavailable"
+        ]
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "request",
+          "response",
+          "publish",
+          "consume",
+          "operation",
+          "connection"
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "project_id",
+      "service_id",
+      "environment_id",
+      "protocol",
+      "operation",
+      "route_template",
+      "approved_contract_id",
+      "last_seen",
+      "visibility",
+      "completeness",
+      "direction"
+    ],
+    "additionalProperties": false
+  },
+  "Variant": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "operation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "source_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "deployment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "policy_revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "fingerprint": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "structure": {
+        "$ref": "../batch.schema.json#/$defs/node"
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "first_seen": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "last_seen": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "visibility": {
+        "type": "string",
+        "enum": [
+          "structure",
+          "operation",
+          "connection"
+        ]
+      },
+      "completeness": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "partial",
+          "unavailable"
+        ]
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "request",
+          "response",
+          "publish",
+          "consume",
+          "operation",
+          "connection"
+        ]
+      },
+      "sample_numerator": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000
+      },
+      "sample_denominator": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000
+      },
+      "reasons": {
+        "type": "array",
+        "uniqueItems": true,
+        "maxItems": 8,
+        "items": {
+          "type": "string",
+          "enum": [
+            "permission",
+            "encrypted",
+            "unsupported",
+            "sampled",
+            "limit",
+            "malformed",
+            "source_gap",
+            "clock_skew"
+          ]
+        }
+      },
+      "route_uncertain": {
+        "type": "boolean"
+      },
+      "health_reported_at": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "required": [
+      "id",
+      "operation_id",
+      "source_id",
+      "deployment_id",
+      "policy_revision",
+      "fingerprint",
+      "structure",
+      "count",
+      "first_seen",
+      "last_seen",
+      "visibility",
+      "completeness",
+      "direction",
+      "sample_numerator",
+      "sample_denominator",
+      "reasons",
+      "route_uncertain",
+      "health_reported_at",
+      "collector_id"
+    ],
+    "additionalProperties": false
+  },
+  "OperationList": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "#/Operation"
+        }
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "additionalProperties": false
+  },
+  "VariantList": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "#/Variant"
+        }
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "additionalProperties": false
+  },
+  "ImportRequest": {
+    "type": "object",
+    "properties": {
+      "project_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "service_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "openapi_json",
+          "asyncapi_json",
+          "graphql_sdl",
+          "protobuf_descriptor"
+        ]
+      },
+      "content": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 5242880
+      }
+    },
+    "required": [
+      "project_id",
+      "service_id",
+      "format",
+      "content"
+    ],
+    "additionalProperties": false
+  },
+  "Contract": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "project_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "service_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "kind": {
+        "type": "string",
+        "enum": [
+          "declared",
+          "approved"
+        ]
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "warnings": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "type": "string",
+          "enum": [
+            "unsupported_construct",
+            "removed_value",
+            "unresolved_reference",
+            "partial_import"
+          ]
+        }
+      }
+    },
+    "required": [
+      "id",
+      "project_id",
+      "service_id",
+      "kind",
+      "revision",
+      "created_at",
+      "warnings"
+    ],
+    "additionalProperties": false
+  },
+  "Export": {
+    "type": "object",
+    "properties": {
+      "contract_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "openapi_json",
+          "asyncapi_json"
+        ]
+      },
+      "content": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 5242880
+      },
+      "warnings": {
+        "type": "array",
+        "maxItems": 100,
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "required": [
+      "contract_id",
+      "format",
+      "content",
+      "warnings"
+    ],
+    "additionalProperties": false
+  }
+}
