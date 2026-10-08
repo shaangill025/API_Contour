@@ -8,7 +8,7 @@ use std::{
 };
 use time::{Duration, OffsetDateTime};
 mod frozen;
-pub use frozen::{Acknowledgement, DeliveryBinding, FrozenView};
+pub use frozen::{Acknowledgement, DeliveryBinding, DeliveryReservation, FrozenView};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueError {
@@ -45,7 +45,8 @@ impl QueueLimits {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueStats {
     pub records: usize,
-    /// Conservative retained wire charges, not resident memory usage.
+    /// Three per-record wire allowances, reserved up front for retained records,
+    /// frozen serialization and one transport copy. Not resident memory usage.
     pub bytes: usize,
     pub dropped: u64,
     pub expired: u64,
@@ -55,6 +56,9 @@ pub struct QueueStats {
 }
 struct Entry {
     record: CheckedRecord,
+    // Base C bounds this record's wire contribution including envelope slack.
+    base_allowance: usize,
+    // Admission reserves checked 3C before retaining records or future copies.
     charge: usize,
 }
 /// Not enrollment, online freshness, persistent anti-rollback or authenticated I/O.
@@ -233,9 +237,12 @@ impl MemoryQueue {
         {
             return Err(self.reject(QueueError::Record));
         }
-        let charge = draft
+        let base_allowance = draft
             .retention_charge()
             .map_err(|_| self.reject(QueueError::Record))?;
+        let charge = base_allowance
+            .checked_mul(3)
+            .ok_or_else(|| self.reject(QueueError::Limits))?;
         let bytes = self.limits.bytes.min(inputs.current.queue_bytes() as usize);
         if self.stats.records >= self.limits.records
             || self
@@ -267,7 +274,11 @@ impl MemoryQueue {
         let record = draft
             .declare_queue_times(queued, expires)
             .map_err(|_| self.reject(QueueError::Record))?;
-        self.entries.push_back(Entry { record, charge });
+        self.entries.push_back(Entry {
+            record,
+            base_allowance,
+            charge,
+        });
         self.recount();
         Ok(())
     }
