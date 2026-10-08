@@ -88,8 +88,8 @@ library driver observes advisory waits, verifies fresh post-wait reads, prompt
 40001 errors, source-profile locking, rollback lock release and isolation rejection.
 Waits and execution are bounded, and cleanup targets owned sessions.
 
-HTTP authentication, atomic application submission and durable HTTP acceptance
-remain unimplemented. Retention cleanup, queue purge and backup/restore also
+HTTP authentication and durable HTTP acceptance remain unimplemented.
+Atomic Rust submission is described below. Retention cleanup, queue purge and backup/restore also
 remain unimplemented. SQL credential holders remain trusted: they can choose a
 tenant setting or hold locks.
 
@@ -126,8 +126,8 @@ Synthetic protocol listeners separately prove refusal before credentials,
 TLS/authentication stalls, cooperative deadlines and transport EOF cleanup.
 An authenticated synthetic protocol session also stalls the fixed health query;
 unit tests cover close timeout and cancellation without detaching the driver.
-The authority layer below uses this transport. HTTP authentication, transactional
-submission and durable receipts remain separate.
+The authority and submission layers below use this transport. HTTP authentication
+remains separate.
 
 ## Authority validation
 
@@ -175,8 +175,8 @@ revision lookup and row policy signature verification are also shared internally
 they expose no public transaction or reusable authorization token. The existing
 validation API retains its full aggregate metadata preflight before any envelope
 fetch. Checked batches expose the same versioned digest as either 32 bytes or the
-original lowercase hex string. These helpers prepare atomic submission but do not
-implement a public submit method or prove commit outcomes or restart recovery.
+original lowercase hex string. The submission method below reuses these helpers;
+the validation method remains a rollback-only check.
 
 ## Durable inbox storage
 
@@ -219,3 +219,34 @@ byte/count/version limits, default receipts, forbidden modification, and atomic
 header rollback on payload failure. NUL/control/Unicode bytes round-trip exactly;
 an actual JSONB NUL conversion is rejected. This verifies SQL storage behavior,
 not Rust submission, retry handling, crash recovery or HTTP integration.
+
+## Atomic Rust submission
+
+`ConnectedDatabase::submit_batch` takes a checked batch, independently authenticated
+expected tenant/collector and installed policy keys. Under one collector lock it
+checks present enabled/nonrevoked signed authority, derives the 32-byte digest and
+persists a header plus complete bytea payload atomically. New batches receive full
+historical/source/record admission, refreshed immediately before COMMIT, with
+`synchronous_commit=on`. PostgreSQL generates the receipt UUID and acceptance time.
+
+Exact retries require matching digest/version, an intact bounded header/payload
+pair and checked payload decoding with matching identity/count/digest. They return
+the original receipt under valid present authority without re-admitting expired
+historical records. Conflicting ID reuse fails without changing stored rows.
+Current envelope loading is bounded to 1 MiB; that staged envelope counts toward
+the 16 MiB aggregate before remaining envelopes are fetched. The existing
+validation API still gates all metadata before fetching any envelope.
+
+Known COMMIT success latches acceptance immediately. Subsequent cleanup failure
+invalidates the connection without erasing that receipt. COMMIT timeout/loss yields
+`OutcomeUnknown` and invalidates the connection: retry the original ID and exact
+content. Precommit cancellation cannot acknowledge acceptance.
+
+The mandatory `--authority` TLS fixture also runs restricted-login submission
+cases: concurrent duplicates, conflicts, scoped/integrity-checked retries, current
+authority and expiry rules, all-record/payload-failure atomicity, and NUL/control/
+Unicode bytea round trips. It observes cancellation cleanup while the probe runtime
+remains alive, a timeout during real deferred-trigger COMMIT, and replay after
+discarding an application result. That discard is not dropped server COMMIT
+acknowledgement proof. PostgreSQL restart recovery and server acknowledgement fault
+injection remain mandatory next-slice evidence; no HTTP integration is claimed.

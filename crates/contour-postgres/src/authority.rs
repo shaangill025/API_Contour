@@ -38,13 +38,13 @@ impl fmt::Display for AuthorityError {
 }
 impl std::error::Error for AuthorityError {}
 
-struct LoadedAuthority {
+pub(crate) struct LoadedAuthority {
     policies: BTreeMap<u64, VerifiedPolicy>,
     current: u64,
     sources: Vec<SourceAssignment>,
 }
 impl LoadedAuthority {
-    fn validate(
+    pub(crate) fn validate(
         &self,
         batch: &Batch,
         expected: [&str; 2],
@@ -188,7 +188,54 @@ async fn load(
     initial: OffsetDateTime,
     deadline: Instant,
 ) -> Result<LoadedAuthority, AuthorityError> {
-    let current = current_revision(transaction, expected).await?;
+    load_staged(transaction, batch, expected, keys, initial, deadline, None).await
+}
+pub(crate) struct StagedCurrent {
+    pub(crate) policy: VerifiedPolicy,
+    size: usize,
+}
+pub(crate) async fn stage_current(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    now: OffsetDateTime,
+    deadline: Instant,
+) -> Result<StagedCurrent, AuthorityError> {
+    let current = current_revision(transaction, expected).await?.to_string();
+    let row = transaction.query_opt("SELECT octet_length(signed_envelope) FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?.ok_or(AuthorityError::Missing)?;
+    let size = usize::try_from(
+        row.try_get::<_, i32>(0)
+            .map_err(|_| AuthorityError::Database)?,
+    )
+    .map_err(|_| AuthorityError::Database)?;
+    budget([size])?;
+    let row = transaction.query_one("SELECT signed_envelope FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?;
+    let policy = verify_policy(
+        row.try_get(0).map_err(|_| AuthorityError::Database)?,
+        keys,
+        expected,
+        revision(&current)?,
+        now,
+        deadline,
+    )?;
+    policy
+        .validate_capture_at(now)
+        .map_err(|_| AuthorityError::Admission)?;
+    Ok(StagedCurrent { policy, size })
+}
+pub(crate) async fn load_staged(
+    transaction: &Transaction<'_>,
+    batch: &Batch,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    initial: OffsetDateTime,
+    deadline: Instant,
+    staged: Option<StagedCurrent>,
+) -> Result<LoadedAuthority, AuthorityError> {
+    let current = match &staged {
+        Some(current) => current.policy.revision(),
+        None => current_revision(transaction, expected).await?,
+    };
     let mut requested = BTreeMap::new();
     let mut sources = BTreeSet::new();
     for request in batch.authority_requests() {
@@ -214,9 +261,30 @@ async fn load(
                 .and_then(|size| usize::try_from(size).map_err(|_| AuthorityError::Database))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    budget(sizes)?; // No envelope-bearing query has run before this gate.
+    // Validation has fetched nothing; submission has fetched only bounded current.
+    // Both paths include current in this aggregate before fetching any remainder.
+    budget(sizes)?;
+    if let Some(staged) = &staged {
+        let stored_size = metadata
+            .iter()
+            .find(|row| row.try_get::<_, String>(0).ok().as_deref() == Some(&current.to_string()))
+            .ok_or(AuthorityError::Missing)?
+            .try_get::<_, i32>(1)
+            .map_err(|_| AuthorityError::Database)?;
+        if usize::try_from(stored_size).ok() != Some(staged.size) {
+            return Err(AuthorityError::Policy);
+        }
+    }
+    let revisions = requested
+        .keys()
+        .filter(|revision| staged.is_none() || **revision != current)
+        .map(u64::to_string)
+        .collect::<Vec<_>>();
     let rows = transaction.query("SELECT revision::numeric(20,0)::text,signed_envelope FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=ANY($3::text[]::numeric[])",&[&expected[0],&expected[1],&revisions]).await.map_err(database_error)?;
     let mut policies = BTreeMap::new();
+    if let Some(staged) = staged {
+        policies.insert(current, staged.policy);
+    }
     for row in rows {
         check_deadline(deadline)?;
         let row_revision = revision(
