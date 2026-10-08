@@ -1,0 +1,181 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "APIContour R1 API contract",
+    "version": "0.1.0",
+    "description": "Reconstructed design. No deployed server is claimed. mTLS bootstrap, scope, privacy and transactional semantics are normative in the accompanying specification."
+  },
+  "paths": {
+    "/v1/enrollments": {
+      "$ref": "./paths/collector.json#/~1v1~1enrollments"
+    },
+    "/v1/collector-policy": {
+      "$ref": "./paths/collector.json#/~1v1~1collector-policy"
+    },
+    "/v1/collector-sources": {
+      "$ref": "./paths/collector.json#/~1v1~1collector-sources"
+    },
+    "/v1/batches": {
+      "$ref": "./paths/collector.json#/~1v1~1batches"
+    },
+    "/v1/collector-health": {
+      "$ref": "./paths/collector.json#/~1v1~1collector-health"
+    },
+    "/v1/operations": {
+      "$ref": "./paths/catalog.json#/~1v1~1operations"
+    },
+    "/v1/operations/{id}": {
+      "$ref": "./paths/catalog.json#/~1v1~1operations~1{id}"
+    },
+    "/v1/operations/{id}/variants": {
+      "$ref": "./paths/catalog.json#/~1v1~1operations~1{id}~1variants"
+    },
+    "/v1/contracts/import": {
+      "$ref": "./paths/catalog.json#/~1v1~1contracts~1import"
+    },
+    "/v1/contracts/{id}/export": {
+      "$ref": "./paths/catalog.json#/~1v1~1contracts~1{id}~1export"
+    },
+    "/v1/comparisons": {
+      "$ref": "./paths/review.json#/~1v1~1comparisons"
+    },
+    "/v1/reviews": {
+      "$ref": "./paths/review.json#/~1v1~1reviews"
+    },
+    "/v1/reviews/{id}/decision": {
+      "$ref": "./paths/review.json#/~1v1~1reviews~1{id}~1decision"
+    },
+    "/v1/audit-events": {
+      "$ref": "./paths/review.json#/~1v1~1audit-events"
+    },
+    "/v1/ci-checks": {
+      "$ref": "./paths/review.json#/~1v1~1ci-checks"
+    },
+    "/v1/policies": {
+      "$ref": "./paths/collector.json#/~1v1~1policies"
+    },
+    "/v1/collectors/{id}/revocation": {
+      "$ref": "./paths/collector.json#/~1v1~1collectors~1{id}~1revocation"
+    },
+    "/v1/reviews/{id}": {
+      "$ref": "./paths/review.json#/~1v1~1reviews~1{id}"
+    },
+    "/v1/comparisons/{id}": {
+      "$ref": "./paths/review.json#/~1v1~1comparisons~1{id}"
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "collectorMtls": {
+        "type": "mutualTLS"
+      },
+      "bootstrapToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Short-lived single-use enrollment token, consumed atomically."
+      },
+      "userOidc": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "OIDC access token; issuer/audience and scoped authorization are validated."
+      },
+      "ciToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Short-lived scoped service token; sanitized import and comparison only, no approval or policy writes."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "$ref": "./schemas/collector.json#/Error"
+      },
+      "Receipt": {
+        "$ref": "./schemas/collector.json#/Receipt"
+      },
+      "EnrollmentRequest": {
+        "$ref": "./schemas/collector.json#/EnrollmentRequest"
+      },
+      "EnrollmentResult": {
+        "$ref": "./schemas/collector.json#/EnrollmentResult"
+      },
+      "Policy": {
+        "$ref": "./schemas/collector.json#/Policy"
+      },
+      "SignedPolicy": {
+        "$ref": "./schemas/collector.json#/SignedPolicy"
+      },
+      "Health": {
+        "$ref": "./schemas/collector.json#/Health"
+      },
+      "SourceRequest": {
+        "$ref": "./schemas/collector.json#/SourceRequest"
+      },
+      "Source": {
+        "$ref": "./schemas/collector.json#/Source"
+      },
+      "Operation": {
+        "$ref": "./schemas/catalog.json#/Operation"
+      },
+      "Variant": {
+        "$ref": "./schemas/catalog.json#/Variant"
+      },
+      "ImportRequest": {
+        "$ref": "./schemas/catalog.json#/ImportRequest"
+      },
+      "Contract": {
+        "$ref": "./schemas/catalog.json#/Contract"
+      },
+      "ComparisonRequest": {
+        "$ref": "./schemas/review.json#/ComparisonRequest"
+      },
+      "Difference": {
+        "$ref": "./schemas/review.json#/Difference"
+      },
+      "Comparison": {
+        "$ref": "./schemas/review.json#/Comparison"
+      },
+      "ReviewRequest": {
+        "$ref": "./schemas/review.json#/ReviewRequest"
+      },
+      "Review": {
+        "$ref": "./schemas/review.json#/Review"
+      },
+      "Decision": {
+        "$ref": "./schemas/review.json#/Decision"
+      },
+      "AuditEvent": {
+        "$ref": "./schemas/review.json#/AuditEvent"
+      },
+      "CiRequest": {
+        "$ref": "./schemas/review.json#/CiRequest"
+      },
+      "CiResult": {
+        "$ref": "./schemas/review.json#/CiResult"
+      },
+      "Export": {
+        "$ref": "./schemas/catalog.json#/Export"
+      },
+      "OperationList": {
+        "$ref": "./schemas/catalog.json#/OperationList"
+      },
+      "VariantList": {
+        "$ref": "./schemas/catalog.json#/VariantList"
+      },
+      "AuditEventList": {
+        "$ref": "./schemas/review.json#/AuditEventList"
+      },
+      "ReviewList": {
+        "$ref": "./schemas/review.json#/ReviewList"
+      },
+      "HealthList": {
+        "$ref": "./schemas/collector.json#/HealthList"
+      },
+      "Revocation": {
+        "$ref": "./schemas/collector.json#/Revocation"
+      },
+      "RevocationResult": {
+        "$ref": "./schemas/collector.json#/RevocationResult"
+      }
+    }
+  }
+}
