@@ -1,0 +1,325 @@
+{
+  "/v1/operations": {
+    "get": {
+      "operationId": "listOperations",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/catalog.json#/OperationList"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        {
+          "name": "project_id",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "service_id",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "environment_id",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "protocol",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        {
+          "name": "source_id",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "visibility",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        {
+          "name": "direction",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "enum": [
+              "request",
+              "response",
+              "publish",
+              "consume",
+              "operation",
+              "connection"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "/v1/operations/{id}": {
+    "get": {
+      "operationId": "getOperation",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/catalog.json#/Operation"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    }
+  },
+  "/v1/operations/{id}/variants": {
+    "get": {
+      "operationId": "listVariants",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/catalog.json#/VariantList"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      ]
+    }
+  },
+  "/v1/contracts/import": {
+    "post": {
+      "operationId": "importContract",
+      "security": [
+        {
+          "userOidc": []
+        },
+        {
+          "ciToken": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/catalog.json#/Contract"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/catalog.json#/ImportRequest"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/contracts/{id}/export": {
+    "get": {
+      "operationId": "exportContract",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/catalog.json#/Export"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "format",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "openapi_json",
+              "asyncapi_json"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
