@@ -34,7 +34,7 @@ and synchronous CPU work have the limits documented by the PostgreSQL adapter;
 this is not a hard real-time deadline.
 
 The body must match the certificate's installed scope before database access.
-The handler uses `submit_batch` directly after structural decoding, preserving
+The handler submits after structural decoding, preserving
 the committed retry path for expired historical records and the current policy
 checks. A 200 response contains the durable receipt's original batch ID, receipt
 ID and acceptance time, with `accepted` for the first insertion or `duplicate`
@@ -51,11 +51,37 @@ authority, atomic submission and recovery cases. The separately required
 `python3 scripts/test-postgres-tls.py --https-only` runs the actual HTTPS-to-
 restricted-PostgreSQL flow. Both preserve their 240-second gate budgets. The
 temporary keys, certificate registry and listener
-are synthetic fixture configuration. There is no production executable,
-collector delivery client, queue acknowledgement integration or enrollment API.
+are synthetic fixture configuration. The separate `contour-delivery` crate
+provides bounded collector delivery and queue receipt acknowledgement. There is
+no deployable production server or enrollment API.
 
 Shutdown joins owned HTTP tasks and aborts their owned database drivers. Remote
 PostgreSQL work waiting on a lock can remain until its configured lock/statement
 timeout detects the closed client; immediate remote query cancellation is not
 promised. The fixture observes local STOPPED/client EOF and subsequent backend
 release within that timeout plus a fixed margin while its runtime remains alive.
+
+The server owns a fixed database admission budget, defaulting to its HTTP
+connection cap; `HttpLimits::with_database_sessions` separately bounds it to
+1–64 slots. A slot is charged before DNS/connect and permits exactly one chosen
+IP address with the configured TLS hostname, preferring IPv4 without retrying
+other addresses. DNS helper work can linger after cancellation but cannot open
+database sessions. Fresh connections are not reusable until submission confirms
+transaction completion and empty tenant context. Clean connections stay owned
+and can serve another request; signed authority is checked again each time.
+
+Request disconnects do not destroy database work: the pool owns each bounded job
+until the original absolute HTTP deadline. Cancellation, failed connect or
+uncertain cleanup permanently quarantines that slot. Remote timeout or elapsed
+time does not replenish capacity. Exhaustion returns retryable HTTP 503
+`database_capacity_unavailable`, without attempting another database connection.
+`database_capacity()` reports mutually exclusive running, reusable and
+quarantined slot counts. There is no automatic recovery API in this slice.
+
+Explicit shutdown aborts and joins jobs and concurrently closes idle owners.
+Dropping the serving future seals the same budget and aborts/drops all local
+owners; the server is one-shot and rejects a second or concurrent `serve`.
+These limits hold for this shared pool's lifetime. They do not bound multiple
+server instances or sessions surviving process restart. Deployment-wide limits
+and operator fencing/verified remote cleanup before replacement remain required;
+reconstructing a server is not a safe capacity recovery mechanism.

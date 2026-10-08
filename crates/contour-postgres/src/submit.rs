@@ -78,13 +78,26 @@ impl ConnectedDatabase {
         expected: [&str; 2],
         keys: &PolicyKeys,
     ) -> Result<DurableReceipt, SubmitError> {
+        let deadline = Instant::now() + self.deadline;
+        self.submit_batch_until(batch, expected, keys, deadline)
+            .await
+    }
+    /// Caller deadline can shorten the configured operation budget, never extend it.
+    /// Known COMMIT latching and uncertainty remain inside this operation.
+    pub async fn submit_batch_until(
+        &mut self,
+        batch: &Batch,
+        expected: [&str; 2],
+        keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<DurableReceipt, SubmitError> {
+        let deadline = deadline.min(Instant::now() + self.deadline);
         if batch.tenant_id() != expected[0] || batch.collector_id() != expected[1] {
             return Err(AuthorityError::Identity.into());
         }
         if self.client.is_none() {
             return Err(AuthorityError::Invalidated.into());
         }
-        let deadline = Instant::now() + self.deadline;
         let digest = batch
             .request_digest_bytes()
             .map_err(|_| SubmitError::Batch)?;
