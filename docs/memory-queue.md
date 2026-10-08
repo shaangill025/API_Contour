@@ -6,10 +6,13 @@ retry scheduler, splitting or durable storage implementation. It accepts only op
 
 Limits are 1–500 retained records and 1–256 MiB of conservative wire charges,
 further restricted by the current signed policy's queue byte quota. Each entry is
-charged its draft's bounded record serialization plus 391 bytes: two maximum
-35-byte timestamp replacements, a comma and 320 bytes of complete batch envelope
-reserve. A frozen batch additionally charges its owned serialized buffer. Record
-charges remain while frozen/in flight. Charges overestimate eventual wire bytes;
+assigned a base allowance C: its bounded draft record serialization plus 391
+bytes for two maximum 35-byte timestamp replacements, a comma and 320 bytes of
+complete batch envelope. Admission reserves 3C, using checked arithmetic, for the
+retained record allowance, eventual frozen wire and one transport copy. Reserved
+charges remain unchanged while freezing/in flight, so an exactly full queue can
+still deliver a bounded prefix without additional byte headroom. Charges
+overestimate eventual wire bytes;
 they are not an RSS, allocator overhead or allocation-free callback guarantee.
 Temporary serialization uses the existing 1 MiB capped writer. Caller-owned draft
 allocation and trusted snapshot registries are outside the retained charge.
@@ -48,9 +51,13 @@ latency or network integration proof.
 
 `freeze` selects a bounded FIFO prefix, preserving record counts and original
 queue/expiry timestamps. It first measures bounded serialization without allocating
-the retained output, checks quota for the additional exact wire length, then
-creates the immutable owned wire buffer and digest. Failed payload sizing or
-buffer reservation leaves records and charges intact. Mandatory reconciliation
+the retained output and verifies its actual wire length W does not exceed the
+sum S of selected base allowances. It then creates the immutable owned wire
+buffer and digest. For total retained base allowances C_total, retained record
+wire allowance plus frozen wire plus one transport copy is bounded by
+C_total + 2W <= C_total + 2S <= 3C_total. The independent 500-record/1 MiB batch
+limit still applies. Failed payload sizing or an inconsistent allowance leaves
+records and reserved charges intact. Mandatory reconciliation
 can independently purge data invalid under the supplied current snapshot.
 
 `FrozenView` borrows ID, exact bytes, digest, creation time and earliest original
@@ -58,13 +65,26 @@ record deadline. `delivery_view` rechecks current shared admission and marks loc
 in-flight ownership without releasing capacity. Repeated views retain identical
 bytes/IDs/counts/deadlines. Freshness is checked when issuing the view, not throughout
 subsequent I/O. Rust borrowing prevents queue mutation while that view is held;
-future transport must handle cancellation and any additional copies explicitly.
-Caller copies are outside queue-owned accounting; no owned payload transfer API exists.
+future transport must handle cancellation explicitly. No owned payload transfer
+API exists. Arbitrary caller allocations are not metered by this library.
+
+`reserve_delivery` rechecks current authority and returns a non-Clone
+`DeliveryReservation` holding the exclusive mutable queue borrow. Its mutable
+`view` exposes only borrowed frozen data. A transport consumer must accept
+`&mut DeliveryReservation`, allocate at most one bounded copy within its reserved
+allowance, and keep request-body/socket/driver ownership local to that consumer's
+future. Do not detach a driver or export a body that outlives the reservation.
+Concurrent mutable sends cannot share this handle. On cancellation, drop all
+network/body owners before dropping the reservation and reconciling or purging.
+Dropping the handle alone retains all charges and the exact batch for retry.
+A matching acknowledgment consumes the handle only after authenticated known-commit
+receipt validation and transport cleanup. This API does not perform those steps.
 
 Any selected record becoming expired or noncompliant cancels the whole frozen
 batch. The queue never edits content under its active ID. Quota shrink likewise
-cancels the oldest frozen group before further FIFO eviction. Cancellation drops
-its wire charge and records together; expired records and other purged records
+cancels the oldest frozen group before further FIFO eviction. Cancellation releases
+its records and their complete upfront reservations together; expired records
+and other purged records
 have distinct loss counters. Revocation drops all pending/frozen data.
 
 `Acknowledgement::from_transport` checks scoped IDs and receipt UUID/time syntax.

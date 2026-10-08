@@ -11,7 +11,8 @@ mod queue;
 mod scalar;
 pub use policy::{PolicyError, PolicyKeys, VerifiedPolicy};
 pub use queue::{
-    Acknowledgement, DeliveryBinding, FrozenView, MemoryQueue, QueueError, QueueLimits, QueueStats,
+    Acknowledgement, DeliveryBinding, DeliveryReservation, FrozenView, MemoryQueue, QueueError,
+    QueueLimits, QueueStats,
 };
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
 mod wire;
