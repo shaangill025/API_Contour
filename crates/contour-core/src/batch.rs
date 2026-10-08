@@ -318,6 +318,37 @@ impl Batch {
                 queued_at: record.queued_at.instant(),
             })
     }
+    /// Checked syntax only. Persist projections only after trusted inbox integrity
+    /// and scope validation. Deployment/source evidence never changes the key.
+    pub fn operation_observations(
+        &self,
+    ) -> impl ExactSizeIterator<Item = crate::OperationObservation<'_>> {
+        self.envelope
+            .records
+            .0
+            .iter()
+            .map(|record| crate::OperationObservation {
+                key: crate::OperationKey {
+                    components: [
+                        self.tenant_id(),
+                        &record.project_id,
+                        &record.service_id,
+                        &record.environment_id,
+                        &record.protocol,
+                        &record.direction,
+                        &record.operation,
+                        &record.route_template,
+                    ],
+                },
+                deployment_id: &record.deployment_id,
+                collector_id: self.collector_id(),
+                source_id: &record.source_id,
+                parser_profile: &record.parser_profile,
+                policy_revision: record.policy_revision.get(),
+                visibility: &record.visibility,
+                route_uncertain: record.route_uncertain,
+            })
+    }
     pub(crate) fn records(&self) -> &[Record] {
         &self.envelope.records.0
     }
