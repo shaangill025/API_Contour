@@ -280,4 +280,5 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     pairs(candidate, 1)
     print('Restricted TLS atomic inbox accepted/duplicate statuses, concurrent/retry identity, integrity/scope/expiry and bytea assertions passed')
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
-    runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment)
+    catalog_recovery = runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment, catalog_recovery)

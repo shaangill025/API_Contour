@@ -179,7 +179,7 @@ def frame_bounds():
         raise AssertionError('truncated frame accepted')
 
 
-def run_cases(container, execute, setup, check, probe, port, directory, environment):
+def run_cases(container, execute, setup, check, probe, port, directory, environment, catalog_recovery):
     frame_bounds()
     def run(argv, timeout=30):
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -217,10 +217,12 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
         if snapshot(body) != before:
             raise AssertionError('fault replay mutated persisted pair')
 
+    catalog_before = catalog_recovery.snapshot()
     persisted, _, _ = setup('recovery_persisted')
     receipt = check(persisted, status='accepted')
     before = snapshot(persisted)
     interrupted, _, _ = setup('recovery_interrupted')
+    catalog_recovery.prepare()
     execute("CREATE FUNCTION contour.recovery_commit_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER recovery_delay AFTER INSERT ON contour.ingestion_batches DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.recovery_commit_delay();")
     path = directory / 'recovery-interrupted.json'
     path.write_text(json.dumps(interrupted))
@@ -229,10 +231,11 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
     reader = threading.Thread(target=lambda: markers.put(process.stdout.readline()), daemon=True)
     reader.start()
     try:
+        catalog_recovery.start()
         until = time.monotonic() + 4
-        while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls' AND query='COMMIT' AND wait_event='PgSleep';") != '1':
+        while execute("SELECT count(*) FROM pg_stat_activity WHERE usename IN ('contour_tls','contour_catalog_tls') AND query='COMMIT' AND wait_event='PgSleep';") != '2':
             if time.monotonic() > until:
-                raise AssertionError('crash did not interrupt uncommitted real pair')
+                raise AssertionError('crash did not reach both uncommitted inbox and catalog transactions')
             time.sleep(0.02)
         run(['docker', 'kill', '--signal', 'KILL', container])
         if json.loads(run(['docker', 'inspect', container]))[0]['State']['Running']:
@@ -257,13 +260,17 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
         out, errors = process.communicate(input='\n', timeout=3)
         if process.returncode or out or errors:
             raise AssertionError('crashed submission probe failed')
+        if catalog_recovery.snapshot() != catalog_before:
+            raise AssertionError('PostgreSQL crash changed committed catalog rows')
         execute('DROP TRIGGER recovery_delay ON contour.ingestion_batches; DROP FUNCTION contour.recovery_commit_delay();')
+        catalog_recovery.restore(restarted_port)
         if snapshot(persisted) != before or check(persisted, port_override=restarted_port, status='duplicate') != receipt:
             raise AssertionError('real PostgreSQL crash changed durable pair/receipt/digest/bytes')
         counts = execute("SELECT (SELECT count(*) FROM contour.ingestion_batches WHERE %s),(SELECT count(*) FROM contour.ingestion_payloads WHERE %s);" % (scope(interrupted), scope(interrupted)))
         if counts != '0|0':
             raise AssertionError('interrupted uncommitted pair survived crash')
     finally:
+        catalog_recovery.close()
         if process.poll() is None:
             process.kill()
             process.wait(timeout=3)

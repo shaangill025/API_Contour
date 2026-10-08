@@ -276,3 +276,39 @@ and rechecks the loopback port binding. A previously accepted complete pair reta
 the exact header, digest, payload bytes and receipt; the interrupted pair is absent.
 This proves PostgreSQL process crash recovery for the fixture, not power-loss,
 backup/restore, replication or high availability guarantees.
+
+## Transactional catalog consumer
+
+`ConnectedDatabase::process_catalog_batch` takes an operator-bound tenant,
+collector, and batch UUID. Use a separate managed login with only
+`contour_catalog_worker` membership and the existing verified TLS settings.
+The method exposes no SQL, caller payload, or reusable capture grant.
+It processes accepted history even when later capture is disabled or revoked.
+
+The consumer checks bounded inbox metadata before it fetches payload bytes.
+It decodes the checked batch and verifies its scope, ID, count, and versioned
+digest. A unique completion claim serializes concurrent consumers of the same
+batch. Operations, immutable variants, every original observation, and the claim
+commit in one transaction with `synchronous_commit=on`. Operation and structure
+hash conflicts require an exact canonical-byte match. Reused variants must also
+match the derived normalized structure-wire bytes. Policy revision identity
+includes the collector. Source counts and sampling fractions remain separate;
+this method does not compute unique traffic totals. Name arrays use JSON bytes
+so that NUL, control characters, and Unicode remain intact.
+
+`Processed` means that COMMIT succeeded. `AlreadyProcessed` means that the
+integrity-checked batch already has a committed version-1 completion claim.
+A known COMMIT survives a later cleanup failure. `OutcomeUnknown` requires a
+retry of the same batch ID on a new connection. Cancellation, deadline, or
+uncertain cleanup invalidates the session. The `_until` method can shorten the
+configured deadline. Current-authority callers still acquire their collector
+lock; the catalog consumer uses tenant context and its own unique claim.
+
+The required `--authority` fixture includes a restricted catalog-worker login.
+It checks stored evidence, concurrent claims, accepted history after revocation,
+scope isolation, corruption, bounded metadata reads, canonical collisions,
+later-record rollback, cancellation while the runtime remains alive, and actual
+server COMMIT acknowledgement loss and cleanup failure. The existing owned
+PostgreSQL restart also checks exact committed catalog bytes, rollback of an
+interrupted catalog COMMIT, and exact replay after recovery. Scheduling, retention,
+catalog HTTP queries, and end-user authorization remain separate work.

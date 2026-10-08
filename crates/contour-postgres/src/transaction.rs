@@ -43,8 +43,7 @@ pub(crate) async fn configure_context(
     expected: [&str; 2],
     timeout: std::time::Duration,
 ) -> Result<(), AuthorityError> {
-    let milliseconds = timeout.as_millis().to_string();
-    transaction.query_one("SELECT set_config('apicontour.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true), set_config('idle_in_transaction_session_timeout',$2,true)", &[&expected[0],&milliseconds]).await.map_err(database_error)?;
+    configure_tenant(transaction, expected[0], timeout).await?;
     // This is its own statement; authority reads must follow with a fresh snapshot.
     transaction
         .query_one(
@@ -53,6 +52,15 @@ pub(crate) async fn configure_context(
         )
         .await
         .map_err(database_error)?;
+    Ok(())
+}
+pub(crate) async fn configure_tenant(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    timeout: std::time::Duration,
+) -> Result<(), AuthorityError> {
+    let milliseconds = timeout.as_millis().max(1).to_string();
+    transaction.query_one("SELECT set_config('apicontour.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true), set_config('idle_in_transaction_session_timeout',$2,true)", &[&tenant,&milliseconds]).await.map_err(database_error)?;
     Ok(())
 }
 pub(crate) async fn empty_context(client: &Client) -> Result<(), AuthorityError> {
