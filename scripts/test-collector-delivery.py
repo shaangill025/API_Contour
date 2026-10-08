@@ -4,6 +4,8 @@ scripted receipts are explicitly transport faults, not database commit evidence.
 """
 import contextlib
 import hashlib
+import email.utils
+import runpy
 import http.client
 import http.server
 import json
@@ -34,11 +36,26 @@ def run_cases(execute, setup, server, directory, environment, probe):
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version='HTTP/1.1'
             def log_message(self,*_): pass
+            def retry_reply(self):
+                code=int(mode[6:]) if mode[6:].isdigit() else (429 if mode=='retry-cap' else 503)
+                self.send_response(code)
+                value={'retry-seconds':'1','retry-date':email.utils.formatdate(time.time()+2,usegmt=True),'retry-cap':'999999999999999999999999','retry-malformed':'not-a-date','retry-duplicate':'1','retry-ttl':'10','retry-revoke':'300','retry-cancel':'300'}.get(mode)
+                if value is not None: self.send_header('Retry-After',value)
+                if mode=='retry-duplicate': self.send_header('Retry-After','2')
+                # Incomplete oversized HTML error body must not control status decisions.
+                self.send_header('Content-Type','text/html')
+                self.send_header('Content-Length','1000000')
+                self.end_headers()
+                if self.connection.recv(1)!=b'': raise AssertionError('error response socket remained owned')
+                signals['eof'].set()
+                self.close_connection=True
             def do_POST(self):
                 length=int(self.headers['Content-Length'])
                 if not 1<=length<=1048576: raise AssertionError('relay body bound')
                 raw=self.rfile.read(length)
                 if len(raw)!=length: raise AssertionError('relay truncated request')
+                if mode.startswith('retry-') and mode not in ['retry-seconds','retry-date','retry-lost']:
+                    self.retry_reply();return
                 connection=http.client.HTTPConnection('localhost',upstream,timeout=2)
                 try:
                     raw_socket=socket.socket()
@@ -60,7 +77,9 @@ def run_cases(execute, setup, server, directory, environment, probe):
                     with service.active_lock:
                         if service.upstream is not None: service.upstream.close()
                         service.upstream=None
-                if mode=='lost':
+                if mode in ['retry-seconds','retry-date']:
+                    self.retry_reply();return
+                if mode in ['lost','retry-lost']:
                     self.close_connection=True
                     return
                 if mode=='mismatch': receipt['batch_id']='ffffffff-ffff-ffff-ffff-ffffffffffff'
@@ -201,7 +220,7 @@ def run_cases(execute, setup, server, directory, environment, probe):
                         assert failure.get('failure') and failure['charge']>0, 'fault acknowledged queue'
                         committed=execute('SELECT count(*) FROM contour.ingestion_batches WHERE '+identity+';')
                         assert committed==('0' if mode in ['bad-ca','bad-name'] else '1'), 'actual commit evidence mismatch'
-                        if mode not in ['bad-ca','bad-name']: assert evidence.get('status')=='accepted'
+                        if mode not in ['bad-ca','bad-name']: assert evidence.get('status')=='accepted', 'committed relay evidence mismatch: mode=%s failure=%s status=%s' % (mode,failure.get('failure'),evidence.get('status'))
                         process.stdin.write('\n');process.stdin.flush()
                     receipt=marker()
                     _,error=process.communicate(timeout=3)
@@ -221,3 +240,5 @@ def run_cases(execute, setup, server, directory, environment, probe):
                     for pipe in [process.stdin,process.stdout,process.stderr]:pipe.close()
     print('Actual exact-full queue → verified HTTPS → restricted PostgreSQL → checked receipt → zero charge passed')
     print('Bad trust/name retained queue without commit; committed lost/truncated/mismatched/unknown/duplicate-field/oversized receipt retries preserved bytes and duplicate receipt identity')
+
+    runpy.run_path(str(Path(__file__).with_name('test-collector-retry.py')))['run_cases'](execute,setup,server,relay,directory,environment,probe)

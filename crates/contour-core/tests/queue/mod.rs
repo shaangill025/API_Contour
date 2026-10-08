@@ -781,3 +781,34 @@ fn full_queue_prefix_acknowledgment_keeps_pending_reservations() {
         .unwrap();
     assert_eq!(queue.stats().bytes, 0);
 }
+
+#[test]
+fn expiry_maintenance_keeps_authority_and_exact_ttl_boundary() {
+    let mut value = policy();
+    value["queue_ttl_seconds"] = json!(10);
+    let current = signed(&value);
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(2, 100000);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    admit(&mut queue, draft(2), &inputs, time(6)).unwrap();
+    queue.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    let identity = queue.identity.clone();
+    let high_water = queue.high_water;
+    let original = queue.stats();
+    queue.expire_retained_at(time(14));
+    assert_eq!(queue.stats().bytes, original.bytes);
+    queue.expire_retained_at(time(15));
+    assert!(queue.frozen.is_none());
+    assert_eq!(queue.stats().records, 1);
+    assert_eq!(queue.stats().expired, 1);
+    assert_eq!(queue.identity, identity);
+    assert_eq!(queue.high_water, high_water);
+    queue.expire_retained_at(time(16));
+    assert_eq!(queue.stats().bytes, 0);
+    assert_eq!(queue.stats().expired, 2);
+    queue.revoke();
+    queue.expire_retained_at(time(17));
+    assert!(queue.revoked);
+    assert_eq!(queue.high_water, high_water);
+}

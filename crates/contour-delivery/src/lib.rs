@@ -24,6 +24,8 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_rustls::TlsConnector;
+mod retry;
+pub use retry::{RetryController, RetryDirective, RetryError, WaitOutcome};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryError {
@@ -32,7 +34,10 @@ pub enum DeliveryError {
     Transport,
     Receipt,
     ResponseLimit,
-    Rejected(u16),
+    Rejected {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
 }
 impl fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -227,6 +232,12 @@ impl DeliveryClient {
                 .map_err(|_| DeliveryError::Transport)?;
             let status = response.status().as_u16();
             let headers = response.headers();
+            if status != 200 {
+                return Err(DeliveryError::Rejected {
+                    status,
+                    retry_after: retry_after(headers),
+                });
+            }
             if headers.get("content-type").and_then(|v| v.to_str().ok()) != Some("application/json")
                 || headers.contains_key("content-encoding")
             {
@@ -241,9 +252,6 @@ impl DeliveryClient {
                     return Err(DeliveryError::ResponseLimit);
                 }
                 bytes.extend_from_slice(&data);
-            }
-            if status != 200 {
-                return Err(DeliveryError::Rejected(status));
             }
             let receipt: WireReceipt =
                 serde_json::from_slice(&bytes).map_err(|_| DeliveryError::Receipt)?;
@@ -330,4 +338,26 @@ fn host_valid(host: &str) -> bool {
                     && s.as_bytes()[s.len() - 1].is_ascii_alphanumeric()
                     && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             }))
+}
+
+// Status decisions never depend on error body, content type or attacker-supplied logs.
+fn retry_after(headers: &hyper::HeaderMap) -> Option<Duration> {
+    let mut values = headers.get_all("retry-after").iter();
+    let value = values.next()?;
+    if values.next().is_some() || value.as_bytes().len() > 128 {
+        return None;
+    }
+    let text = value.to_str().ok()?.trim_matches([' ', '\t']);
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        let seconds = text
+            .bytes()
+            .fold(0u64, |n, b| (n * 10 + u64::from(b - b'0')).min(300));
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = httpdate::parse_http_date(text).ok()?;
+    Some(
+        date.duration_since(std::time::SystemTime::now())
+            .unwrap_or(Duration::ZERO)
+            .min(Duration::from_secs(300)),
+    )
 }

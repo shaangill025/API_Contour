@@ -53,8 +53,10 @@ system of record. React and TypeScript will supply the web UI.
 Collectors will send bounded batches to the ingestion API; they will not connect
 to PostgreSQL directly. Embedded collectors will use bounded memory by default.
 Standalone collectors may use an optional local SQLite queue for sanitized data.
-Bounded in-memory retention is implemented in the shared core. Durable storage,
-batch delivery, and integration with capture callbacks still need implementation.
+Bounded retention, authenticated single-attempt delivery, and caller-driven retry
+decisions are implemented in shared libraries. Enrollment, a full background
+scheduler, splitting, durable local storage, and capture callback integration
+remain pending.
 
 Collection must not wait for a remote response on the application request path.
 If a collector reaches its limits, it must report loss or incomplete visibility.
@@ -112,11 +114,16 @@ and production target are still pending. No production deployment is included ye
   retries verify stored content and return the original receipt.
 - Real PostgreSQL process-crash recovery and lost COMMIT reply tests. A confirmed
   commit retains its receipt even if connection cleanup then fails.
+- Authenticated single-attempt collector delivery and metadata-only retry decisions,
+  with bounded jitter/Retry-After, hard renewal pauses, and TTL-only cleanup. See
+  [delivery behavior and remaining integration](crates/contour-delivery/README.md).
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
-Pure admission validates a supplied snapshot. HTTP authentication, capture-side
-revocation integration, collector revision high-water storage, durable queue storage and delivery,
-all collectors, contract comparison, and the UI still need implementation.
+Pure admission validates a supplied snapshot. HTTP authentication and checked
+receipts are implemented with explicit operator configuration. Capture-side
+revocation integration, authenticated enrollment/renewal, persistent revision
+high-water storage, durable queues, the full delivery scheduler, splitting, released
+collectors, contract comparison, and the UI remain pending.
 Full platform, device, cloud, backup/restore, and performance acceptance is pending.
 
 ## Build and test the current code
@@ -136,7 +143,9 @@ For database tests, install Docker and fetch the pinned PostgreSQL fixture:
 ```sh
 docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
 bash scripts/test-postgres.sh
-python3 scripts/test-postgres-tls.py --authority
+python3 -u scripts/test-postgres-tls.py --authority
+python3 -u scripts/test-postgres-tls.py --https-only
+python3 -u scripts/test-postgres-tls.py --delivery-only
 ```
 
 The SQL test uses a temporary container without network access. The TLS test uses
@@ -144,7 +153,8 @@ a verified loopback-only port and synthetic certificates. Its authority and
 recovery cases use a fresh, owned Docker volume to test PostgreSQL restart. Tests
 remove their owned containers, volumes, and networks; no host data directory is
 mounted. See [database setup and security boundaries](db/README.md). These commands
-test the current foundation; they do not start an APIContour service.
+start isolated synthetic test services; they do not launch a deployable APIContour
+platform. HTTPS and delivery cases exercise the actual restricted database.
 
 ## Design documents
 
