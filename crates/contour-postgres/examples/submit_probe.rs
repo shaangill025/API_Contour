@@ -73,19 +73,23 @@ fn probe() -> Result<(), &'static str> {
             };
             let wanted = if args[4] == "Cancel" {
                 "Invalidated"
+            } else if args[4] == "AcceptedInvalidated" {
+                "Accepted"
             } else {
                 &args[4]
             };
             if !actual.starts_with(wanted) {
                 return Err("submission outcome mismatch");
             }
-            if matches!(
-                result,
-                Err(SubmitError::OutcomeUnknown
-                    | SubmitError::Authority(
-                        AuthorityError::Deadline | AuthorityError::Invalidated
-                    ))
-            ) {
+            if args[4] == "AcceptedInvalidated"
+                || matches!(
+                    result,
+                    Err(SubmitError::OutcomeUnknown
+                        | SubmitError::Authority(
+                            AuthorityError::Deadline | AuthorityError::Invalidated
+                        ))
+                )
+            {
                 if connection.health().await != Err(TransportError::Shutdown) {
                     return Err("uncertain session reused");
                 }
