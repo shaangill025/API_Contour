@@ -24,6 +24,9 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_rustls::TlsConnector;
+mod authority;
+mod owner;
+pub use owner::{CollectorOwner, OwnerError, SendOutcome};
 mod retry;
 pub use retry::{RetryController, RetryDirective, RetryError, WaitOutcome};
 
