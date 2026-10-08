@@ -64,9 +64,10 @@ fn probe() -> Result<(), &'static str> {
             };
             let actual = match &result {
                 Ok(receipt) => format!(
-                    "Accepted {} {}",
+                    "Accepted {} {} {}",
                     receipt.id(),
-                    receipt.accepted_at().unix_timestamp_nanos()
+                    receipt.accepted_at().unix_timestamp_nanos(),
+                    receipt.status().as_str()
                 ),
                 Err(SubmitError::Authority(error)) => error.to_string(),
                 Err(error) => error.to_string(),

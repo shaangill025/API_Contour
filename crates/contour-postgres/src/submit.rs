@@ -17,8 +17,25 @@ use tokio_postgres::{Row, Transaction};
 pub struct DurableReceipt {
     id: String,
     accepted_at: OffsetDateTime,
+    status: ReceiptStatus,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    Accepted,
+    Duplicate,
+}
+impl ReceiptStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Duplicate => "duplicate",
+        }
+    }
 }
 impl DurableReceipt {
+    pub fn status(&self) -> ReceiptStatus {
+        self.status
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -96,7 +113,7 @@ impl ConnectedDatabase {
                 loaded.validate(batch, expected, clock(&transaction).await?)?;
                 let count = i32::try_from(batch.record_count()).map_err(|_| SubmitError::Batch)?;
                 let row = transaction.query_one("INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4,1,$5) RETURNING receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint", &[&expected[0], &expected[1], &batch.batch_id(), &digest.as_slice(), &count]).await.map_err(database_error)?;
-                let receipt = receipt(&row)?;
+                let receipt = receipt(&row, ReceiptStatus::Accepted)?;
                 transaction.execute("INSERT INTO contour.ingestion_payloads(tenant_id,collector_id,batch_id,payload_format,checked_batch) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,1,$4)", &[&expected[0], &expected[1], &batch.batch_id(), &payload]).await.map_err(database_error)?;
                 transaction.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(database_error)?;
                 loaded.validate(batch, expected, clock(&transaction).await?)?;
@@ -140,7 +157,7 @@ impl ConnectedDatabase {
         }
     }
 }
-fn receipt(row: &Row) -> Result<DurableReceipt, SubmitError> {
+fn receipt(row: &Row, status: ReceiptStatus) -> Result<DurableReceipt, SubmitError> {
     let id: String = row.try_get(0).map_err(|_| SubmitError::Corrupt)?;
     if id.len() != 36
         || id.bytes().enumerate().any(|(index, byte)| {
@@ -157,6 +174,7 @@ fn receipt(row: &Row) -> Result<DurableReceipt, SubmitError> {
     Ok(DurableReceipt {
         id,
         accepted_at: time_from_micros(micros)?,
+        status,
     })
 }
 async fn duplicate(
@@ -198,5 +216,5 @@ async fn duplicate(
     {
         return Err(SubmitError::Corrupt);
     }
-    Ok(Some(receipt(&row)?))
+    Ok(Some(receipt(&row, ReceiptStatus::Duplicate)?))
 }

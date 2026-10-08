@@ -203,13 +203,13 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
         body, _, _ = setup('recovery_' + mode)
         proxy = CommitProxy(port, directory, mode)
         try:
-            result = check(body, wanted, port_override=proxy.port)
+            result = check(body, wanted, port_override=proxy.port, status='accepted' if mode == 'cleanup' else None)
             proxy.finish()
         finally:
             proxy.close()
         before = snapshot(body)
         receipt = original_receipt(body)
-        if not before or check(body) != receipt or mode == 'cleanup' and result != receipt:
+        if not before or check(body, status='duplicate') != receipt or mode == 'cleanup' and result != receipt:
             raise AssertionError('COMMIT fault did not preserve original pair/receipt')
         conflicting = copy.deepcopy(body)
         conflicting['records'][0]['count'] += 1
@@ -218,7 +218,7 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
             raise AssertionError('fault replay mutated persisted pair')
 
     persisted, _, _ = setup('recovery_persisted')
-    receipt = check(persisted)
+    receipt = check(persisted, status='accepted')
     before = snapshot(persisted)
     interrupted, _, _ = setup('recovery_interrupted')
     execute("CREATE FUNCTION contour.recovery_commit_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER recovery_delay AFTER INSERT ON contour.ingestion_batches DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.recovery_commit_delay();")
@@ -258,7 +258,7 @@ def run_cases(container, execute, setup, check, probe, port, directory, environm
         if process.returncode or out or errors:
             raise AssertionError('crashed submission probe failed')
         execute('DROP TRIGGER recovery_delay ON contour.ingestion_batches; DROP FUNCTION contour.recovery_commit_delay();')
-        if snapshot(persisted) != before or check(persisted, port_override=restarted_port) != receipt:
+        if snapshot(persisted) != before or check(persisted, port_override=restarted_port, status='duplicate') != receipt:
             raise AssertionError('real PostgreSQL crash changed durable pair/receipt/digest/bytes')
         counts = execute("SELECT (SELECT count(*) FROM contour.ingestion_batches WHERE %s),(SELECT count(*) FROM contour.ingestion_payloads WHERE %s);" % (scope(interrupted), scope(interrupted)))
         if counts != '0|0':

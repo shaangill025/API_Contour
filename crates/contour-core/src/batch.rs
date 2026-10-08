@@ -278,13 +278,7 @@ impl Batch {
     }
     /// Exact domain-separated digest bytes for persistence; same format as the hex API.
     pub fn request_digest_bytes(&self) -> Result<[u8; 32], BatchError> {
-        let mut value = serde_json::to_value(&self.envelope).map_err(|_| BatchError::Invalid)?;
-        value.sort_all_objects();
-        let bytes = encode(&value)?;
-        let mut digest = Sha256::new();
-        digest.update(b"apicontour/batch/1\n");
-        digest.update(bytes);
-        Ok(digest.finalize().into())
+        request_digest(&self.envelope)
     }
     pub fn validate_at(&self, now: OffsetDateTime) -> Result<(), BatchError> {
         let age = self.envelope.created_at.instant() - now;
@@ -616,4 +610,77 @@ fn encode(value: &impl Serialize) -> Result<Vec<u8>, BatchError> {
     let mut output = Output(Vec::new());
     serde_json::to_writer(&mut output, value).map_err(|_| BatchError::Size)?;
     Ok(output.0)
+}
+fn request_digest(value: &impl Serialize) -> Result<[u8; 32], BatchError> {
+    let mut value = serde_json::to_value(value).map_err(|_| BatchError::Invalid)?;
+    value.sort_all_objects();
+    let bytes = encode(&value)?;
+    let mut digest = Sha256::new();
+    digest.update(b"apicontour/batch/1\n");
+    digest.update(bytes);
+    Ok(digest.finalize().into())
+}
+#[derive(Serialize)]
+pub(crate) struct BorrowedBatch<'a> {
+    wire_version: UnsignedInteger,
+    batch_id: &'a str,
+    tenant_id: &'a str,
+    collector_id: &'a str,
+    created_at: &'a Timestamp,
+    records: &'a [&'a Record],
+}
+impl<'a> BorrowedBatch<'a> {
+    pub(crate) fn new(
+        batch_id: &'a str,
+        identity: [&'a str; 2],
+        created_at: &'a Timestamp,
+        records: &'a [&'a Record],
+    ) -> Result<Self, BatchError> {
+        if !uuid(batch_id)
+            || identity.iter().any(|id| !uuid(id))
+            || records.is_empty()
+            || records.len() > 500
+        {
+            return Err(BatchError::Semantic);
+        }
+        let mut ids = HashSet::new();
+        for record in records {
+            if !ids.insert(record.record_id()) {
+                return Err(BatchError::Semantic);
+            }
+            record.validate(created_at.instant())?;
+        }
+        Ok(Self {
+            wire_version: UnsignedInteger::new(1),
+            batch_id,
+            tenant_id: identity[0],
+            collector_id: identity[1],
+            created_at,
+            records,
+        })
+    }
+    pub(crate) fn length(&self) -> Result<usize, BatchError> {
+        let mut counter = Count(0);
+        serde_json::to_writer(&mut counter, self).map_err(|_| BatchError::Size)?;
+        Ok(counter.0)
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, BatchError> {
+        encode(self)
+    }
+    pub(crate) fn digest(&self) -> Result<[u8; 32], BatchError> {
+        request_digest(self)
+    }
+}
+struct Count(usize);
+impl io::Write for Count {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_BATCH_BYTES - self.0 {
+            return Err(io::Error::other("batch size"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
