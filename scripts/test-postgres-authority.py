@@ -24,8 +24,8 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
             raise RuntimeError('authority fixture command failed')
         return result.stdout.strip()
 
-    def execute(text):
-        return command(sql, text)
+    def execute(text, timeout=30):
+        return command(sql, text, timeout=timeout)
     for path in ['bootstrap.sql', 'provision_authority.sql', 'migrations/0001_identity.sql', 'migrations/0002_policy.sql']:
         execute((ROOT / 'db' / path).read_text())
     execute("GRANT contour_ingestion TO contour_tls; ALTER ROLE contour_tls SET log_statement='all';")

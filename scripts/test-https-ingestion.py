@@ -47,7 +47,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
         return datetime.datetime.strptime(text, pattern)
 
     @contextlib.contextmanager
-    def server(body, backend=None, deadline=3000):
+    def server(body, backend=None, deadline=3000, stopped=None):
         process = subprocess.Popen([probe,str(backend or pg_port),str(directory),body['tenant_id'],body['collector_id'],str(deadline)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
         markers = queue.Queue()
         reader = threading.Thread(target=lambda: [markers.put(process.stdout.readline()) for _ in range(2)],daemon=True)
@@ -64,11 +64,25 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
                     process.stdin.flush()
                     if markers.get(timeout=5).strip()!='STOPPED':
                         raise AssertionError('HTTPS server did not join owned connections')
-                    until = time.monotonic()+5
-                    while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';")!='0':
+                    started = time.monotonic()
+                    until = started+deadline/1000+2
+                    def observe(sql):
+                        remaining = until-time.monotonic()
+                        if remaining<=0:
+                            raise AssertionError('HTTP shutdown cleanup observation deadline')
+                        value = execute(sql,timeout=min(5,remaining))
                         if time.monotonic()>until:
-                            raise AssertionError('HTTP shutdown leaked backend while runtime alive')
-                        time.sleep(0.02)
+                            raise AssertionError('HTTP shutdown cleanup observation deadline')
+                        return value
+                    if stopped is not None:
+                        stopped()
+                    state = observe("SELECT state||'/'||coalesce(wait_event,'none') FROM pg_stat_activity WHERE usename='contour_tls';")
+                    if state:
+                        print('HTTP local shutdown backend state: '+state,flush=True)
+                    while observe("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';")!='0':
+                        time.sleep(min(0.02,max(0,until-time.monotonic())))
+                    if state:
+                        print('HTTP backend released after local STOPPED in %.2fs' % (time.monotonic()-started),flush=True)
                     if process.poll() is not None:
                         raise AssertionError('HTTPS runtime exited before cleanup proof')
                     out, errors = process.communicate(input='\n',timeout=5)
@@ -115,11 +129,35 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
     def scope(body):
         return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (body['tenant_id'],body['collector_id'],body['batch_id'])
 
+    def micros(instant):
+        delta = instant-datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)
+        return (delta.days*86400+delta.seconds)*1000000+delta.microseconds
+
+    def database_now(timeout=30):
+        return int(execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;',timeout=timeout))
+
+    def future_expiry():
+        # Both configured connect and submit budgets are3s; allow setup margin too.
+        instant = datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)+datetime.timedelta(microseconds=database_now()+10000000)
+        return instant.isoformat(timespec='microseconds').replace('+00:00','Z')
+
+    def wait_expired(text):
+        expiry = micros(timestamp(text))
+        until = time.monotonic()+15
+        while True:
+            remaining = until-time.monotonic()
+            if remaining<=0:
+                raise AssertionError('bounded actual database expiry wait failed')
+            now = database_now(timeout=min(5,remaining))
+            if time.monotonic()>until:
+                raise AssertionError('bounded actual database expiry wait failed')
+            if now>=expiry:
+                return
+            time.sleep(min(0.1,max(0,until-time.monotonic())))
+
     def persisted(body, receipt):
         row = execute("SELECT receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint FROM contour.ingestion_batches WHERE %s;" % scope(body))
-        delta = timestamp(receipt['accepted_at'])-datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)
-        micros = (delta.days*86400+delta.seconds)*1000000+delta.microseconds
-        if row!='%s|%d' % (receipt['receipt_id'],micros):
+        if row!='%s|%d' % (receipt['receipt_id'],micros(timestamp(receipt['accepted_at']))):
             raise AssertionError('HTTPS receipt changed stored ID or acceptance time')
 
     aggregate, _, _ = setup('https_aggregate',current=116,history=tuple(range(100,117)),padded=True)
@@ -251,24 +289,26 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
 
     expired, _, _ = setup('https_expired_retry')
     print('HTTP durable receipts, concurrent duplicate, identity and streaming bounds passed',flush=True)
-    instant = datetime.datetime.fromisoformat(expired['created_at'].replace('Z','+00:00'))
-    expired['records'][0]['expires_at']=(instant+datetime.timedelta(seconds=2)).isoformat().replace('+00:00','Z')
+    expired['records'][0]['expires_at']=future_expiry()
     with server(expired) as port:
         first = request(port,expired)
-        time.sleep(2.1)
+        wait_expired(expired['records'][0]['expires_at'])
         replay = request(port,expired)
         if replay['status']!='duplicate' or receipt_identity(first)!=receipt_identity(replay):
             raise AssertionError('HTTP prematurely rejected expired committed retry')
 
     for state in ['disabled','revoked','expired']:
         change = None
+        expiry = []
         if state=='expired':
-            change = lambda value: value.update(expires_at=(timestamp(value['issued_at'])+datetime.timedelta(seconds=33)).isoformat().replace('+00:00','Z'))
+            def change(value):
+                expiry.append(future_expiry())
+                value.update(expires_at=expiry[0])
         candidate, _, _ = setup('https_'+state,change)
         with server(candidate) as port:
             first = request(port,candidate)
             if state=='expired':
-                time.sleep(3.1)
+                wait_expired(expiry[0])
             else:
                 update = 'enabled=false' if state=='disabled' else 'enabled=false,revoked_at=clock_timestamp()'
                 execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); UPDATE contour.collector_authorization SET %s WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (candidate['tenant_id'],candidate['tenant_id'],candidate['collector_id'],update,candidate['tenant_id'],candidate['collector_id']))
@@ -323,7 +363,12 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
         holder = subprocess.Popen(['docker','exec','-i',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture','-At'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         markers = queue.Queue()
         reader = threading.Thread(target=lambda: [markers.put(line.strip()) for line in holder.stdout],daemon=True)
-        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000)
+        outcomes = queue.Queue()
+        def stopped():
+            if outcomes.get(timeout=2)!='closed':
+                raise AssertionError('HTTP shutdown did not close client before remote cleanup')
+            print('HTTP local STOPPED/client EOF observed while runtime alive',flush=True)
+        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000,stopped=stopped if mode=='shutdown' else None)
         active = False
         worker = None
         try:
@@ -335,7 +380,6 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
                 pass
             port = manager.__enter__()
             active = True
-            outcomes = queue.Queue()
             def blocked():
                 try:
                     outcomes.put(request(port,candidate))
@@ -353,15 +397,16 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
             if mode=='shutdown':
                 active = False
                 manager.__exit__(None,None,None)
-            if outcomes.get(timeout=5)!='closed':
+            if mode=='deadline' and outcomes.get(timeout=5)!='closed':
                 raise AssertionError('blocked HTTPS request survived deadline/shutdown')
             until = time.monotonic()+5
             while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';")!='0':
                 if time.monotonic()>until:
                     raise AssertionError('HTTPS cancellation retained owned database driver')
                 time.sleep(0.02)
-            if execute('SELECT count(*) FROM contour.ingestion_batches WHERE '+scope(candidate)+';')!='0':
-                raise AssertionError('precommit HTTP cancellation acknowledged/retained a row')
+            pairs = execute('SELECT (SELECT count(*) FROM contour.ingestion_batches WHERE %s),(SELECT count(*) FROM contour.ingestion_payloads WHERE %s);' % (scope(candidate),scope(candidate)))
+            if pairs!='0|0':
+                raise AssertionError('precommit HTTP cancellation retained an inbox pair')
         finally:
             try:
                 if active:

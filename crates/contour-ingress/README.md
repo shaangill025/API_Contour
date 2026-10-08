@@ -46,8 +46,16 @@ its own protocol response before dispatch. A 503, timeout, or truncated/lost
 response must be retried with the same batch ID and content: it can follow a
 committed transaction. In particular, `outcome_unknown` is not a rejection.
 
-`python3 -u scripts/test-postgres-tls.py --authority` retains the existing TLS,
-authority, atomic submission and recovery cases and runs the actual HTTPS-to-
-restricted-PostgreSQL flow. Its temporary keys, certificate registry and listener
+`python3 scripts/test-postgres-tls.py --authority` retains the existing TLS,
+authority, atomic submission and recovery cases. The separately required
+`python3 scripts/test-postgres-tls.py --https-only` runs the actual HTTPS-to-
+restricted-PostgreSQL flow. Both preserve their 240-second gate budgets. The
+temporary keys, certificate registry and listener
 are synthetic fixture configuration. There is no production executable,
 collector delivery client, queue acknowledgement integration or enrollment API.
+
+Shutdown joins owned HTTP tasks and aborts their owned database drivers. Remote
+PostgreSQL work waiting on a lock can remain until its configured lock/statement
+timeout detects the closed client; immediate remote query cancellation is not
+promised. The fixture observes local STOPPED/client EOF and subsequent backend
+release within that timeout plus a fixed margin while its runtime remains alive.
