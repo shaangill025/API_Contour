@@ -1,9 +1,11 @@
-//! Collector TLS transport only: no HTTP admission, principal mapping or enrollment.
+//! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
+mod service;
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
+pub use service::{HttpLimits, IngestionServer, IngressError, PrincipalRegistry};
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, time::timeout};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};

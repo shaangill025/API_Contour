@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -24,8 +24,8 @@ def run_cases(container, sql, probe, port, directory, environment):
             raise RuntimeError('authority fixture command failed')
         return result.stdout.strip()
 
-    def execute(text):
-        return command(sql, text)
+    def execute(text, timeout=30):
+        return command(sql, text, timeout=timeout)
     for path in ['bootstrap.sql', 'provision_authority.sql', 'migrations/0001_identity.sql', 'migrations/0002_policy.sql']:
         execute((ROOT / 'db' / path).read_text())
     execute("GRANT contour_ingestion TO contour_tls; ALTER ROLE contour_tls SET log_statement='all';")
@@ -82,6 +82,12 @@ def run_cases(container, sql, probe, port, directory, environment):
         text += "UPDATE contour.collector_authorization SET active_revision=%d,enabled=true WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (current, tenant, collector)
         execute(text)
         return (body, collector, source)
+
+    if https_only:
+        execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
+        https_probe = str(Path(probe).with_name('https_probe'))
+        runpy.run_path(str(ROOT / 'scripts/test-https-ingestion.py'))['run_cases'](container,execute,setup,https_probe,port,directory,environment)
+        return
 
     def logs():
         result = subprocess.run(['docker', 'logs', container], capture_output=True, text=True, check=True, timeout=5)
