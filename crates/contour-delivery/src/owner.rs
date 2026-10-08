@@ -215,7 +215,12 @@ impl CollectorOwner {
         self.queue.admit(draft, &inputs)?;
         self.guard()
     }
-    pub fn freeze(&mut self, batch_id: &str, maximum_records: usize) -> Result<bool, OwnerError> {
+    pub fn freeze(
+        &mut self,
+        batch_id: &str,
+        maximum_records: usize,
+        maximum_wire_bytes: usize,
+    ) -> Result<bool, OwnerError> {
         self.guard()?;
         let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
         let refs = self.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
@@ -228,7 +233,7 @@ impl CollectorOwner {
         .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
         let frozen = self
             .queue
-            .freeze(batch_id, maximum_records, &inputs)?
+            .freeze_with_limits(batch_id, maximum_records, maximum_wire_bytes, &inputs)?
             .is_some();
         self.guard()?;
         if frozen {

@@ -36,5 +36,5 @@ scripts/test-collector-owner.py through the actual local mTLS/Postgres fixture.
 The fixture checks startup denial, online refresh/admission/send, durable receipt
 identity and zero charge, narrowing/highwater, temporary denial/renewal, and real
 TLS challenge/source/identity/late/cancelled reply rejection. It is synthetic
-fixture data and requires the existing local tools/image. History-capacity limits
-are currently inspected implementation bounds, not a demonstrated RSS bound.
+fixture data and requires the existing local tools/image. The signed-padding fixture exercises aggregate history capacity exhaustion and
+retained charges; the 500-policy count bound is inspected, not stress-tested.

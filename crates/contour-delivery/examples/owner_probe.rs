@@ -106,7 +106,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     Ok(json!({"ok":true}))
                 }
                 "freeze" => {
-                    let present = owner.freeze(body["batch_id"].as_str().unwrap(), 500)?;
+                    let present =
+                        owner.freeze(body["batch_id"].as_str().unwrap(), 500, 1_048_576)?;
                     Ok(json!({"frozen":present}))
                 }
                 "send" => Ok(match owner.send_once().await? {

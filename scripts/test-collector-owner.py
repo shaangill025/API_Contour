@@ -81,6 +81,31 @@ def run_cases(execute, setup, server, directory, environment, probe):
         change(body,'UPDATE contour.collector_authorization SET enabled=true WHERE '+scope(body))
         good(call('refresh')); assert good(call('send'))['bytes']==0  # 403 was not permanent revoke
 
+    # Signed padding exercises the aggregate envelope budget with only nine
+    # retained revisions. Every retained policy still backs one admitted record.
+    body,_,_=setup('owner_history',current=1,history=(1,))
+    raw=bytes.fromhex(execute("SELECT encode(signed_envelope,'hex') FROM contour.policy_revisions WHERE "+scope(body)+" AND revision=1;"))
+    envelope=json.loads(raw); encoded=envelope['payload_base64url']
+    policy=json.loads(base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4)))
+    encode=lambda raw:base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+    for revision in range(2,11):
+        policy['revision']=revision
+        payload=json.dumps(policy,separators=(',',':')).encode().ljust(720000,b' ')
+        (directory/'owner-message').write_bytes(b'apicontour/policy/1\n'+payload)
+        subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(directory/'signer.key'),'-in',str(directory/'owner-message'),'-out',str(directory/'owner-signature')],check=True,capture_output=True,timeout=5)
+        envelope.update(payload_base64url=encode(payload),signature_base64url=encode((directory/'owner-signature').read_bytes()))
+        raw=json.dumps(envelope,separators=(',',':')).encode()
+        change(body,"INSERT INTO contour.policy_revisions VALUES ('%s','%s',%d,decode('%s','hex'))" % (body['tenant_id'],body['collector_id'],revision,raw.hex()))
+    with server(body) as port, owner(body,port) as call:
+        for revision in range(2,10):
+            change(body,'UPDATE contour.collector_authorization SET active_revision=%d WHERE ' % revision+scope(body))
+            good(call('refresh')); retained=good(call('admit',revision=revision,record_id='00000000-0000-4000-8000-%012x' % revision))
+        assert retained['records']==8
+        change(body,'UPDATE contour.collector_authorization SET active_revision=10 WHERE '+scope(body))
+        result=denied(call('refresh')); assert result['result']['error']=='HistoryLimit'
+        assert result['records']==8 and result['bytes']==retained['bytes'] and result['purged']==0
+        denied(call('send')); assert good(call('expire'))['records']==8
+
     @contextlib.contextmanager
     def relay(upstream, mode):
         challenges=set(); errors=[]; finished=threading.Event()
@@ -88,6 +113,7 @@ def run_cases(execute, setup, server, directory, environment, probe):
             protocol_version='HTTP/1.1'
             def log_message(self,*args): pass
             def do_POST(self):
+                self.connection.settimeout(3)
                 try:
                     raw=self.rfile.read(int(self.headers['Content-Length']))
                     challenge=json.loads(raw)['challenge']
@@ -106,6 +132,9 @@ def run_cases(execute, setup, server, directory, environment, probe):
                     if mode=='challenge': value['challenge']='0'*64
                     if mode=='source': value['sources'][0]['source_id']='ffffffff-ffff-ffff-ffff-ffffffffffff'
                     if mode=='identity': value['collector_id']='ffffffff-ffff-ffff-ffff-ffffffffffff'
+                    if mode=='profiles': value['sources'][0]['parser_profiles']=['']*200000
+                    if mode=='sources': value['sources']=value['sources']*501
+                    if mode=='profile-length': value['sources'][0]['parser_profiles']=['x'*65]
                     if mode=='late':
                         encoded=value['signed_policy']['payload_base64url']; policy=json.loads(base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4)))
                         expiry=datetime.datetime.strptime(policy['expires_at'],'%Y-%m-%dT%H:%M:%S.%fZ')
@@ -130,7 +159,7 @@ def run_cases(execute, setup, server, directory, environment, probe):
             assert not thread.is_alive() and not errors and finished.is_set(), 'authority fault relay failed'
             assert len(challenges)==2, 'refresh did not obtain fresh per-request challenge'
 
-    for mode in ['challenge','source','identity','late','cancel']:
+    for mode in ['challenge','source','identity','profiles','sources','profile-length','late','cancel']:
         body,_,_=setup('owner_'+mode,current=1,history=(1,))
         with server(body) as upstream, relay(upstream,mode) as port, owner(body,port) as call:
             for _ in range(2):

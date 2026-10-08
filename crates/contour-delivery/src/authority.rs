@@ -1,6 +1,6 @@
 //! Private online grant. Parsing a response alone cannot construct live authority.
 use crate::*;
-use contour_core::{PolicyKeys, SourceAssignment, VerifiedPolicy};
+use contour_core::{PolicyKeys, SourceAssignment, UnsignedInteger, VerifiedPolicy};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{json, value::RawValue};
 use std::collections::BTreeSet;
@@ -18,12 +18,13 @@ pub(crate) struct Refresh {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {
-    wire_version: u8,
+    wire_version: UnsignedInteger,
     challenge: String,
     tenant_id: String,
     collector_id: String,
     checked_at: Timestamp,
     signed_policy: Box<RawValue>,
+    #[serde(deserialize_with = "source_list")]
     sources: Vec<Source>,
 }
 #[derive(Deserialize)]
@@ -35,7 +36,60 @@ struct Source {
     environment_id: String,
     deployment_id: String,
     technique: String,
-    parser_profiles: Vec<String>,
+    #[serde(deserialize_with = "profile_list")]
+    parser_profiles: Vec<Profile>,
+}
+struct Profile(String);
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Text;
+        impl serde::de::Visitor<'_> for Text {
+            type Value = Profile;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("profile of at most 64 bytes")
+            }
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Profile, E> {
+                if text.len() > 64 {
+                    return Err(E::custom("profile bound"));
+                }
+                Ok(Profile(text.to_owned()))
+            }
+        }
+        d.deserialize_str(Text)
+    }
+}
+fn bounded_list<'de, D, T, const N: usize>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct List<T, const N: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for List<T, N> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("bounded list")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut values = Vec::new();
+            while values.len() < N {
+                match seq.next_element()? {
+                    Some(value) => values.push(value),
+                    None => return Ok(values),
+                }
+            }
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom("list bound"));
+            }
+            Ok(values)
+        }
+    }
+    d.deserialize_seq(List::<T, N>(std::marker::PhantomData))
+}
+fn source_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Source>, D::Error> {
+    bounded_list::<D, Source, 500>(d)
+}
+fn profile_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Profile>, D::Error> {
+    bounded_list::<D, Profile, 128>(d)
 }
 impl DeliveryClient {
     pub(crate) async fn refresh_authority(
@@ -130,11 +184,20 @@ impl DeliveryClient {
                 if data.len() > HISTORY_BYTES - bytes.len() {
                     return Err(DeliveryError::ResponseLimit);
                 }
+                let needed = bytes.len() + data.len();
+                if needed > bytes.capacity() {
+                    let target = needed
+                        .max(bytes.capacity().max(4096).saturating_mul(2))
+                        .min(HISTORY_BYTES);
+                    bytes
+                        .try_reserve_exact(target - bytes.len())
+                        .map_err(|_| DeliveryError::ResponseLimit)?;
+                }
                 bytes.extend_from_slice(&data);
             }
             let reply: Reply =
                 serde_json::from_slice(&bytes).map_err(|_| DeliveryError::Receipt)?;
-            if reply.wire_version != 1
+            if reply.wire_version.get() != 1
                 || reply.challenge != challenge
                 || reply.tenant_id != self.identity[0]
                 || reply.collector_id != self.identity[1]
@@ -185,7 +248,7 @@ impl DeliveryClient {
                         &s.technique,
                         &s.parser_profiles
                             .iter()
-                            .map(String::as_str)
+                            .map(|p| p.0.as_str())
                             .collect::<Vec<_>>(),
                     )
                     .map_err(|_| DeliveryError::Receipt)
