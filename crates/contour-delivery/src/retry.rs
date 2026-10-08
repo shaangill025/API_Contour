@@ -124,10 +124,9 @@ impl RetryController {
             return Ok(RetryDirective::Expired);
         }
         let lifetime = Duration::try_from(remaining).map_err(|_| RetryError::Stopped)?;
-        let jitter = self.jitter().map_err(|error| {
+        let jitter = self.jitter().inspect_err(|_| {
             self.directive = Some(RetryDirective::StopConfiguration);
             self.due = None;
-            error
         })?;
         let after = jitter
             .max(
