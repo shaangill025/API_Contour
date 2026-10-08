@@ -60,7 +60,7 @@ Count is the number of locally observed interactions represented by one record. 
 |---|---|
 | tenants, projects, services, environments, deployments | Scoped identity and ownership |
 | collectors, policies, policy_assignments | Enrollment, revocation, signed policy revisions |
-| ingestion_batches, ingestion_records | Durable sanitized inbox and deduplication keys |
+| ingestion_batches, ingestion_payloads | Durable sanitized inbox and deduplication keys |
 | operations, variants | Stable operation identity and immutable structure documents |
 | observation_windows | Per-source counts, visibility, first/last time and loss context |
 | declared_contracts, approved_contracts | Immutable versions and approval associations |
@@ -68,7 +68,7 @@ Count is the number of locally observed interactions represented by one record. 
 | audit_events | Actor, action, target, outcome and safe timestamps |
 | delivery_outbox | Approved integration deliveries and retry state |
 
-All tenant-owned foreign keys include tenant_id. Use unique constraints for scoped identities and batch IDs. Store structures in JSONB; store common filters in typed columns. Never modify an existing immutable contract version. Approval references exact versions and the review revision.
+All tenant-owned foreign keys include tenant_id. Use unique constraints for scoped identities and batch IDs. Store authoritative canonical and wire structures in bounded bytea: accepted names can contain NUL, which JSONB cannot represent. Store common filters in typed columns. Optional JSONB projections must be lossless for their represented subset. Never modify an existing immutable contract version. Approval references exact versions and the review revision.
 
 Accepting a batch is one transaction: write inbox and idempotency record together. Workers atomically mark processing and update derived records, or use equivalent transactional deduplication. Crash recovery must not double counts. Keep the deduplication record longer than the permitted retry interval.
 
@@ -81,3 +81,17 @@ R1 comparison supports operation identity, request/response direction, field typ
 Imports may contain enum values, examples, defaults, prose, patterns and extensions. Remove these from persisted content in this baseline and report removed_value or unsupported_construct. A comparison that depends on removed constraints is inconclusive, not compatible. Export must disclose the omissions. Do not imply lossless round-trip support. The richer source file remains in the customer's source repository, not in APIContour storage.
 
 A partial observation remains evidence of present fields, but cannot prove field removal or changed requiredness. Presence statistics use only observations eligible for that field; incomplete parents are excluded from absence counts. Declared contract removal can be incompatible even when no recent traffic was observed.
+
+### Catalog storage v1
+
+Migration 0004 stores immutable UUID operations and variants, per-record source
+evidence, and a transactional processed-batch claim. Exact canonical operation
+bytes accompany a versioned hash. A variant key includes the collector-scoped
+policy revision, parser profile and canonicalization version. Digest conflicts
+require exact byte comparison by the trusted processor; mismatches fail closed.
+Timestamp originals and approved-name JSON arrays preserve nanoseconds and NUL
+escapes. No catalog row sums observations from different sources as unique traffic.
+The worker and reader database roles have separate tenant-scoped grants, without
+inheriting ingestion or administrative access. Storage alone does not implement
+trusted processing or authenticated user queries. See `db/README.md` for the
+transaction and adapter obligations.
