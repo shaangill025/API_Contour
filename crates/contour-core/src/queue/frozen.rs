@@ -70,6 +70,7 @@ impl FrozenView<'_> {
 #[must_use]
 pub struct DeliveryReservation<'q> {
     queue: &'q mut MemoryQueue,
+    valid_until: OffsetDateTime,
 }
 impl fmt::Debug for DeliveryReservation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,6 +78,14 @@ impl fmt::Debug for DeliveryReservation<'_> {
     }
 }
 impl DeliveryReservation<'_> {
+    /// Verified current authority lease clipped to the frozen records' deadline.
+    pub fn valid_until(&self) -> OffsetDateTime {
+        self.valid_until
+    }
+    /// Local identity established by queue admission, without decoding payload.
+    pub fn identity(&self) -> [&str; 2] {
+        self.queue.identity.each_ref().map(String::as_str)
+    }
     /// Borrow for one consumer; two outstanding mutable attempt borrows cannot coexist.
     /// ```compile_fail,E0499
     /// use contour_core::DeliveryReservation;
@@ -187,7 +196,16 @@ impl MemoryQueue {
         if self.frozen.is_none() {
             return Ok(None);
         }
-        Ok(Some(DeliveryReservation { queue: self }))
+        let valid_until = self
+            .frozen
+            .as_ref()
+            .expect("checked frozen")
+            .deadline
+            .min(inputs.current.expires_at());
+        Ok(Some(DeliveryReservation {
+            queue: self,
+            valid_until,
+        }))
     }
     pub fn acknowledge(&mut self, receipt: Acknowledgement<'_>) -> Result<(), QueueError> {
         let frozen = self.frozen.as_ref().ok_or(QueueError::Ownership)?;
