@@ -131,7 +131,7 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
-    network = container = None
+    network = container = volume = None
     servers = []
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="contour-tls-") as folder:
@@ -152,12 +152,22 @@ def main():
             network_settings = json.loads(run(["docker", "network", "inspect", network]))[0]
             if network_settings["Driver"] != "bridge" or network_settings["Options"].get("com.docker.network.bridge.enable_ip_masquerade") != "false":
                 raise AssertionError("fixture bridge configuration mismatch")
+            data_mount = ["--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m"]
+            if "--authority" in sys.argv:
+                volume = "contour-recovery-" + secrets.token_hex(12)
+                run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
+                data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
             container = run(["docker", "create", "--network", network, "--publish", "127.0.0.1::5432",
                              "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
-                             "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m",
+                             *data_mount,
                              "-e", "POSTGRES_DB=contour_fixture", "-e", "POSTGRES_PASSWORD="+password,
                              "-e", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256", IMAGE, "sh", "-c",
                              "chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key"])
+            if volume:
+                mounts = json.loads(run(["docker", "inspect", container]))[0]["Mounts"]
+                owned = [mount for mount in mounts if mount["Destination"] == "/var/lib/postgresql/data"]
+                if len(owned) != 1 or owned[0]["Type"] != "volume" or owned[0]["Name"] != volume:
+                    raise AssertionError("recovery volume mount mismatch")
             for file in ["server.key", "server.crt"]:
                 run(["docker", "cp", str(directory/file), container+":/tmp/"+file])
             run(["docker", "start", container])
@@ -262,12 +272,17 @@ def main():
                     server.close()
                 except Exception as error:
                     cleanup_errors.append(error)
-            try:
-                if container:
-                    run(["docker", "rm", "-f", container])
-            finally:
-                if network:
-                    run(["docker", "network", "rm", network])
+            for kind, identity in [("container", container), ("volume", volume), ("network", network)]:
+                if identity:
+                    try:
+                        if kind == "volume":
+                            metadata = json.loads(run(["docker", "volume", "inspect", identity]))[0]
+                            if metadata["Labels"].get("contour.fixture") != identity:
+                                raise AssertionError("refusing unowned volume cleanup")
+                        argv = ["docker", "rm", "-f", identity] if kind == "container" else ["docker", kind, "rm", identity]
+                        run(argv)
+                    except Exception as error:
+                        cleanup_errors.append(error)
             if cleanup_errors:
                 raise RuntimeError("owned protocol cleanup failed") from cleanup_errors[0]
 
