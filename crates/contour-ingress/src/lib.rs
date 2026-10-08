@@ -1,5 +1,7 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
+mod pool;
 mod service;
+pub use pool::DatabaseCapacity;
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
