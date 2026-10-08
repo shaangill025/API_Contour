@@ -26,7 +26,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         if counts != '%d|%d' % (wanted, wanted):
             raise AssertionError('inbox atomic pair count mismatch')
 
-    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None):
+    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False):
         path = directory / ('submit-%d.json' % next(sequence))
         path.write_text(json.dumps(body))
         process = subprocess.Popen([probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
@@ -35,6 +35,15 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         reader.start()
         try:
             actual = output.get(timeout=15).strip()
+            observed_status = None
+            if actual.startswith('Accepted '):
+                parts = actual.split()
+                if len(parts) != 4 or parts[3] not in ['accepted', 'duplicate']:
+                    raise AssertionError('invalid receipt outcome marker')
+                observed_status = parts[3]
+                if status is not None and observed_status != status:
+                    raise AssertionError('receipt status mismatch: expected ' + status + ', got ' + observed_status)
+                actual = ' '.join(parts[:3])
             expected = 'Invalidated' if wanted == 'Cancel' else 'Accepted' if wanted == 'AcceptedInvalidated' else wanted
             if not (actual == expected or expected == 'Accepted' and actual.startswith('Accepted ')):
                 raise AssertionError('submission marker mismatch')
@@ -53,7 +62,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
                 out, errors = process.communicate(input='\n', timeout=3)
                 if process.returncode or out or errors:
                     raise AssertionError('submission probe failed')
-            return actual
+            return actual + ' ' + observed_status if include_status and observed_status else actual
         finally:
             if process.poll() is None:
                 process.kill()
@@ -62,12 +71,12 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
             for pipe in [process.stdin, process.stdout, process.stderr]:
                 pipe.close()
 
-    def parallel(body, wanted='Accepted', deadline=5000):
+    def parallel(body, wanted='Accepted', deadline=5000, include_status=False):
         outcomes = queue.Queue()
 
         def submit():
             try:
-                outcomes.put(check(body, wanted, deadline))
+                outcomes.put(check(body, wanted, deadline, include_status=include_status))
             except Exception as error:
                 outcomes.put(error)
         thread = threading.Thread(target=submit, daemon=True)
@@ -89,26 +98,27 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); UPDATE contour.collector_authorization SET %s WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (body['tenant_id'], body['tenant_id'], body['collector_id'], update, body['tenant_id'], body['collector_id']))
 
     body, _, _ = setup('submit_valid')
-    receipt = check(body)
+    receipt = check(body, status='accepted')
     pairs(body, 1)
     stored = execute("SELECT receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000000)::bigint FROM contour.ingestion_batches WHERE %s;" % scope(body))
     if receipt != 'Accepted ' + stored.replace('|', ' '):
         raise AssertionError('receipt did not match PostgreSQL generated values')
-    if check(body) != receipt:
+    if check(body, status='duplicate') != receipt:
         raise AssertionError('retry changed original receipt')
     equivalent = dict(reversed(list(body.items())))
-    if check(equivalent) != receipt:
+    if check(equivalent, status='duplicate') != receipt:
         raise AssertionError('canonical equivalence conflicted')
     conflict = copy.deepcopy(body)
     conflict['records'][0]['count'] += 1
     check(conflict, 'Conflict')
     pairs(body, 1)
-    if check(body) != receipt:
+    if check(body, status='duplicate') != receipt:
         raise AssertionError('conflict mutated committed content or receipt')
     candidate, _, _ = setup('submit_concurrent')
-    first, one = parallel(candidate)
-    second, two = parallel(candidate)
-    if finish(first, one) != finish(second, two):
+    first, one = parallel(candidate, include_status=True)
+    second, two = parallel(candidate, include_status=True)
+    results = [finish(first, one).rsplit(' ', 1), finish(second, two).rsplit(' ', 1)]
+    if results[0][0] != results[1][0] or {result[1] for result in results} != {'accepted', 'duplicate'}:
         raise AssertionError('concurrent duplicate receipts differ')
     pairs(candidate, 1)
     for tenant in [body['tenant_id'], OTHER]:
@@ -135,7 +145,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     candidate['records'][0]['expires_at'] = (now + datetime.timedelta(seconds=2)).isoformat().replace('+00:00', 'Z')
     receipt = check(candidate)
     time.sleep(2.1)
-    if check(candidate) != receipt:
+    if check(candidate, status='duplicate') != receipt:
         raise AssertionError('committed retry re-admitted expired record')
     for update, wanted in [('enabled=false', 'Disabled'), ('enabled=false,revoked_at=clock_timestamp()', 'Revoked')]:
         candidate, _, _ = setup('submit_' + wanted)
@@ -169,7 +179,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     receipt = check(candidate)
     raw = bytes.fromhex(execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE %s;" % scope(candidate)))
     decoded = json.loads(raw)
-    if not all(name in decoded['records'][0]['structure']['fields'] for name in names) or check(candidate) != receipt:
+    if not all(name in decoded['records'][0]['structure']['fields'] for name in names) or check(candidate, status='duplicate') != receipt:
         raise AssertionError('bytea names or digest roundtrip failed')
 
     candidate, _, _ = setup('submit_aggregate', current=116, history=tuple(range(100, 117)), padded=True)
@@ -232,15 +242,18 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         finish(thread, outcomes)
     finally:
         execute('DROP TRIGGER synthetic_commit_delay ON contour.ingestion_batches; DROP FUNCTION contour.submit_commit_delay();')
-    receipt = check(candidate)
+    existing = execute("SELECT count(*) FROM contour.ingestion_batches WHERE %s;" % scope(candidate))
+    if existing not in ['0', '1']:
+        raise AssertionError('uncertain COMMIT header count invalid')
+    receipt = check(candidate, status='duplicate' if existing == '1' else 'accepted')
     pairs(candidate, 1)
-    if check(candidate) != receipt:
+    if check(candidate, status='duplicate') != receipt:
         raise AssertionError('uncertain COMMIT exact retry changed receipt')
     candidate, _, _ = setup('submit_lost_app_ack')
-    discarded = check(candidate, discard=True)
-    if check(candidate) != discarded:
+    discarded = check(candidate, discard=True, status='accepted')
+    if check(candidate, status='duplicate') != discarded:
         raise AssertionError('discarded application result retry changed receipt')
     pairs(candidate, 1)
-    print('Restricted TLS atomic inbox, concurrent/retry/conflict/integrity/scope/expiry and bytea assertions passed')
+    print('Restricted TLS atomic inbox accepted/duplicate statuses, concurrent/retry identity, integrity/scope/expiry and bytea assertions passed')
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment)
