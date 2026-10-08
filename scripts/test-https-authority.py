@@ -183,20 +183,27 @@ def run_cases(container, execute, setup, server, request, context, directory):
     waits = "SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls' AND wait_event='advisory';"
     streams = []
     with locked(body):
-        with server(body,database_deadline=10000,budget_check=True) as port:
+        with server(body,deadline=10000,database_deadline=25000,budget_check=True) as port:
             try:
+                started = time.monotonic()
+                tails = []
                 for path, value in [('/v1/batches',body),(target,payload(src))]:
                     stream = context().wrap_socket(socket.create_connection(('127.0.0.1',port),timeout=3),server_hostname='localhost')
                     streams.append(stream)
                     raw = json.dumps(value).encode()
-                    stream.sendall(('POST '+path+' HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: '+str(len(raw))+'\r\n\r\n').encode()+raw)
-                until = time.monotonic()+3
+                    stream.sendall(('POST '+path+' HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: '+str(len(raw))+'\r\n\r\n').encode()+raw[:-1])
+                    tails.append(raw[-1:])
+                assert time.monotonic()-started < 1, 'slow-body setup exceeded timing window'
+                time.sleep(max(0,started+7-time.monotonic()))
+                assert time.monotonic()-started < 8, 'slow-body release exceeded timing window'
+                for stream, tail in zip(streams,tails): stream.sendall(tail)
+                until = started+9
                 while observe(waits,until) != '2': time.sleep(0.02)
                 for stream in streams: stream.close()
                 for result in [call(port,payload(src),503),request(port,body,503)]:
                     assert result['code']=='database_capacity_unavailable', 'refresh bypassed shared slots'
                 assert int(observe(sessions,until)) <= 2
-                until = time.monotonic()+12
+                until = time.monotonic()+28
                 while observe(sessions,until) != '0': time.sleep(0.02)
                 assert (directory/'budget-state').read_text() == '0|2', 'refresh extended original job deadline'
                 assert call(port,payload(src),503)['code']=='database_capacity_unavailable'
