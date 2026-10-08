@@ -228,6 +228,13 @@ checks present enabled/nonrevoked signed authority, derives the 32-byte digest a
 persists a header plus complete bytea payload atomically. New batches receive full
 historical/source/record admission, refreshed immediately before COMMIT, with
 `synchronous_commit=on`. PostgreSQL generates the receipt UUID and acceptance time.
+`DurableReceipt::status()` distinguishes a newly committed `Accepted` result from
+an integrity-checked committed retry's `Duplicate`; `ReceiptStatus::as_str()` maps
+to the API's `accepted`/`duplicate` strings. Both retain the original PostgreSQL
+receipt UUID/time. Full receipt equality includes status, so compare UUID/time
+explicitly when checking persisted receipt identity across retries. A confirmed
+new COMMIT remains `Accepted` if subsequent context cleanup fails; uncertain
+COMMIT still yields `OutcomeUnknown`, not a receipt or success status.
 
 Exact retries require matching digest/version, an intact bounded header/payload
 pair and checked payload decoding with matching identity/count/digest. They return

@@ -8,7 +8,7 @@ mod submit;
 mod transaction;
 mod transport;
 pub use authority::AuthorityError;
-pub use submit::{DurableReceipt, SubmitError};
+pub use submit::{DurableReceipt, ReceiptStatus, SubmitError};
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
