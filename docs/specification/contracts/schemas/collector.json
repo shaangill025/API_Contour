@@ -1,0 +1,544 @@
+{
+  "Error": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "message": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "request_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "retryable": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "code",
+      "message",
+      "request_id",
+      "retryable"
+    ],
+    "additionalProperties": false
+  },
+  "Receipt": {
+    "type": "object",
+    "properties": {
+      "batch_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "accepted",
+          "duplicate"
+        ]
+      },
+      "receipt_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "accepted_at": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "required": [
+      "batch_id",
+      "status",
+      "receipt_id",
+      "accepted_at"
+    ],
+    "additionalProperties": false
+  },
+  "EnrollmentRequest": {
+    "type": "object",
+    "properties": {
+      "public_key_pem": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192
+      },
+      "collector_profile": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "build_version": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "required": [
+      "public_key_pem",
+      "collector_profile",
+      "build_version"
+    ],
+    "additionalProperties": false
+  },
+  "EnrollmentResult": {
+    "type": "object",
+    "properties": {
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "tenant_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "client_certificate_pem": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16384
+      },
+      "ca_bundle_pem": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32768
+      },
+      "expires_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "allowed_project_ids": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "required": [
+      "collector_id",
+      "tenant_id",
+      "client_certificate_pem",
+      "ca_bundle_pem",
+      "expires_at",
+      "allowed_project_ids"
+    ],
+    "additionalProperties": false
+  },
+  "Policy": {
+    "type": "object",
+    "properties": {
+      "tenant_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "issued_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "expires_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "service_ids": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "techniques": {
+        "type": "array",
+        "maxItems": 16,
+        "items": {
+          "type": "string",
+          "enum": [
+            "gateway",
+            "ebpf",
+            "browser",
+            "android",
+            "ios",
+            "cloud",
+            "messaging",
+            "runtime"
+          ]
+        }
+      },
+      "approved_names": {
+        "type": "array",
+        "maxItems": 4096,
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "denied_templates": {
+        "type": "array",
+        "maxItems": 1024,
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "inspection_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65536
+      },
+      "depth_limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 32
+      },
+      "queue_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 268435456
+      },
+      "queue_ttl_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 86400
+      },
+      "durable_queue_enabled": {
+        "type": "boolean"
+      },
+      "approved_route_segments": {
+        "type": "array",
+        "maxItems": 4096,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "parser_profiles": {
+        "type": "array",
+        "maxItems": 128,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"
+        }
+      }
+    },
+    "required": [
+      "tenant_id",
+      "collector_id",
+      "revision",
+      "issued_at",
+      "expires_at",
+      "enabled",
+      "service_ids",
+      "techniques",
+      "approved_names",
+      "denied_templates",
+      "inspection_bytes",
+      "depth_limit",
+      "queue_bytes",
+      "queue_ttl_seconds",
+      "durable_queue_enabled",
+      "approved_route_segments",
+      "parser_profiles"
+    ],
+    "additionalProperties": false
+  },
+  "SignedPolicy": {
+    "type": "object",
+    "properties": {
+      "payload_base64url": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1048576
+      },
+      "signature_base64url": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "key_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "signature_profile": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "required": [
+      "payload_base64url",
+      "signature_base64url",
+      "key_id",
+      "signature_profile"
+    ],
+    "additionalProperties": false
+  },
+  "Health": {
+    "type": "object",
+    "properties": {
+      "wire_version": {
+        "const": 1
+      },
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "report_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "reported_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "policy_revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "memory",
+          "durable",
+          "disabled"
+        ]
+      },
+      "queue_bytes": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "oldest_batch_age_seconds": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "counters": {
+        "type": "object",
+        "properties": {
+          "observed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sampled_out": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expired": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "malformed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source_gaps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "policy_rejected": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "observed",
+          "sampled_out",
+          "dropped",
+          "expired",
+          "malformed",
+          "source_gaps",
+          "policy_rejected"
+        ],
+        "additionalProperties": false
+      },
+      "counter_epoch": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "required": [
+      "wire_version",
+      "collector_id",
+      "report_id",
+      "reported_at",
+      "policy_revision",
+      "mode",
+      "queue_bytes",
+      "oldest_batch_age_seconds",
+      "counters",
+      "counter_epoch"
+    ],
+    "additionalProperties": false
+  },
+  "SourceRequest": {
+    "type": "object",
+    "properties": {
+      "project_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "service_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "environment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "deployment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "profile": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "instance_nonce": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "required": [
+      "project_id",
+      "service_id",
+      "environment_id",
+      "deployment_id",
+      "profile",
+      "instance_nonce"
+    ],
+    "additionalProperties": false
+  },
+  "Source": {
+    "type": "object",
+    "properties": {
+      "source_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "project_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "service_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "environment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "deployment_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "profile": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "required": [
+      "source_id",
+      "collector_id",
+      "project_id",
+      "service_id",
+      "environment_id",
+      "deployment_id",
+      "profile"
+    ],
+    "additionalProperties": false
+  },
+  "Revocation": {
+    "type": "object",
+    "properties": {
+      "expected_revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "required": [
+      "expected_revision"
+    ],
+    "additionalProperties": false
+  },
+  "RevocationResult": {
+    "type": "object",
+    "properties": {
+      "collector_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "revoked": {
+        "const": true
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "required": [
+      "collector_id",
+      "revoked",
+      "revision"
+    ],
+    "additionalProperties": false
+  },
+  "HealthList": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "#/Health"
+        }
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "additionalProperties": false
+  }
+}
