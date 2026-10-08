@@ -344,5 +344,47 @@
         }
       ]
     }
+  },
+  "/v1/collector-authority": {
+    "post": {
+      "operationId": "refreshCollectorAuthority",
+      "security": [
+        {
+          "collectorMtls": []
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/authority.json#/AuthorityRequest"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Current enrolled authority snapshot; Cache-Control: no-store; not bootstrap enrollment.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/authority.json#/AuthorityResponse"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; no capture grant.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,137 @@
+{
+  "UUID": {
+    "type": "string",
+    "format": "uuid",
+    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  },
+  "Challenge": {
+    "type": "string",
+    "minLength": 64,
+    "maxLength": 64,
+    "pattern": "^[0-9a-f]{64}$"
+  },
+  "AuthoritySource": {
+    "type": "object",
+    "properties": {
+      "source_id": {
+        "$ref": "#/UUID"
+      },
+      "project_id": {
+        "$ref": "#/UUID"
+      },
+      "service_id": {
+        "$ref": "#/UUID"
+      },
+      "environment_id": {
+        "$ref": "#/UUID"
+      },
+      "deployment_id": {
+        "$ref": "#/UUID"
+      },
+      "technique": {
+        "enum": [
+          "gateway",
+          "ebpf",
+          "browser",
+          "android",
+          "ios",
+          "cloud",
+          "messaging",
+          "runtime"
+        ]
+      },
+      "parser_profiles": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 128,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "required": [
+      "source_id",
+      "project_id",
+      "service_id",
+      "environment_id",
+      "deployment_id",
+      "technique",
+      "parser_profiles"
+    ],
+    "additionalProperties": false
+  },
+  "AuthorityRequest": {
+    "type": "object",
+    "properties": {
+      "wire_version": {
+        "const": 1
+      },
+      "challenge": {
+        "$ref": "#/Challenge"
+      },
+      "source_ids": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 500,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "#/UUID"
+        }
+      }
+    },
+    "required": [
+      "wire_version",
+      "challenge",
+      "source_ids"
+    ],
+    "additionalProperties": false
+  },
+  "AuthorityResponse": {
+    "type": "object",
+    "properties": {
+      "wire_version": {
+        "const": 1
+      },
+      "challenge": {
+        "$ref": "#/Challenge"
+      },
+      "tenant_id": {
+        "$ref": "#/UUID"
+      },
+      "collector_id": {
+        "$ref": "#/UUID"
+      },
+      "checked_at": {
+        "type": "string",
+        "format": "date-time",
+        "maxLength": 35
+      },
+      "signed_policy": {
+        "$ref": "./collector.json#/SignedPolicy"
+      },
+      "sources": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 500,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "#/AuthoritySource"
+        }
+      }
+    },
+    "required": [
+      "wire_version",
+      "challenge",
+      "tenant_id",
+      "collector_id",
+      "checked_at",
+      "signed_policy",
+      "sources"
+    ],
+    "additionalProperties": false
+  }
+}

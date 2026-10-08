@@ -62,6 +62,9 @@
     },
     "/v1/comparisons/{id}": {
       "$ref": "./paths/review.json#/~1v1~1comparisons~1{id}"
+    },
+    "/v1/collector-authority": {
+      "$ref": "./paths/collector.json#/~1v1~1collector-authority"
     }
   },
   "components": {

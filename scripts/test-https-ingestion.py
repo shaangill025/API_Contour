@@ -135,6 +135,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
             connection.close()
 
     runpy.run_path(str(Path(__file__).with_name('test-operation-identity.py')))['run_cases'](execute,setup,server,request,directory,environment,str(Path(probe).with_name('operation_probe')))
+    runpy.run_path(str(Path(__file__).with_name('test-https-authority.py')))['run_cases'](container,execute,setup,server,request,context,directory)
 
     def receipt_identity(value):
         return (value['batch_id'],value['receipt_id'],value['accepted_at'])

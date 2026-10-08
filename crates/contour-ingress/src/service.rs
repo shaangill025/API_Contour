@@ -224,9 +224,9 @@ async fn handle(
     let Some(principal) = principal else {
         return fail(StatusCode::FORBIDDEN, "not_authorized", false);
     };
-    if request.uri().path_and_query().map(|target| target.as_str()) != Some("/v1/batches")
-        || request.uri().scheme().is_some()
-    {
+    let target = request.uri().path_and_query().map(|target| target.as_str());
+    let authority = target == Some("/v1/collector-authority");
+    if (!authority && target != Some("/v1/batches")) || request.uri().scheme().is_some() {
         return fail(StatusCode::NOT_FOUND, "not_found", false);
     }
     if request.method() != hyper::Method::POST {
@@ -255,14 +255,24 @@ async fn handle(
             false,
         );
     }
+    let body_limit = if authority {
+        crate::authority::REQUEST_LIMIT
+    } else {
+        BODY_LIMIT
+    };
+    let size_error = if authority {
+        "authority_request_too_large"
+    } else {
+        "batch_too_large"
+    };
     if request
         .headers()
         .get("content-length")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > BODY_LIMIT as u64)
+        .is_some_and(|length| length > body_limit as u64)
     {
-        return fail(StatusCode::PAYLOAD_TOO_LARGE, "batch_too_large", false);
+        return fail(StatusCode::PAYLOAD_TOO_LARGE, size_error, false);
     }
     let mut body = request.into_body();
     let mut bytes = Vec::new();
@@ -276,9 +286,9 @@ async fn handle(
         if bytes
             .len()
             .checked_add(data.len())
-            .is_none_or(|length| length > BODY_LIMIT)
+            .is_none_or(|length| length > body_limit)
         {
-            return fail(StatusCode::PAYLOAD_TOO_LARGE, "batch_too_large", false);
+            return fail(StatusCode::PAYLOAD_TOO_LARGE, size_error, false);
         }
         if bytes.try_reserve_exact(data.len()).is_err() {
             return fail(
@@ -288,6 +298,9 @@ async fn handle(
             );
         }
         bytes.extend_from_slice(&data);
+    }
+    if authority {
+        return authority_response(&state, principal, bytes, deadline, &id).await;
     }
     let Ok(batch) = Batch::from_wire_json(&bytes) else {
         return fail(StatusCode::BAD_REQUEST, "invalid_batch", false);
@@ -336,6 +349,64 @@ async fn handle(
         Err(SubmitError::Authority(AuthorityError::Admission)) => {
             fail(StatusCode::UNPROCESSABLE_ENTITY, "not_admissible", false)
         }
+        Err(_) => fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unavailable",
+            true,
+        ),
+    }
+}
+async fn authority_response(
+    state: &State,
+    principal: [String; 2],
+    bytes: Vec<u8>,
+    deadline: Instant,
+    id: &str,
+) -> Result<Reply, IngressError> {
+    let fail = |status, code, retryable| error(status, code, retryable, id);
+    let Ok((challenge, request)) = crate::authority::decode(&bytes, [&principal[0], &principal[1]])
+    else {
+        return fail(StatusCode::BAD_REQUEST, "invalid_authority_request", false);
+    };
+    drop(bytes);
+    let Ok(receive) = state.database.read_authority(request, deadline) else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_capacity_unavailable",
+            true,
+        );
+    };
+    let result = receive.await.map_err(|_| IngressError::Connection)?;
+    match result {
+        Ok(read) => {
+            if Instant::now() >= deadline {
+                return Err(IngressError::Connection);
+            }
+            let encoded = crate::authority::encode(&read, &challenge)
+                .map_err(|_| IngressError::Connection)?;
+            if Instant::now() >= deadline {
+                return Err(IngressError::Connection);
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .header("cache-control", "no-store")
+                .header("connection", "close")
+                .body(Full::new(Bytes::from(encoded)))
+                .map_err(|_| IngressError::Connection)
+        }
+        Err(AuthorityError::AuthorityTooLarge) => {
+            fail(StatusCode::PAYLOAD_TOO_LARGE, "authority_too_large", false)
+        }
+        Err(
+            AuthorityError::Identity
+            | AuthorityError::Missing
+            | AuthorityError::Disabled
+            | AuthorityError::Revoked
+            | AuthorityError::Policy
+            | AuthorityError::Source
+            | AuthorityError::Admission,
+        ) => fail(StatusCode::FORBIDDEN, "not_authorized", false),
         Err(_) => fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "database_unavailable",
