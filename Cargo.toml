@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/contour-core", "crates/contour-postgres"]
+members = ["crates/contour-core", "crates/contour-postgres", "crates/contour-ingress"]
 resolver = "2"
 
 [workspace.package]
