@@ -213,7 +213,10 @@ impl CollectorOwner {
         )
         .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
         self.queue.admit(draft, &inputs)?;
-        self.guard()
+        if !self.is_live() {
+            self.live = None;
+        }
+        Ok(())
     }
     pub fn freeze(
         &mut self,
@@ -235,7 +238,9 @@ impl CollectorOwner {
             .queue
             .freeze_with_limits(batch_id, maximum_records, maximum_wire_bytes, &inputs)?
             .is_some();
-        self.guard()?;
+        if !self.is_live() {
+            self.live = None;
+        }
         if frozen {
             self.retry = None;
         }

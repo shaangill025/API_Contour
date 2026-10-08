@@ -23,6 +23,10 @@ lengths are retained. This is a logical envelope-byte budget, not a measured hea
 or RSS bound. A refresh that cannot fit pauses without forgetting retained policy
 history. No serialized authority or restart cache grants access.
 
+Successful local admit/freeze results report the committed queue mutation even
+if authority expires during that operation. Live authority is then cleared; later
+admission/send requires refresh. Inspect is_live separately from local success.
+
 Callers admit structural RecordDraft values, freeze a bounded prefix, send once,
 and service retry waits and deletion-only expire_retained maintenance. Checked
 receipts are acknowledged only after transport ownership ends. Retry decisions
@@ -34,7 +38,9 @@ capture sanitization, enrollment, scheduling, durable queues or general 413 spli
 `python3 scripts/test-postgres-tls.py --https-only` builds owner_probe and runs
 scripts/test-collector-owner.py through the actual local mTLS/Postgres fixture.
 The fixture checks startup denial, online refresh/admission/send, durable receipt
-identity and zero charge, narrowing/highwater, temporary denial/renewal, and real
-TLS challenge/source/identity/late/cancelled reply rejection. It is synthetic
+identity and zero charge, narrowing/highwater, temporary denial/renewal, retained
+history after policy expiry, pending-send cancellation before narrowing, retry waits
+and terminal statuses, signed revision conflicts, and real TLS challenge/source/
+identity/late/cancelled/truncated reply rejection and server-name/root failures. It is synthetic
 fixture data and requires the existing local tools/image. The signed-padding fixture exercises aggregate history capacity exhaustion and
 retained charges; the 500-policy count bound is inspected, not stress-tested.

@@ -2,6 +2,7 @@
 use contour_core::*;
 use contour_delivery::{CollectorOwner, DeliveryClient, SendOutcome};
 use serde_json::{Value, json};
+use std::future::{Future, poll_fn};
 use std::{
     error::Error,
     fs,
@@ -10,6 +11,7 @@ use std::{
     path::Path,
     time::Duration,
 };
+use tokio::io::AsyncReadExt;
 fn draft(r: &Value) -> Result<RecordDraft, Box<dyn Error>> {
     let s = |n: &str| r[n].as_str().expect("fixture text");
     let u = |n: &str| r[n].as_u64().expect("fixture integer");
@@ -59,11 +61,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let key: [u8; 32] = fs::read(dir.join("signer.raw"))?
         .try_into()
         .map_err(|_| "key length")?;
-    let root = fs::read(dir.join("ca.crt.der"))?;
+    let mode = args.get(4).map(String::as_str).unwrap_or("valid");
+    let root = fs::read(dir.join(if mode == "bad-root" {
+        "untrusted.crt.der"
+    } else {
+        "ca.crt.der"
+    }))?;
     let cert = fs::read(dir.join("http-client.crt.der"))?;
     let private = fs::read(dir.join("http-client.key.der"))?;
     let client = DeliveryClient::from_der(
-        "localhost",
+        if mode == "bad-name" {
+            "127.0.0.1"
+        } else {
+            "localhost"
+        },
         SocketAddr::from((Ipv4Addr::LOCALHOST, args[3].parse::<u16>()?)),
         identity,
         &[&root],
@@ -95,6 +106,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                     Ok(json!({"cancelled":true}))
                 }
+                "cancel-send" => {
+                    let mut signal = tokio::net::TcpStream::connect((
+                        Ipv4Addr::LOCALHOST,
+                        command["control"].as_u64().ok_or("control")? as u16,
+                    ))
+                    .await?;
+                    let mut marker = [0];
+                    let mut read = Box::pin(signal.read_exact(&mut marker));
+                    let mut send = Box::pin(owner.send_once());
+                    poll_fn(|cx| {
+                        if send.as_mut().poll(cx).is_ready() {
+                            return std::task::Poll::Ready(Err(io::Error::other(
+                                "send completed before cancellation",
+                            )));
+                        }
+                        read.as_mut().poll(cx).map(|r| r.map(|_| ()))
+                    })
+                    .await?;
+                    drop(send);
+                    Ok(json!({"cancelled":true}))
+                }
+                "wait" => Ok(
+                    json!({"wait":format!("{:?}",owner.wait_retry(std::future::pending()).await?)}),
+                ),
                 "admit" => {
                     if let Some(revision) = command["revision"].as_u64() {
                         body["records"][0]["policy_revision"] = json!(revision);
