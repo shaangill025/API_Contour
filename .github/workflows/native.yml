@@ -26,6 +26,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Validate specification offline
+        run: python3 docs/specification/validate.py
+      - name: Install pinned specification validators
+        run: |
+          python3 -m venv /tmp/apicontour-spec-validation
+          /tmp/apicontour-spec-validation/bin/python -m pip install -r docs/specification/validation-requirements.txt
+      - name: Validate schema and OpenAPI standards
+        run: /tmp/apicontour-spec-validation/bin/python docs/specification/validate-standard.py
       - name: Install pinned Rust tools
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
       - name: Fetch locked dependencies
