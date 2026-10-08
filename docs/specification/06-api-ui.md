@@ -14,10 +14,23 @@ List endpoints use limit (default 50, maximum 200) and an opaque cursor. Sort by
 |---|---|
 | POST /v1/enrollments | Single-use bootstrap credential and public identity material; return scoped enrollment result |
 | GET /v1/collector-policy | Return signed policy matching the authenticated collector and revision |
+| POST /v1/collector-authority | Return a challenge-bound current policy and source snapshot for an enrolled collector |
 | POST /v1/batches | [Batch schema](contracts/batch.schema.json); durable receipt from [Delivery](05-delivery.md) |
 | POST /v1/collector-health | Versioned bounded counters, queue bytes, mode and last-policy revision; no free text or raw labels |
 
 The [OpenAPI contract](contracts/platform.openapi.json) defines request and response shapes, including enrollment, signed policy and health. The batch schema is normative for the ingestion body. Policy admission precedes every inbox write, as specified in [Privacy](03-privacy.md). P01 must validate these artifacts with standard validators and implement their semantic checks. No free-form diagnostic payload is permitted.
+
+The additive authority endpoint preserves the existing policy response contract.
+Its complete request is at most 32 KiB: wire version 1, a fresh 32-byte random
+challenge encoded as 64 lowercase hexadecimal characters, and 1–500 unique
+canonical source UUIDs. Reject duplicate or unknown fields. Identity comes only
+from the verified collector certificate. The response echoes the challenge and
+includes the scoped identity, database check time, unchanged signed policy fields,
+and authoritative workload, technique and parser assignments for exactly those
+sources. It is at most 8 MiB and uses `Cache-Control: no-store`. Refresh and batch
+ingestion share the same database session budget and original request deadline.
+This endpoint does not issue identities or register sources. A response is a
+snapshot; it is not itself permission to resume capture from cached state.
 
 POST /v1/collector-sources registers a source under an enrolled collector. The platform checks its project/service/environment/deployment assignments. The instance_nonce makes registration idempotent within the collector scope. It returns a server-assigned source_id. Collector health counters are cumulative within counter_epoch; a restart creates a new epoch. Duplicate report_id values do not add counts.
 

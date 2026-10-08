@@ -10,6 +10,16 @@ Policy leases last at most 15 minutes. Renew normally every 5 minutes. An offlin
 
 Persist the highest accepted policy revision with the collector identity in protected local state. This state contains no observations. Where trustworthy persistent state is unavailable, restart requires an online policy refresh before capture. After restoring a local snapshot, renew online before capture. Reject lower revisions and signature profiles not installed in the trusted release configuration. Do not trust an algorithm selected solely by a received policy.
 
+An online authority exchange uses a new challenge for each attempt. The client
+must verify the complete TLS response, matching challenge and identity, policy
+signature, and exact requested source set before it can create a live authority
+handle. The handle is not serializable. Its monotonic lease starts at request
+start and must conservatively deduct elapsed exchange time from the remaining
+signed lease; never extend expiry or exceed 15 minutes. Cached responses and
+restored local files cannot create this handle. Failed refresh cannot renew it.
+The server endpoint and a database snapshot alone do not implement this client
+lifecycle or bootstrap enrollment.
+
 Before committing ingestion, the server resolves the active policy, source and workload assignments from authenticated identity. The submitted revision must exist for that identity. The historical submitted revision must have been valid when each record was queued. The collector must also hold a currently valid enabled policy when sending. Validate records against both the historical revision and the current policy; a narrower current scope wins. An expired historical lease alone does not discard an otherwise admissible queued record, but expired or revoked current authorization rejects the whole batch before persistence. Old records are not grandfathered into a broader scope.
 
 The server independently checks field/header/query names against approved names, route literals against approved_route_segments, parser profile, technique, scope and resource limits. Routes consist only of approved literal segments and fixed placeholders such as {segment} or {id}; no arbitrary URL, query, fragment or authority is accepted. Unknown local segments become placeholders. Syntax checks alone are insufficient. Denied templates take precedence. Rejection logs contain safe codes and IDs only.

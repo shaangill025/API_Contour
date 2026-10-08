@@ -1,7 +1,8 @@
 //! Fixed slots bound potentially live sessions across receiver cancellation.
 use contour_core::{Batch, PolicyKeys};
 use contour_postgres::{
-    ConnectedDatabase, DatabaseSettings, DurableReceipt, SubmitError, TrustedCa,
+    AuthorityError, AuthorityRead, AuthorityReadRequest, ConnectedDatabase, DatabaseSettings,
+    DurableReceipt, SubmitError, TrustedCa,
 };
 use std::sync::{Arc, Mutex};
 use tokio::{
@@ -22,6 +23,39 @@ pub struct DatabaseCapacity {
 pub(crate) enum PoolError {
     Capacity,
     Closed,
+}
+enum Job {
+    Submit(
+        Batch,
+        [String; 2],
+        oneshot::Sender<Result<DurableReceipt, SubmitError>>,
+    ),
+    Authority(
+        AuthorityReadRequest,
+        oneshot::Sender<Result<AuthorityRead, AuthorityError>>,
+    ),
+}
+enum Outcome {
+    Submit(
+        oneshot::Sender<Result<DurableReceipt, SubmitError>>,
+        Result<DurableReceipt, SubmitError>,
+    ),
+    Authority(
+        oneshot::Sender<Result<AuthorityRead, AuthorityError>>,
+        Result<AuthorityRead, AuthorityError>,
+    ),
+}
+impl Outcome {
+    fn send(self) {
+        match self {
+            Self::Submit(reply, result) => {
+                let _ = reply.send(result);
+            }
+            Self::Authority(reply, result) => {
+                let _ = reply.send(result);
+            }
+        }
+    }
 }
 struct Slot {
     used: bool,
@@ -148,6 +182,20 @@ impl DatabasePool {
         identity: [String; 2],
         deadline: Instant,
     ) -> Result<oneshot::Receiver<Result<DurableReceipt, SubmitError>>, PoolError> {
+        let (reply, receive) = oneshot::channel();
+        self.start(Job::Submit(batch, identity, reply), deadline)?;
+        Ok(receive)
+    }
+    pub(crate) fn read_authority(
+        &self,
+        request: AuthorityReadRequest,
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<AuthorityRead, AuthorityError>>, PoolError> {
+        let (reply, receive) = oneshot::channel();
+        self.start(Job::Authority(request, reply), deadline)?;
+        Ok(receive)
+    }
+    fn start(&self, job: Job, deadline: Instant) -> Result<(), PoolError> {
         if Instant::now() >= deadline {
             return Err(PoolError::Capacity);
         }
@@ -177,36 +225,54 @@ impl DatabasePool {
         let trust = self.trust.clone();
         let keys = self.keys.clone();
         let owner = Arc::downgrade(&self.ledger); // No job/ledger ownership cycle.
-        let (reply, receive) = oneshot::channel();
         slot.job = Some(tokio::spawn(async move {
-            let connected = match existing {
+            let mut connected = match existing {
                 Some(session) => Ok(session),
                 None => settings.connect_single_until(&trust, deadline).await,
             };
-            match connected {
-                Ok(mut session) => {
-                    let result = session
-                        .submit_batch_until(&batch, [&identity[0], &identity[1]], &keys, deadline)
-                        .await;
-                    let mut returned = Some(session);
-                    if let Some(owner) = owner.upgrade() {
-                        if let Ok(mut ledger) = owner.lock() {
-                            if !ledger.closed {
-                                ledger.slots[selected].session = returned.take();
-                            }
+            let outcome = match job {
+                Job::Submit(batch, identity, reply) => {
+                    let result = match &mut connected {
+                        Ok(session) => {
+                            session
+                                .submit_batch_until(
+                                    &batch,
+                                    [&identity[0], &identity[1]],
+                                    &keys,
+                                    deadline,
+                                )
+                                .await
                         }
-                    }
-                    if let Some(session) = returned {
-                        let _ = session.close().await;
-                    }
-                    let _ = reply.send(result);
+                        Err(_) => Err(AuthorityError::Database.into()),
+                    };
+                    Outcome::Submit(reply, result)
                 }
-                Err(_) => {
-                    let _ = reply.send(Err(contour_postgres::AuthorityError::Database.into()));
+                Job::Authority(request, reply) => {
+                    let result = match &mut connected {
+                        Ok(session) => {
+                            session
+                                .read_authority_until(&request, &keys, deadline)
+                                .await
+                        }
+                        Err(_) => Err(AuthorityError::Database),
+                    };
+                    Outcome::Authority(reply, result)
+                }
+            };
+            let mut returned = connected.ok();
+            if let Some(owner) = owner.upgrade() {
+                if let Ok(mut ledger) = owner.lock() {
+                    if !ledger.closed {
+                        ledger.slots[selected].session = returned.take();
+                    }
                 }
             }
+            if let Some(session) = returned {
+                let _ = session.close().await;
+            }
+            outcome.send();
         }));
-        Ok(receive)
+        Ok(())
     }
     /// Seal without replacing sessions. Abort/join jobs and close idle owners.
     pub(crate) async fn shutdown(&self) {

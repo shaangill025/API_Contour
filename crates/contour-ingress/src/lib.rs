@@ -1,4 +1,5 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
+mod authority;
 mod pool;
 mod service;
 pub use pool::DatabaseCapacity;
