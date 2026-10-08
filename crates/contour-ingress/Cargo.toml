@@ -13,4 +13,9 @@ rustls = { version = "=0.23.45", default-features = false, features = ["std", "r
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 ring = "=0.17.14"
 bytes = "=1.12.1"
-tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util"] }
+tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util", "sync"] }
+contour-core = { path = "../contour-core" }
+contour-postgres = { path = "../contour-postgres" }
+serde_json = "=1.0.145"
+sha2 = "=0.10.9"
+time = { version = "=0.3.47", default-features = false, features = ["std", "formatting"] }

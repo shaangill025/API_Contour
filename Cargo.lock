@@ -135,11 +135,16 @@ name = "contour-ingress"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "contour-core",
+ "contour-postgres",
  "http-body-util",
  "hyper",
  "hyper-util",
  "ring",
  "rustls",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
  "tokio",
  "tokio-rustls",
 ]

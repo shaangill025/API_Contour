@@ -126,9 +126,10 @@ def main():
             raise RuntimeError("required fixture tool missing")
     run(["docker", "image", "inspect", IMAGE])  # Never download images here.
     run(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
-    if "--authority" in sys.argv:
+    if "--authority" in sys.argv or "--https-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = volume = None
@@ -139,10 +140,13 @@ def main():
         password = secrets.token_hex(24)
         environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password)
         try:
+            (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
             for name in ["ca", "untrusted"]:
                 run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                     "-sha256", "-config", str(directory/"request.cnf"), "-extensions", "ca",
                      "-subj", "/CN=APIContour inert fixture " + name, "-keyout", str(directory/(name+".key")), "-out", str(directory/(name+".crt"))])
             run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+                 "-sha256", "-config", str(directory/"request.cnf"),
                  "-keyout", str(directory/"server.key"), "-out", str(directory/"server.csr")])
             (directory/"extensions").write_text("subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n")
             run(["openssl", "x509", "-req", "-in", str(directory/"server.csr"), "-CA", str(directory/"ca.crt"),
@@ -153,7 +157,7 @@ def main():
             if network_settings["Driver"] != "bridge" or network_settings["Options"].get("com.docker.network.bridge.enable_ip_masquerade") != "false":
                 raise AssertionError("fixture bridge configuration mismatch")
             data_mount = ["--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m"]
-            if "--authority" in sys.argv:
+            if "--authority" in sys.argv or "--https-only" in sys.argv:
                 volume = "contour-recovery-" + secrets.token_hex(12)
                 run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
@@ -173,14 +177,26 @@ def main():
             run(["docker", "start", container])
             deadline = time.monotonic()+60
             while True:
-                ready = subprocess.run(["docker", "exec", container, "sh", "-c",
-                                        'test "$(cat /proc/1/comm)" = postgres && pg_isready -U postgres -d contour_fixture'],
-                                       capture_output=True, timeout=5)
-                if ready.returncode == 0:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("PostgreSQL TLS startup timed out")
+                try:
+                    ready = subprocess.run(["docker", "exec", container, "sh", "-c",
+                                            'test "$(cat /proc/1/comm)" = postgres && pg_isready -U postgres -d contour_fixture'],
+                                           capture_output=True, timeout=min(5,remaining))
+                except subprocess.TimeoutExpired:
+                    ready = None
+                if ready is not None and ready.returncode == 0:
                     break
                 if time.monotonic() >= deadline:
                     raise TimeoutError("PostgreSQL TLS startup timed out")
-                time.sleep(0.2)
+                try:
+                    state = run(["docker", "inspect", "--format", "{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}", container],timeout=min(5,deadline-time.monotonic())).split('|')
+                except subprocess.TimeoutExpired:
+                    state = None
+                if state is not None and state[0] == 'false':
+                    raise RuntimeError("owned PostgreSQL fixture stopped: exit %d, OOM %s" % (int(state[1]),state[2]))
+                time.sleep(min(0.2,max(0,deadline-time.monotonic())))
             sql = ["docker", "exec", "-i", container, "psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "contour_fixture"]
             run(sql, "CREATE ROLE contour_tls LOGIN PASSWORD '"+password+"';")
             hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls all scram-sha-256\nhostssl all all all reject\n"
@@ -231,7 +247,12 @@ def main():
             check("localhost", port, "untrusted.crt", "Connection")
             check("127.0.0.1", port, "ca.crt", "Connection")
             print("Actual PostgreSQL trusted CA, TLS health, bad CA, wrong hostname and backend cleanup passed")
-            if "--authority" in sys.argv:
+            if "--https-only" in sys.argv:
+                if "--authority" in sys.argv:
+                    raise ValueError("choose full authority or focused HTTPS mode")
+                authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
+                runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,https_only=True)
+            elif "--authority" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment)
                 server = ProtocolServer("begin", directory)

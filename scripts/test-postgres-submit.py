@@ -46,7 +46,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
                 actual = ' '.join(parts[:3])
             expected = 'Invalidated' if wanted == 'Cancel' else 'Accepted' if wanted == 'AcceptedInvalidated' else wanted
             if not (actual == expected or expected == 'Accepted' and actual.startswith('Accepted ')):
-                raise AssertionError('submission marker mismatch')
+                raise AssertionError('submission marker mismatch: expected ' + expected + ', got ' + actual)
             until = time.monotonic() + 5
             while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';") != '0':
                 if time.monotonic() > until:
@@ -257,3 +257,8 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     print('Restricted TLS atomic inbox accepted/duplicate statuses, concurrent/retry identity, integrity/scope/expiry and bytea assertions passed')
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment)
+    # Recovery may change the dynamically published port; re-read the verified binding.
+    bindings = json.loads(subprocess.run(['docker','inspect',container],capture_output=True,text=True,check=True,timeout=5).stdout)[0]['NetworkSettings']['Ports']['5432/tcp']
+    if len(bindings)!=1 or bindings[0]['HostIp']!='127.0.0.1':
+        raise AssertionError('HTTPS backend binding is not loopback-only')
+    runpy.run_path(str(ROOT / 'scripts/test-https-ingestion.py'))['run_cases'](container, execute, setup, str(Path(probe).with_name('https_probe')), bindings[0]['HostPort'], directory, environment)
