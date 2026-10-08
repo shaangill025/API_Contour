@@ -6,6 +6,8 @@ pub use admission::{AdmissionError, AdmissionInputs, SourceAssignment, validate_
 mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod extract;
+mod operation;
+pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};
 mod policy;
 mod queue;
 mod scalar;
