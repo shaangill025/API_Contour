@@ -12,8 +12,9 @@ observed structures with declared and approved contracts, then review changes.
 and three PostgreSQL migrations for identity, policy, and inbox storage. The Rust
 database adapter validates authority, stores batches, and returns durable receipts.
 The core also provides checked record construction and bounded in-memory retention.
-An operator-configured mTLS HTTPS ingestion library includes a synthetic
-HTTPS-to-restricted-PostgreSQL fixture. A deployable platform, released collector
+Operator-configured mTLS HTTPS libraries provide ingestion and online authority
+refresh. A caller-driven collector owner integrates refresh, admission, bounded
+freezing and checked delivery through an actual synthetic HTTPS/PostgreSQL fixture. A deployable platform, released collector
 and web UI remain pending. The architecture and packages below describe the
 intended release.
 
@@ -54,9 +55,11 @@ Collectors will send bounded batches to the ingestion API; they will not connect
 to PostgreSQL directly. Embedded collectors will use bounded memory by default.
 Standalone collectors may use an optional local SQLite queue for sanitized data.
 Bounded retention, authenticated single-attempt delivery, and caller-driven retry
-decisions are implemented in shared libraries. Enrollment, a full background
-scheduler, splitting, durable local storage, and capture callback integration
-remain pending.
+decisions are implemented in shared libraries. The collector owner requires online
+authority after startup and preserves policy history for retained records. Exact
+pre-send chunking is implemented; general splitting after an uncertain HTTP413,
+enrollment, a full background scheduler, durable local storage and capture callback
+integration remain pending.
 
 Collection must not wait for a remote response on the application request path.
 If a collector reaches its limits, it must report loss or incomplete visibility.
@@ -114,6 +117,10 @@ and production target are still pending. No production deployment is included ye
   retries verify stored content and return the original receipt.
 - Real PostgreSQL process-crash recovery and lost COMMIT reply tests. A confirmed
   commit retains its receipt even if connection cleanup then fails.
+- Authenticated collector authority refresh with fresh challenges, scoped source
+  assignments and bounded monotonic leases; caller-driven owner admission, exact
+  pre-send byte limits, retained policy history and checked receipts. See
+  [owner semantics and scope](crates/contour-delivery/OWNER.md).
 - Authenticated single-attempt collector delivery and metadata-only retry decisions,
   with bounded jitter/Retry-After, hard renewal pauses, and TTL-only cleanup. See
   [delivery behavior and remaining integration](crates/contour-delivery/README.md).
@@ -121,8 +128,8 @@ and production target are still pending. No production deployment is included ye
 
 Pure admission validates a supplied snapshot. HTTP authentication and checked
 receipts are implemented with explicit operator configuration. Capture-side
-revocation integration, authenticated enrollment/renewal, persistent revision
-high-water storage, durable queues, the full delivery scheduler, splitting, released
+revocation scheduling, authenticated enrollment, persistent revision high-water
+storage, durable queues, the full delivery scheduler, general post413 splitting, released
 collectors, contract comparison, and the UI remain pending.
 Full platform, device, cloud, backup/restore, and performance acceptance is pending.
 
