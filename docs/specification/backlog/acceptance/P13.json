@@ -1,0 +1,38 @@
+[
+  {
+    "id": "AT-P13-01",
+    "task": "P13-01",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Attack all read/write/import/export paths with two scoped principals",
+    "expected": "No unauthorized records or actions succeed, including worker and pooled-connection paths.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P13-02",
+    "task": "P13-02",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Expire data and restore an actual database backup",
+    "expected": "Configured retention and recovery targets hold; deduplication and approval history remain consistent.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P13-03",
+    "task": "P13-03",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Install offline and upgrade supported collector/server combinations",
+    "expected": "Signature checks, compatible migrations, emergency disable and documented recovery succeed.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "AT-P13-04",
+    "task": "P13-04",
+    "setup": "Isolated authorized fixture for the task; record exact tool and platform versions.",
+    "action": "Seed secrets and inspect logs, metrics, traces and support bundles",
+    "expected": "No raw values persist; quotas, backlog and stale health are observable.",
+    "evidence": "Command, source revision, environment tuple, result and artifact hashes; actual platform evidence where applicable.",
+    "status": "NOT_RUN"
+  }
+]

@@ -1,0 +1,86 @@
+[
+  {
+    "id": "P13-01",
+    "phase": "P13",
+    "title": "Implement tenant and user security",
+    "requirements": [
+      "R-SECURITY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P13-01"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement tenant and user security with executable tests and versioned evidence"
+  },
+  {
+    "id": "P13-02",
+    "phase": "P13",
+    "title": "Implement retention and recovery",
+    "requirements": [
+      "R-STORAGE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P13-02"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement retention and recovery with executable tests and versioned evidence"
+  },
+  {
+    "id": "P13-03",
+    "phase": "P13",
+    "title": "Implement packages and upgrades",
+    "requirements": [
+      "R-PACKAGING"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P13-03"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement packages and upgrades with executable tests and versioned evidence"
+  },
+  {
+    "id": "P13-04",
+    "phase": "P13",
+    "title": "Implement observability and safe support export",
+    "requirements": [
+      "R-OPERATIONS"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05"
+    ],
+    "acceptance": [
+      "AT-P13-04"
+    ],
+    "status": "PENDING",
+    "owner_role": "platform",
+    "output": "Implement observability and safe support export with executable tests and versioned evidence"
+  }
+]

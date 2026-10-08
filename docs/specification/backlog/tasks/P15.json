@@ -1,0 +1,136 @@
+[
+  {
+    "id": "P15-01",
+    "phase": "P15",
+    "title": "Implement runtime adapters",
+    "requirements": [
+      "R-PROTOCOLS"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P15-01",
+      "AT-CAP-036",
+      "AT-CAP-037",
+      "AT-CAP-038",
+      "AT-FAMILY-RUNTIME"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement runtime adapters with executable tests and versioned evidence"
+  },
+  {
+    "id": "P15-02",
+    "phase": "P15",
+    "title": "Implement serverless profiles",
+    "requirements": [
+      "R-PERFORMANCE"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P07-02",
+      "P08-02",
+      "P09-02",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04",
+      "P15-01"
+    ],
+    "acceptance": [
+      "AT-P15-02",
+      "AT-CAP-039",
+      "AT-CAP-040",
+      "AT-CAP-041",
+      "AT-FAMILY-SERVERLESS"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement serverless profiles with executable tests and versioned evidence"
+  },
+  {
+    "id": "P15-03",
+    "phase": "P15",
+    "title": "Implement Kubernetes and Docker deployment",
+    "requirements": [
+      "R-IDENTITY"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P15-03",
+      "AT-CAP-042",
+      "AT-CAP-043",
+      "AT-FAMILY-DOCKER",
+      "AT-FAMILY-KUBERNETES"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement Kubernetes and Docker deployment with executable tests and versioned evidence"
+  },
+  {
+    "id": "P15-04",
+    "phase": "P15",
+    "title": "Implement contract CI workflow",
+    "requirements": [
+      "R-CI"
+    ],
+    "depends_on": [
+      "P01-01",
+      "P01-02",
+      "P01-03",
+      "P01-04",
+      "P01-05",
+      "P02-01",
+      "P02-02",
+      "P02-03",
+      "P02-04",
+      "P11-01",
+      "P11-02",
+      "P11-03",
+      "P11-04"
+    ],
+    "acceptance": [
+      "AT-P15-04",
+      "AT-CAP-044",
+      "AT-FAMILY-CI"
+    ],
+    "status": "PENDING",
+    "owner_role": "collector specialist",
+    "output": "Implement contract CI workflow with executable tests and versioned evidence"
+  }
+]
