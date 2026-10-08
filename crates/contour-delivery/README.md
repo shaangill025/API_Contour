@@ -1,4 +1,4 @@
-# One authenticated delivery attempt
+# Authenticated attempts and bounded retry decisions
 
 `DeliveryClient` uses an operator-resolved socket address, a separate verified TLS
 server name, explicit trust roots and client credentials. It sends HTTP/1 over
@@ -21,10 +21,33 @@ Failures retain the original frozen identity, binding, digest, bytes and charges
 A transport failure can conservatively reject an otherwise ready response;
 retrying the same frozen batch recovers the server's duplicate receipt.
 
-This library implements one attempt, not a retry scheduler, splitting, discovery,
-persistent storage or revocation notification. Non-200 status is classified;
-`Retry-After` parsing and scheduling remain a later API extension. It does not
-claim wall-clock or process scheduling guarantees beyond cooperative deadlines.
+`RetryController` is bound to one frozen delivery binding. It owns metadata only,
+never the queue or a payload/reservation. Retry ceilings double from 1 to 60 seconds
+with uniform millisecond full jitter from Ring. A single bounded `Retry-After`
+(delta seconds or standard HTTP date) is capped at 300 seconds; malformed or
+duplicate values fall back to jitter. Status/header classification ignores error
+bodies. Only successful 200 replies use the strict receipt body decoder.
+
+400/422 requests discard; the owner passes the controller binding to
+`MemoryQueue::discard_frozen`, which checks it and increments a safe loss counter.
+401/403 hard-pauses for authorized enrollment renewal, 409 stops for conflict and
+413 requires splitting without retrying unchanged content. Other 5xx, 429 and
+uncertain transport failures preserve exact retry data. Terminal states have no resume method; constructing another controller is not
+proof of authorized renewal. No boolean or cached-policy online-grant shortcut is
+provided. Splitting/enrollment are not implemented.
+
+Waits are cancelable and clipped to original record TTL. Drop all network and
+reservation owners before waiting, service the bounded capture channel separately,
+and obtain fresh trusted authority/source inputs before reserving again. Cancel
+wait/send on trusted scope updates and reconcile; known identity revocation purges.
+While paused, `MemoryQueue::expire_retained()` performs deletion-only maintenance
+without granting authority, renewing timestamps, changing identity or high-water
+revision evidence. The owner must schedule this at `retained_until()`.
+
+This is a caller-driven controller, not the full background scheduler, splitting,
+discovery, enrollment, durable local storage or revocation notification. It does
+not claim scheduling guarantees beyond cooperative deadlines or authenticate an
+online startup grant. Those remaining integrations are required release work.
 
 The separate local `--delivery-only` fixture runs the actual full queue
 through verified HTTPS and restricted PostgreSQL, then checks release to zero.

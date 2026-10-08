@@ -138,6 +138,33 @@ impl MemoryQueue {
         self.stats.records = 0;
         self.stats.bytes = 0;
     }
+    /// Delete expired retained records without granting capture/send authority.
+    /// Useful while paused for authorized renewal; does not renew timestamps,
+    /// alter identity/high-water evidence, or make a revoked queue usable.
+    pub fn expire_retained(&mut self) -> Result<(), QueueError> {
+        let now = self.now()?;
+        self.expire_retained_at(now);
+        Ok(())
+    }
+    fn expire_retained_at(&mut self, now: OffsetDateTime) {
+        if self.frozen.as_ref().is_some_and(|batch| {
+            batch
+                .entries
+                .iter()
+                .any(|entry| entry.record.expires_at().instant() <= now)
+        }) {
+            self.cancel_frozen(now);
+        }
+        self.entries.retain(|entry| {
+            if entry.record.expires_at().instant() <= now {
+                self.stats.expired = self.stats.expired.saturating_add(1);
+                false
+            } else {
+                true
+            }
+        });
+        self.recount();
+    }
     fn reconcile_at(
         &mut self,
         inputs: &AdmissionInputs<'_>,

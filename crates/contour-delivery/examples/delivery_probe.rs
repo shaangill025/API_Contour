@@ -1,6 +1,9 @@
 //! Synthetic fixture; no enrollment/capture executable.
 use contour_core::*;
-use contour_delivery::{DeliveryClient, ReceiptStatus};
+use contour_delivery::{
+    DeliveryClient, DeliveryError, ReceiptStatus, RetryController, RetryDirective, RetryError,
+    WaitOutcome,
+};
 use serde_json::{Value, json};
 use std::{
     error::Error,
@@ -97,6 +100,28 @@ async fn control_pending(
     drop(send);
     Ok(())
 }
+async fn cancel_wait(
+    controller: &RetryController,
+    port: u16,
+) -> Result<WaitOutcome, Box<dyn Error>> {
+    let socket = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
+    let (mut reader, mut writer) = socket.into_split();
+    let mut marker = [0; 1];
+    let mut wait = Box::pin(controller.wait(async {
+        let _ = reader.read_exact(&mut marker).await;
+    }));
+    poll_fn(|cx| match wait.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(Ok(())),
+        Poll::Ready(_) => Poll::Ready(Err("retry wait was not pending")),
+    })
+    .await?;
+    writer.write_all(b"A").await?;
+    let outcome = wait.await?;
+    if marker != [b'C'] {
+        return Err("retry cancellation marker".into());
+    }
+    Ok(outcome)
+}
 async fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
     if !(5..=6).contains(&args.len()) {
@@ -159,6 +184,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let cert = fs::read(dir.join("http-client.crt.der"))?;
     let private = fs::read(dir.join("http-client.key.der"))?;
+    let mut retry = None;
     for stage in args[4].split(',') {
         let (mode, port) = stage.split_once(':').ok_or("stage")?;
         let root = fs::read(dir.join(if mode == "bad-ca" {
@@ -181,6 +207,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
             &private,
             Duration::from_secs(5),
         )?;
+        // Fixture-owned authoritative file, not an online enrollment grant.
+        let current = VerifiedPolicy::from_signed_json(
+            &fs::read(&args[3])?,
+            &keys,
+            identity[0],
+            identity[1],
+            OffsetDateTime::now_utc(),
+        )?;
+        let inputs = AdmissionInputs::new(identity, &current, &[&policy], &sources)?;
         let mut attempt = queue.reserve_delivery(&inputs)?.ok_or("reservation")?;
         assert_eq!(attempt.identity(), identity);
         assert!(attempt.valid_until() <= policy.expires_at());
@@ -209,6 +244,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
             io::stdin().read_line(&mut line)?;
             continue;
         }
+        if mode.starts_with("retry-") && retry.is_none() {
+            // Bounds checked on this real frozen binding; not a statistical
+            // distribution claim or seven network attempts.
+            let mut bounds = RetryController::for_attempt(&mut attempt);
+            for ceiling in [1, 2, 4, 8, 16, 32, 60, 60] {
+                if let RetryDirective::Retry { after } =
+                    bounds.on_failure(binding, DeliveryError::Transport)?
+                {
+                    assert!(after <= Duration::from_secs(ceiling));
+                } else {
+                    return Err("retry ceiling decision".into());
+                }
+            }
+
+            retry = Some(RetryController::for_attempt(&mut attempt));
+        }
         match client.send_once(&mut attempt).await {
             Ok(receipt) => {
                 let result = json!({"status":if receipt.status()==ReceiptStatus::Accepted{"accepted"}else{"duplicate"},"receipt_id":receipt.receipt_id(),"accepted_at":receipt.accepted_at().as_str()});
@@ -223,6 +274,125 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 drop(attempt);
                 assert_eq!(queue.stats().bytes, full);
                 assert_eq!(queue.stats().records, 1);
+                if mode.starts_with("retry-") {
+                    if mode != "retry-lost" && !matches!(error, DeliveryError::Rejected { .. }) {
+                        return Err("status was not classified independently of error body".into());
+                    }
+                    let controller = retry.as_mut().ok_or("retry controller")?;
+                    let started = tokio::time::Instant::now();
+                    let directive = controller.on_failure(binding, error)?;
+                    println!(
+                        "{}",
+                        json!({"directive":format!("{directive:?}"),"charge":full,"retry_after_ms":match error {DeliveryError::Rejected {retry_after,..}=>retry_after.map(|v|v.as_millis()),_=>None}})
+                    );
+                    io::stdout().flush()?;
+                    let mut line = String::new();
+                    io::stdin().read_line(&mut line)?;
+                    match directive {
+                        RetryDirective::DiscardInvalid => {
+                            queue.discard_frozen(binding)?;
+                            assert_eq!(queue.stats().bytes, 0);
+                            assert_eq!(queue.stats().purged, 1);
+                            println!("{}", json!({"terminal":"discard","charge":0}));
+                            return Ok(());
+                        }
+                        RetryDirective::RenewAuthorizedEnrollment => {
+                            assert_eq!(
+                                controller.on_failure(binding, DeliveryError::Transport),
+                                Err(RetryError::Stopped)
+                            );
+                            if mode == "retry-401" {
+                                let remaining =
+                                    controller.retained_until() - OffsetDateTime::now_utc();
+                                tokio::time::sleep(Duration::try_from(
+                                    remaining.max(time::Duration::ZERO),
+                                )?)
+                                .await;
+                                queue.expire_retained()?;
+                                assert_eq!(queue.stats().bytes, 0);
+                                assert_eq!(queue.stats().expired, 1);
+                                println!("{}", json!({"terminal":"pause-expired","charge":0}));
+                            } else {
+                                println!("{}", json!({"terminal":"paused","charge":full}));
+                            }
+                            return Ok(());
+                        }
+                        RetryDirective::StopConflict | RetryDirective::RequireSplit => {
+                            assert_eq!(
+                                controller.on_failure(binding, DeliveryError::Transport),
+                                Err(RetryError::Stopped)
+                            );
+                            println!("{}", json!({"terminal":"stopped","charge":full}));
+                            return Ok(());
+                        }
+                        RetryDirective::Retry { after } => {
+                            if mode == "retry-binding" {
+                                queue.discard_frozen(binding)?;
+                                queue.admit(draft(r)?, &inputs)?;
+                                let new_binding = queue
+                                    .freeze("00000000-0000-4000-8000-000000000002", 1, &inputs)?
+                                    .ok_or("replacement freeze")?
+                                    .binding();
+                                assert_eq!(
+                                    controller.on_failure(new_binding, error),
+                                    Err(RetryError::Binding)
+                                );
+                                assert_eq!(queue.stats().bytes, full);
+                                println!("{}", json!({"terminal":"binding","charge":full}));
+                                return Ok(());
+                            }
+
+                            let outcome =
+                                if matches!(mode, "retry-cap" | "retry-cancel" | "retry-revoke") {
+                                    cancel_wait(
+                                        controller,
+                                        args.get(5).ok_or("retry control port")?.parse()?,
+                                    )
+                                    .await?
+                                } else {
+                                    controller.wait(std::future::pending()).await?
+                                };
+                            if outcome == WaitOutcome::Ready {
+                                assert!(started.elapsed() >= after);
+                            }
+                            if outcome == WaitOutcome::Expired {
+                                queue.expire_retained()?;
+                                assert_eq!(queue.stats().bytes, 0);
+                                assert!(queue.reserve_delivery(&inputs)?.is_none());
+                                println!("{}", json!({"terminal":"expired","charge":0}));
+                                return Ok(());
+                            }
+                            if mode == "retry-revoke" {
+                                assert_eq!(outcome, WaitOutcome::Cancelled);
+                                let updated = VerifiedPolicy::from_signed_json(
+                                    &fs::read(&args[3])?,
+                                    &keys,
+                                    identity[0],
+                                    identity[1],
+                                    OffsetDateTime::now_utc(),
+                                )?;
+                                let fresh =
+                                    AdmissionInputs::new(identity, &updated, &[&policy], &sources)?;
+                                assert!(queue.reconcile(&fresh).is_err());
+                                assert_eq!(queue.stats().bytes, 0);
+                                assert_eq!(
+                                    queue.reserve_delivery(&inputs).unwrap_err(),
+                                    QueueError::Revision
+                                );
+                                // Trusted fixture operator also revokes the local identity.
+                                queue.revoke();
+                                assert_eq!(
+                                    queue.reserve_delivery(&fresh).unwrap_err(),
+                                    QueueError::Revoked
+                                );
+                                println!("{}", json!({"terminal":"revoked","charge":0}));
+                                return Ok(());
+                            }
+                        }
+                        _ => return Err("unexpected retry directive".into()),
+                    }
+                    continue;
+                }
                 println!("{}", json!({"failure":error.to_string(),"charge":full}));
                 io::stdout().flush()?;
                 let mut line = String::new();
