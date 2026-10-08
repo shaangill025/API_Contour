@@ -2,6 +2,7 @@
 import base64
 import contextlib
 from datetime import datetime
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,16 @@ import runpy
 import subprocess
 import threading
 import time
+
+
+def instant(value):
+    # Rust emits 1–9 fraction digits; Python 3.9 fromisoformat accepts only 3/6.
+    # Keep the full fraction for exact TTL checks; wall-clock waiting rounds up.
+    assert value.endswith('Z')
+    whole, separator, fraction = value[:-1].partition('.')
+    assert not separator or (fraction.isascii() and fraction.isdigit() and 1 <= len(fraction) <= 9)
+    seconds = int(datetime.fromisoformat(whole+'+00:00').timestamp())
+    return Decimal(seconds) + (Decimal('0.'+fraction) if separator else Decimal(0))
 
 
 def run_cases(execute,setup,server,relay,directory,environment,probe):
@@ -42,8 +53,7 @@ def run_cases(execute,setup,server,relay,directory,environment,probe):
         assert record['record_id']==original['record_id'] and record['queued_at']==original['queued_at'] and record['expires_at']==original['expires_at']
         assert record['structure']==body['records'][0]['structure']
         assert record['first_seen']==body['records'][0]['first_seen'] and record['last_seen']==body['records'][0]['last_seen']
-        parse=lambda v:datetime.fromisoformat(v.replace('Z','+00:00'))
-        assert (parse(record['expires_at'])-parse(record['queued_at'])).total_seconds()==policy['queue_ttl_seconds']
+        assert instant(record['expires_at'])-instant(record['queued_at'])==policy['queue_ttl_seconds']
         row=execute("SELECT encode(b.request_digest,'hex') || '|' || encode(p.checked_batch,'hex') FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.tenant_id='%s' AND b.collector_id='%s' AND b.batch_id='%s';" % (body['tenant_id'],collector,receipt['batch_id']))
         digest,payload=row.split('|')
         canonical=json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
@@ -78,8 +88,8 @@ def run_cases(execute,setup,server,relay,directory,environment,probe):
             # Initial real DB server is stopped before next backend sentinel setup.
             if mode=='expire':
                 original=json.loads((directory/'bounded-original.json').read_bytes())
-                expiry=max(datetime.fromisoformat(v['expires_at'].replace('Z','+00:00')).timestamp() for v in original)
-                time.sleep(max(0,expiry-time.time()))
+                expiry=max(instant(v['expires_at']) for v in original)
+                time.sleep(max(0,float(expiry+Decimal('0.000001'))-time.time()))
             else:
                 helpers['disable'](body,policy_path,directory,execute)
                 reenrolled,new_collector,_=setup('bounded_reenrolled',current=1,history=(1,))
