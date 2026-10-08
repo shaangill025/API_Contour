@@ -121,14 +121,18 @@ class ProtocolServer:
 
 
 def main():
+    flags = sys.argv[1:]
+    if len(flags)>1 or any(flag not in ['--authority','--https-only'] for flag in flags):
+        raise ValueError("choose one supported fixture mode")
     for tool in ["docker", "openssl", "cargo"]:
         if not shutil.which(tool):
             raise RuntimeError("required fixture tool missing")
     run(["docker", "image", "inspect", IMAGE])  # Never download images here.
     run(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
-    if "--authority" in sys.argv or "--https-only" in sys.argv:
+    if "--authority" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
+    elif "--https-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
@@ -248,8 +252,6 @@ def main():
             check("127.0.0.1", port, "ca.crt", "Connection")
             print("Actual PostgreSQL trusted CA, TLS health, bad CA, wrong hostname and backend cleanup passed")
             if "--https-only" in sys.argv:
-                if "--authority" in sys.argv:
-                    raise ValueError("choose full authority or focused HTTPS mode")
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,https_only=True)
             elif "--authority" in sys.argv:

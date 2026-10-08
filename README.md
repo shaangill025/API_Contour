@@ -12,8 +12,10 @@ observed structures with declared and approved contracts, then review changes.
 and three PostgreSQL migrations for identity, policy, and inbox storage. The Rust
 database adapter validates authority, stores batches, and returns durable receipts.
 The core also provides checked record construction and bounded in-memory retention.
-It does not yet provide a runnable platform, collector, ingestion service, or web UI. The architecture and packages below
-describe the intended release.
+An operator-configured mTLS HTTPS ingestion library includes a synthetic
+HTTPS-to-restricted-PostgreSQL fixture. A deployable platform, released collector
+and web UI remain pending. The architecture and packages below describe the
+intended release.
 
 ## Enterprise workflows
 
@@ -83,6 +85,10 @@ Customer-hosted deployment is the proposed production model. The hosting decisio
 and production target are still pending. No production deployment is included yet.
 
 ## Implemented today
+
+- Operator-configured mTLS HTTP/1 ingestion with certificate fingerprint scope
+  binding, bounded requests, and accepted/duplicate durable receipt responses.
+  Enrollment and deployment integration remain pending.
 
 - Checked structural types, canonical encoding, and SHA-256 fingerprints.
 - Bounded local JSON extraction that returns structure without observed values.
