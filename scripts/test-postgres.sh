@@ -166,3 +166,49 @@ SELECT fixture.expect_state('UPDATE contour.ingestion_payloads SET checked_batch
 SELECT fixture.expect_state('DELETE FROM contour.ingestion_payloads','23514');
 SQL
 echo 'PostgreSQL durable inbox fixture passed'
+admin_sql < "$root/db/provision_catalog.sql"
+# Migration 4 needs owner membership only, not superuser/BYPASSRLS.
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0004_catalog.sql" | docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture; then
+    echo 'Injected catalog migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.operations') IS NULL
+    AND to_regclass('contour.variants') IS NULL
+    AND to_regclass('contour.observation_windows') IS NULL
+    AND to_regclass('contour.catalog_processed_batches') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=4)
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='catalog_source_workload')
+    AND NOT has_table_privilege('contour_catalog_worker','contour.ingestion_payloads','SELECT')
+    AND NOT has_schema_privilege('contour_catalog_worker','contour','USAGE'), 'catalog upgrade atomic rollback');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0004_catalog.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4]::integer[], 'four migration ledger entries');
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.lock_collector('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000002');
+INSERT INTO contour.policy_revisions VALUES (contour.tenant_context(),
+    '00000000-0000-0000-0000-000000000002',3,'catalog-inert-policy');
+COMMIT;
+CREATE ROLE contour_catalog_worker_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_catalog_reader_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_catalog_worker TO contour_catalog_worker_test;
+GRANT contour_catalog_reader TO contour_catalog_reader_test;
+GRANT USAGE ON SCHEMA fixture TO contour_catalog_worker_test, contour_catalog_reader_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_catalog_worker_test, contour_catalog_reader_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_catalog_worker_test -d contour_fixture < "$root/db/tests/catalog.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.operations SET canonical_key=canonical_key','23514');
+SELECT fixture.expect_state('DELETE FROM contour.variants','23514');
+SELECT fixture.expect_state('UPDATE contour.observation_windows SET observation_count=observation_count','23514');
+SELECT fixture.expect_state('DELETE FROM contour.catalog_processed_batches','23514');
+SQL
+python3 "$root/scripts/test-catalog-concurrency.py" "$container_id"
+echo 'PostgreSQL catalog storage fixture passed'

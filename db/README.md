@@ -88,9 +88,10 @@ library driver observes advisory waits, verifies fresh post-wait reads, prompt
 40001 errors, source-profile locking, rollback lock release and isolation rejection.
 Waits and execution are bounded, and cleanup targets owned sessions.
 
-HTTP authentication and durable HTTP acceptance remain unimplemented.
-Atomic Rust submission is described below. Retention cleanup, queue purge and backup/restore also
-remain unimplemented. SQL credential holders remain trusted: they can choose a
+The ingress library implements collector mTLS authentication and durable HTTPS
+acceptance, with actual HTTPS/PostgreSQL fixture coverage. A production server
+executable and deployment remain unimplemented. Atomic Rust submission is described
+below. Retention cleanup, queue purge and backup/restore also remain unimplemented. SQL credential holders remain trusted: they can choose a
 tenant setting or hold locks.
 
 ## Native TLS transport
@@ -276,6 +277,56 @@ and rechecks the loopback port binding. A previously accepted complete pair reta
 the exact header, digest, payload bytes and receipt; the interrupted pair is absent.
 This proves PostgreSQL process crash recovery for the fixture, not power-loss,
 backup/restore, replication or high availability guarantees.
+
+## Catalog storage
+
+Provision `provision_catalog.sql` with the database administrator, then apply
+`0004_catalog.sql` using a login with owner membership. The migration needs no
+BYPASSRLS capability. It creates separate non-login catalog worker and reader
+groups with no inherited runtime, ingestion or administrative rights. The worker
+can read the tenant inbox and append catalog rows. The reader can read operations,
+variants and observation evidence, but cannot read the inbox or processing ledger.
+All four new tables force tenant RLS. Application roles cannot UPDATE, DELETE or
+TRUNCATE them. Existing identity permissions stay unchanged.
+
+Operations have server-generated UUIDs and a unique versioned 32-byte identity
+hash. The exact canonical eight-component key is retained as bytea (maximum 2,048
+bytes), including escaped NUL in arbitrary operation/template strings. Deployment
+and source do not split operation identity. Immutable variants have UUIDs and a
+unique operation/collector/policy-revision/parser/canonical-version/structure-hash
+key. Collector scope is essential: a policy revision is not globally unique.
+Canonical structure (up to 65,536 bytes) and structure wire bytes (up to 1 MiB)
+are authoritative. No large document participates in a B-tree key. JSONB is not
+used because it cannot preserve every accepted name. A future JSONB projection
+must be lossless for the represented subset and cannot replace these bytes.
+
+`observation_windows` stores one original record per accepted batch, without
+aggregation. Its foreign keys bind the exact batch, variant, operation and entire
+source/workload/deployment tuple. Counts remain per-source observations, not unique
+traffic totals. Sampling, visibility, completeness, reasons (including clock skew),
+status, route uncertainty and separate approved-name lists remain available.
+Timestamp text retains original nanosecond precision. Approved-name lists use
+version-1 UTF-8 JSON string arrays in bytea, including escaped NUL. No observed
+header or query values belong in these columns.
+
+A future trusted processor must verify the bounded inbox pair, checked batch,
+identity/count/digest and original admission scope before deriving rows. It must
+recompute operation and structure hashes, compare exact canonical/wire bytes and
+scope after any INSERT ON CONFLICT DO NOTHING, and fail the whole transaction on
+any mismatch. Use a separate SELECT statement under READ COMMITTED after a
+conflicting insert so that committed rows are visible. SQL byte bounds do not
+validate canonical encodings, safe names, timestamp order, structure semantics,
+or completeness/reason consistency. The checked decoder and trusted adapter must.
+
+Claim `catalog_processed_batches` with INSERT ON CONFLICT DO NOTHING RETURNING
+inside the same transaction as all derived writes. A committed claim means the
+whole verified batch was processed; an aborted transaction releases it for retry.
+The SQL schema cannot prove that every batch record was processed. Do not commit
+an empty claim as a lease. Accepted historical evidence remains processable after
+capture policy expiry, narrowing or revocation; this does not grant new capture
+permission. The future reader must also bind authenticated project/service scope:
+tenant RLS alone is not end-user authorization. No Rust worker, scheduler, catalog
+HTTP endpoint, retention or public pagination is implemented by this migration.
 
 ## Transactional catalog consumer
 
