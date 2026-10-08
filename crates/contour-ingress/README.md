@@ -51,8 +51,9 @@ authority, atomic submission and recovery cases. The separately required
 `python3 scripts/test-postgres-tls.py --https-only` runs the actual HTTPS-to-
 restricted-PostgreSQL flow. Both preserve their 240-second gate budgets. The
 temporary keys, certificate registry and listener
-are synthetic fixture configuration. There is no production executable,
-collector delivery client, queue acknowledgement integration or enrollment API.
+are synthetic fixture configuration. The separate `contour-delivery` crate
+provides bounded collector delivery and queue receipt acknowledgement. There is
+no deployable production server or enrollment API.
 
 Shutdown joins owned HTTP tasks and aborts their owned database drivers. Remote
 PostgreSQL work waiting on a lock can remain until its configured lock/statement

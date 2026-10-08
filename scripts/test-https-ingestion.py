@@ -372,7 +372,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
                 if stream.recv(1)!=b'':
                     raise AssertionError('absolute post-TLS header/body deadline did not close socket')
 
-    for mode in ['deadline','shutdown']:
+    for mode in ['deadline','shutdown','future_drop']:
         candidate, _, _ = setup('https_owned_'+mode)
         holder = subprocess.Popen(['docker','exec','-i',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture','-At'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         markers = queue.Queue()
@@ -382,7 +382,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
             if outcomes.get(timeout=2)!='closed':
                 raise AssertionError('HTTP shutdown did not close client before remote cleanup')
             print('HTTP local STOPPED/client EOF observed while runtime alive',flush=True)
-        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000,stopped=stopped if mode=='shutdown' else None)
+        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000,stopped=stopped if mode!='deadline' else None,drop_serving=mode=='future_drop')
         active = False
         worker = None
         try:
@@ -408,7 +408,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
                 if time.monotonic()>until or not outcomes.empty():
                     raise AssertionError('HTTPS cancellation did not reach real collector lock')
                 time.sleep(0.01)
-            if mode=='shutdown':
+            if mode!='deadline':
                 active = False
                 manager.__exit__(None,None,None)
             if mode=='deadline' and outcomes.get(timeout=5)!='closed':

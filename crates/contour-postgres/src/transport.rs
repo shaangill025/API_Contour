@@ -99,6 +99,9 @@ impl DatabaseSettings {
     ) -> Result<ConnectedDatabase, TransportError> {
         tokio::runtime::Handle::try_current().map_err(|_| TransportError::Runtime)?;
         let deadline = deadline.min(Instant::now() + self.deadline);
+        if Instant::now() >= deadline {
+            return Err(TransportError::Deadline);
+        }
         let work = async {
             let host = match self.config.get_hosts().first() {
                 Some(tokio_postgres::config::Host::Tcp(host)) => host,
@@ -118,12 +121,18 @@ impl DatabaseSettings {
             } else {
                 addresses.find(|address| address.is_ipv4()).unwrap_or(first)
             };
+            if Instant::now() >= deadline {
+                return Err(TransportError::Deadline);
+            }
             let mut config = self.config.clone();
             config.hostaddr(address.ip());
             let (client, connection) = config
                 .connect(trust.0.clone())
                 .await
                 .map_err(|_| TransportError::Connection)?;
+            if Instant::now() >= deadline {
+                return Err(TransportError::Deadline);
+            }
             Ok(ConnectedDatabase {
                 client: Some(client),
                 driver: Some(tokio::spawn(connection)),
@@ -305,5 +314,37 @@ yhJX38TR9DM9wPkeA7ciTipLCzu5OKdtuWDX1jxxwCw=
     #[test]
     fn empty_ca_bundle_is_rejected() {
         assert_eq!(TrustedCa::from_pem(b"").unwrap_err(), TransportError::Trust);
+    }
+    #[test]
+    fn expired_single_address_deadline_opens_no_tcp_connection() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let settings = DatabaseSettings::new(
+                    "127.0.0.1",
+                    listener.local_addr().unwrap().port(),
+                    "fixture",
+                    "fixture",
+                    b"inert",
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                let trust = TrustedCa::from_pem(CERT.as_bytes()).unwrap();
+                assert_eq!(
+                    settings
+                        .connect_single_until(&trust, Instant::now() - Duration::from_secs(1))
+                        .await
+                        .unwrap_err(),
+                    TransportError::Deadline
+                );
+                assert!(
+                    timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
     }
 }
