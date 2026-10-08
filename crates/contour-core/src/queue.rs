@@ -1,4 +1,4 @@
-//! Single-owner sanitized retention only. Snapshots remain the caller's authority.
+//! Single-owner sanitized retention and frozen ownership. Snapshots remain caller authority.
 use crate::admission::validate_record;
 use crate::{AdmissionError, AdmissionInputs, CheckedRecord, RecordDraft, Timestamp};
 use std::{
@@ -7,6 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use time::{Duration, OffsetDateTime};
+mod frozen;
+pub use frozen::{Acknowledgement, DeliveryBinding, FrozenView};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueError {
@@ -17,6 +19,8 @@ pub enum QueueError {
     Clock,
     Full,
     Record,
+    Ownership,
+    Receipt,
     Admission(AdmissionError),
 }
 impl fmt::Display for QueueError {
@@ -47,12 +51,13 @@ pub struct QueueStats {
     pub expired: u64,
     pub purged: u64,
     pub rejected: u64,
+    pub acknowledged: u64,
 }
 struct Entry {
     record: CheckedRecord,
     charge: usize,
 }
-/// Not enrollment, online freshness, persistent anti-rollback, export or delivery.
+/// Not enrollment, online freshness, persistent anti-rollback or authenticated I/O.
 pub struct MemoryQueue {
     identity: [String; 2],
     limits: QueueLimits,
@@ -60,6 +65,9 @@ pub struct MemoryQueue {
     stats: QueueStats,
     high_water: Option<(u64, [u8; 32])>,
     revoked: bool,
+    frozen: Option<frozen::Frozen>,
+    instance: u64,
+    generation: u64,
 }
 impl fmt::Debug for MemoryQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -78,6 +86,9 @@ impl MemoryQueue {
             stats: QueueStats::default(),
             high_water: None,
             revoked: false,
+            frozen: None,
+            instance: frozen::next_instance()?,
+            generation: 0,
         })
     }
     pub fn stats(&self) -> QueueStats {
@@ -117,8 +128,9 @@ impl MemoryQueue {
         error
     }
     fn purge(&mut self) {
-        self.stats.purged = self.stats.purged.saturating_add(self.entries.len() as u64);
+        self.stats.purged = self.stats.purged.saturating_add(self.stats.records as u64);
         self.entries.clear();
+        self.frozen = None;
         self.stats.records = 0;
         self.stats.bytes = 0;
     }
@@ -132,6 +144,7 @@ impl MemoryQueue {
             self.purge();
             return Err(self.reject(error));
         }
+        self.reconcile_frozen(inputs, now);
         let mut kept = VecDeque::new();
         while let Some(entry) = self.entries.pop_front() {
             if entry.record.expires_at().instant() <= now {
@@ -152,13 +165,17 @@ impl MemoryQueue {
         }
         self.entries = kept;
         let bytes = self.limits.bytes.min(inputs.current.queue_bytes() as usize);
-        self.stats.bytes = self.entries.iter().map(|entry| entry.charge).sum();
+        self.recount();
+        if self.stats.bytes > bytes && self.frozen.is_some() {
+            self.cancel_frozen(now);
+            self.recount();
+        }
         while self.stats.bytes > bytes {
             let entry = self.entries.pop_front().expect("nonempty charged queue");
             self.stats.bytes -= entry.charge;
             self.stats.purged = self.stats.purged.saturating_add(1);
         }
-        self.stats.records = self.entries.len();
+        self.recount();
         Ok(())
     }
     fn guard(
@@ -211,6 +228,7 @@ impl MemoryQueue {
         if self
             .entries
             .iter()
+            .chain(self.frozen.iter().flat_map(|frozen| frozen.entries.iter()))
             .any(|entry| entry.record.record.record_id() == draft.record.record_id())
         {
             return Err(self.reject(QueueError::Record));
@@ -219,7 +237,7 @@ impl MemoryQueue {
             .retention_charge()
             .map_err(|_| self.reject(QueueError::Record))?;
         let bytes = self.limits.bytes.min(inputs.current.queue_bytes() as usize);
-        if self.entries.len() >= self.limits.records
+        if self.stats.records >= self.limits.records
             || self
                 .stats
                 .bytes
@@ -250,8 +268,7 @@ impl MemoryQueue {
             .declare_queue_times(queued, expires)
             .map_err(|_| self.reject(QueueError::Record))?;
         self.entries.push_back(Entry { record, charge });
-        self.stats.records = self.entries.len();
-        self.stats.bytes += charge;
+        self.recount();
         Ok(())
     }
 }
