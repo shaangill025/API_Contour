@@ -1,5 +1,5 @@
 //! Stable operation identity is a projection, never proof of authorization.
-use crate::{Error, Writer};
+use crate::{Error, Shape, Timestamp, Writer};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -52,6 +52,23 @@ pub struct OperationObservation<'a> {
     pub policy_revision: u64,
     pub visibility: &'a str,
     pub route_uncertain: bool,
+    pub record_id: &'a str,
+    pub canonicalization_version: u8,
+    pub structure: &'a Shape,
+    pub completeness: &'a str,
+    pub reasons: &'a [String],
+    /// Locally observed interactions for this source; never unique total traffic.
+    pub count: u64,
+    pub first_seen: &'a Timestamp,
+    pub last_seen: &'a Timestamp,
+    pub sample_numerator: u64,
+    pub sample_denominator: u64,
+    pub status_code: Option<u64>,
+    pub request_header_names: &'a [String],
+    pub response_header_names: &'a [String],
+    pub query_parameter_names: &'a [String],
+    pub queued_at: &'a Timestamp,
+    pub expires_at: &'a Timestamp,
 }
 impl fmt::Debug for OperationObservation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
