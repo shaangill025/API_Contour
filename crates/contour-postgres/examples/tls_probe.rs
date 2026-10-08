@@ -36,7 +36,13 @@ fn probe() -> Result<(), &'static str> {
         .map_err(|_| "runtime unavailable")?;
     runtime.block_on(async {
         let started = Instant::now();
-        let connected = settings.connect(&trust).await;
+        let connected = if args[4] == "SingleConnection" {
+            settings
+                .connect_single_until(&trust, tokio::time::Instant::now() + deadline)
+                .await
+        } else {
+            settings.connect(&trust).await
+        };
         match args[4].as_str() {
             "success" | "drop" => {
                 let connected = connected.map_err(|_| "trusted TLS connection failed")?;
@@ -71,7 +77,7 @@ fn probe() -> Result<(), &'static str> {
                 tokio::task::yield_now().await;
                 println!("Deadline");
             }
-            "Connection" | "Deadline" => {
+            "Connection" | "SingleConnection" | "Deadline" => {
                 let expected = if args[4] == "Deadline" {
                     TransportError::Deadline
                 } else {

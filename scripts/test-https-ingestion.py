@@ -47,8 +47,15 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
         return datetime.datetime.strptime(text, pattern)
 
     @contextlib.contextmanager
-    def server(body, backend=None, deadline=3000, stopped=None):
-        process = subprocess.Popen([probe,str(backend or pg_port),str(directory),body['tenant_id'],body['collector_id'],str(deadline)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
+    def server(body, backend=None, deadline=3000, stopped=None, database_deadline=None, drop_serving=False, executable=None, additional_identity=None, budget_check=False):
+        arguments = [executable or probe,str(backend or pg_port),str(directory),body['tenant_id'],body['collector_id'],str(deadline)]
+        if database_deadline is not None or drop_serving or additional_identity is not None or budget_check:
+            arguments.append(str(database_deadline or deadline))
+        if drop_serving or additional_identity is not None or budget_check:
+            arguments.append('drop' if drop_serving else 'budget' if budget_check else 'shutdown')
+        if additional_identity is not None:
+            arguments.extend([additional_identity['tenant_id'],additional_identity['collector_id']])
+        process = subprocess.Popen(arguments,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
         markers = queue.Queue()
         reader = threading.Thread(target=lambda: [markers.put(process.stdout.readline()) for _ in range(2)],daemon=True)
         reader.start()
@@ -65,7 +72,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
                     if markers.get(timeout=5).strip()!='STOPPED':
                         raise AssertionError('HTTPS server did not join owned connections')
                     started = time.monotonic()
-                    until = started+deadline/1000+2
+                    until = started+(database_deadline or deadline)/1000+2
                     def observe(sql):
                         remaining = until-time.monotonic()
                         if remaining<=0:
@@ -163,6 +170,9 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
         row = execute("SELECT receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint FROM contour.ingestion_batches WHERE %s;" % scope(body))
         if row!='%s|%d' % (receipt['receipt_id'],micros(timestamp(receipt['accepted_at']))):
             raise AssertionError('HTTPS receipt changed stored ID or acceptance time')
+
+    runpy.run_path(str(Path(__file__).with_name('test-database-budget.py')))['run_cases'](
+        container,execute,setup,server,request,context,scope,environment,directory)
 
     aggregate, _, _ = setup('https_aggregate',current=116,history=tuple(range(100,117)),padded=True)
     original = aggregate['records'][0]
@@ -362,7 +372,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
                 if stream.recv(1)!=b'':
                     raise AssertionError('absolute post-TLS header/body deadline did not close socket')
 
-    for mode in ['deadline','shutdown']:
+    for mode in ['deadline','shutdown','future_drop']:
         candidate, _, _ = setup('https_owned_'+mode)
         holder = subprocess.Popen(['docker','exec','-i',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture','-At'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         markers = queue.Queue()
@@ -372,7 +382,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
             if outcomes.get(timeout=2)!='closed':
                 raise AssertionError('HTTP shutdown did not close client before remote cleanup')
             print('HTTP local STOPPED/client EOF observed while runtime alive',flush=True)
-        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000,stopped=stopped if mode=='shutdown' else None)
+        manager = server(candidate,deadline=1500 if mode=='deadline' else 10000,stopped=stopped if mode!='deadline' else None,drop_serving=mode=='future_drop')
         active = False
         worker = None
         try:
@@ -398,7 +408,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
                 if time.monotonic()>until or not outcomes.empty():
                     raise AssertionError('HTTPS cancellation did not reach real collector lock')
                 time.sleep(0.01)
-            if mode=='shutdown':
+            if mode!='deadline':
                 active = False
                 manager.__exit__(None,None,None)
             if mode=='deadline' and outcomes.get(timeout=5)!='closed':

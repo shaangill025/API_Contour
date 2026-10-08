@@ -18,6 +18,7 @@ impl Drop for CancellationGuard<'_> {
 }
 impl<'a> CancellationGuard<'a> {
     pub(crate) fn arm(connection: &'a mut ConnectedDatabase) -> Self {
+        connection.reusable = false;
         Self {
             connection,
             confirmed: false,
@@ -26,6 +27,7 @@ impl<'a> CancellationGuard<'a> {
     // Only call after confirmed transaction completion and checked context cleanup.
     pub(crate) fn confirm(&mut self) {
         self.confirmed = true;
+        self.connection.reusable = true;
     }
 }
 pub(crate) async fn begin(client: &mut Client) -> Result<Transaction<'_>, AuthorityError> {
