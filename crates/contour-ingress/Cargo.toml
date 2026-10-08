@@ -1,0 +1,16 @@
+[package]
+name = "contour-ingress"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hyper = { version = "=1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+ring = "=0.17.14"
+bytes = "=1.12.1"
+tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util"] }
