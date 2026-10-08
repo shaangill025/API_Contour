@@ -882,7 +882,10 @@ fn bounded_freeze_exact_prefix_limits_loss_and_sticky_exposure() {
         (v.binding(), v.wire().to_vec())
     };
     // Dropping a reservation/controller never clears queue-owned exposure.
-    drop(q.reserve_delivery_at(&inputs, time(7)).unwrap());
+    {
+        let reservation = q.reserve_delivery_at(&inputs, time(7)).unwrap();
+        assert!(reservation.is_some());
+    }
     assert_eq!(
         q.freeze_with_limits_at(
             "00000000-0000-4000-8000-000000000002",
