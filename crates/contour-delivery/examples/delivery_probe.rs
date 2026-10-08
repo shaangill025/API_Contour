@@ -122,6 +122,266 @@ async fn cancel_wait(
     }
     Ok(outcome)
 }
+fn fixture_source(body: &Value) -> Result<SourceAssignment, Box<dyn Error>> {
+    let r = &body["records"][0];
+    Ok(SourceAssignment::new(
+        r["source_id"].as_str().unwrap(),
+        [
+            body["tenant_id"].as_str().unwrap(),
+            body["collector_id"].as_str().unwrap(),
+            r["project_id"].as_str().unwrap(),
+            r["service_id"].as_str().unwrap(),
+            r["environment_id"].as_str().unwrap(),
+            r["deployment_id"].as_str().unwrap(),
+        ],
+        "runtime",
+        &["http_json_v1"],
+    )?)
+}
+async fn bounded(
+    dir: &Path,
+    body: &Value,
+    policy: &VerifiedPolicy,
+    inputs: &AdmissionInputs<'_>,
+    stages: &str,
+    policy_path: &Path,
+    keys: &PolicyKeys,
+) -> Result<(), Box<dyn Error>> {
+    let (mode, port_text) = stages.split_once(':').ok_or("bounded stage")?;
+    let ports = port_text
+        .split(':')
+        .map(str::parse::<u16>)
+        .collect::<Result<Vec<_>, _>>()?;
+    if ports.len() != 3 {
+        return Err("bounded ports".into());
+    }
+    let identity = [
+        body["tenant_id"].as_str().unwrap(),
+        body["collector_id"].as_str().unwrap(),
+    ];
+    let mut measure = MemoryQueue::new(identity, QueueLimits::new(3, 1_048_576)?)?;
+    for i in 1..=3 {
+        let mut record = body["records"][0].clone();
+        record["record_id"] = json!(format!("00000000-0000-4000-8000-{i:012x}"));
+        measure.admit(draft(&record)?, inputs)?;
+    }
+    let full = measure.stats().bytes;
+    let first = measure
+        .freeze(body["batch_id"].as_str().unwrap(), 1, inputs)?
+        .ok_or("measure freeze")?;
+    let limit = first.wire().len() + 32; // A second record cannot fit this measured envelope.
+    drop(measure);
+    let mut queue = MemoryQueue::new(identity, QueueLimits::new(3, full)?)?;
+    for i in 1..=3 {
+        let mut record = body["records"][0].clone();
+        record["record_id"] = json!(format!("00000000-0000-4000-8000-{i:012x}"));
+        queue.admit(draft(&record)?, inputs)?;
+    }
+    assert_eq!(queue.stats().bytes, full);
+    let original=queue.retained_record_times().map(|(id,queued,expires)|
+        json!({"record_id":id,"queued_at":queued.as_str(),"expires_at":expires.as_str()})).collect::<Vec<_>>();
+    fs::write(
+        dir.join("bounded-original.json"),
+        serde_json::to_vec(&original)?,
+    )?;
+    let root = fs::read(dir.join("ca.crt.der"))?;
+    let cert = fs::read(dir.join("http-client.crt.der"))?;
+    let key = fs::read(dir.join("http-client.key.der"))?;
+    let mut receipts = Vec::new();
+    for i in 1..=3 {
+        let id = if i == 1 {
+            body["batch_id"].as_str().unwrap().to_owned()
+        } else {
+            format!("00000000-0000-4000-8000-{i:012x}")
+        };
+        let view = queue
+            .freeze_with_limits(&id, 500, limit, inputs)?
+            .ok_or("bounded freeze")?;
+        assert_eq!(view.record_count(), 1);
+        assert!(view.wire().len() <= limit);
+        let wire = view.wire().to_vec();
+        let binding = view.binding();
+        let decoded: Value = serde_json::from_slice(&wire)?;
+        assert_eq!(
+            decoded["records"][0]["record_id"],
+            format!("00000000-0000-4000-8000-{i:012x}")
+        );
+        assert_eq!(
+            decoded["records"][0]["queued_at"],
+            original[i - 1]["queued_at"]
+        );
+        assert_eq!(
+            decoded["records"][0]["expires_at"],
+            original[i - 1]["expires_at"]
+        );
+        assert_eq!(
+            view.deadline(),
+            Timestamp::parse(original[i - 1]["expires_at"].as_str().unwrap())?.instant()
+        );
+        fs::write(dir.join(format!("bounded-wire-{i}.json")), &wire)?;
+        let attempts = if i == 1 && mode == "bounded" {
+            vec![ports[1], ports[2], ports[0]]
+        } else {
+            vec![ports[0]]
+        };
+        for (n, port) in attempts.into_iter().enumerate() {
+            let mut client = DeliveryClient::from_der(
+                "localhost",
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                identity,
+                &[&root],
+                &[&cert],
+                &key,
+                Duration::from_secs(5),
+            )?;
+            let mut attempt = queue
+                .reserve_delivery(inputs)?
+                .ok_or("bounded reservation")?;
+            assert!(attempt.valid_until() <= policy.expires_at());
+            assert_eq!(attempt.view().wire(), wire);
+            match client.send_once(&mut attempt).await {
+                Err(error) if i == 1 && mode == "bounded" && n < 2 => {
+                    if n == 1 {
+                        assert!(matches!(error, DeliveryError::Rejected { status: 413, .. }));
+                    } else {
+                        assert!(!matches!(error, DeliveryError::Rejected { .. }));
+                    }
+                    drop(attempt);
+                    assert_eq!(queue.stats().bytes, full);
+                    // Even a newly created controller cannot reset sticky exposure.
+                    assert_eq!(
+                        queue
+                            .freeze_with_limits(
+                                "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                                1,
+                                limit,
+                                inputs
+                            )
+                            .unwrap_err(),
+                        QueueError::Ownership
+                    );
+                    let mut attempt = queue.reserve_delivery(inputs)?.ok_or("retry reservation")?;
+                    let mut controller = RetryController::for_attempt(&mut attempt);
+                    assert_eq!(
+                        controller.on_failure(
+                            binding,
+                            DeliveryError::Rejected {
+                                status: 413,
+                                retry_after: None
+                            }
+                        )?,
+                        RetryDirective::RequireSplit
+                    );
+                    assert_eq!(attempt.view().wire(), wire);
+                }
+                Ok(receipt) => {
+                    assert_eq!(
+                        receipt.status(),
+                        if i == 1 && mode == "bounded" {
+                            ReceiptStatus::Duplicate
+                        } else {
+                            ReceiptStatus::Accepted
+                        }
+                    );
+                    receipts.push(json!({"batch_id":id,"receipt_id":receipt.receipt_id(),"accepted_at":receipt.accepted_at().as_str()}));
+                    receipt.acknowledge(attempt)?;
+                }
+                _ => return Err("bounded delivery outcome".into()),
+            }
+        }
+        if i == 1 && mode != "bounded" {
+            // Explicit parent coordination only after the first real commit/ack.
+            println!(
+                "{}",
+                json!({"phase":"pending","charge":queue.stats().bytes})
+            );
+            io::stdout().flush()?;
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            let fresh = VerifiedPolicy::from_signed_json(
+                &fs::read(policy_path)?,
+                keys,
+                identity[0],
+                identity[1],
+                OffsetDateTime::now_utc(),
+            )?;
+            let sources = [fixture_source(body)?];
+            let trusted = AdmissionInputs::new(identity, &fresh, &[policy], &sources)?;
+            let result = queue.freeze_with_limits(
+                "00000000-0000-4000-8000-000000000002",
+                500,
+                limit,
+                &trusted,
+            );
+            if mode == "bounded-expire" {
+                assert!(result?.is_none());
+                assert_eq!(queue.stats().expired, 2);
+            } else if mode == "bounded-disable" {
+                assert!(result.is_err());
+                assert_eq!(queue.stats().purged, 2);
+                assert_eq!(
+                    queue.reserve_delivery(inputs).unwrap_err(),
+                    QueueError::Revision
+                );
+                let new_body: Value =
+                    serde_json::from_slice(&fs::read(dir.join("bounded-reenroll.json"))?)?;
+                let new_identity = [
+                    new_body["tenant_id"].as_str().unwrap(),
+                    new_body["collector_id"].as_str().unwrap(),
+                ];
+                let new_policy = VerifiedPolicy::from_signed_json(
+                    &fs::read(dir.join("bounded-reenroll-policy.json"))?,
+                    keys,
+                    new_identity[0],
+                    new_identity[1],
+                    OffsetDateTime::now_utc(),
+                )?;
+                let new_sources = [fixture_source(&new_body)?];
+                let reenrolled =
+                    AdmissionInputs::new(new_identity, &new_policy, &[&new_policy], &new_sources)?;
+                assert_eq!(
+                    queue.reserve_delivery(&reenrolled).unwrap_err(),
+                    QueueError::Identity
+                );
+                assert_eq!(queue.retained_record_times().count(), 0);
+            } else {
+                return Err("bounded mode".into());
+            }
+            assert_eq!(queue.stats().bytes, 0);
+            assert_eq!(queue.stats().records, 0);
+            let destinations: Vec<u16> = serde_json::from_str(&line)?;
+            assert_eq!(destinations.len(), 2);
+            for port in destinations {
+                let mut client = DeliveryClient::from_der(
+                    "localhost",
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                    identity,
+                    &[&root],
+                    &[&cert],
+                    &key,
+                    Duration::from_secs(5),
+                )?;
+                match queue.reserve_delivery(&trusted) {
+                    Ok(None) | Err(_) => {}
+                    Ok(Some(mut attempt)) => {
+                        let _ = client.send_once(&mut attempt).await;
+                        return Err("expired/disabled pending child obtained reservation".into());
+                    }
+                }
+            }
+            println!("{}", json!({"terminal":mode,"charge":0}));
+            return Ok(());
+        }
+    }
+    assert_eq!(queue.stats().records, 0);
+    assert_eq!(queue.stats().bytes, 0);
+    assert_eq!(queue.stats().acknowledged, 3);
+    println!(
+        "{}",
+        json!({"bounded":receipts,"charge":0,"wire_limit":limit})
+    );
+    Ok(())
+}
 async fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
     if !(5..=6).contains(&args.len()) {
@@ -160,6 +420,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
         &["http_json_v1"],
     )?];
     let inputs = AdmissionInputs::new(identity, &policy, &[&policy], &sources)?;
+    if args[4].starts_with("bounded") {
+        return bounded(
+            dir,
+            &body,
+            &policy,
+            &inputs,
+            &args[4],
+            Path::new(&args[3]),
+            &keys,
+        )
+        .await;
+    }
+
     let mut measure = MemoryQueue::new(identity, QueueLimits::new(1, 1_048_576)?)?;
     measure.admit(draft(r)?, &inputs)?;
     let full = measure.stats().bytes;
