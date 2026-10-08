@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -82,6 +82,14 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         text += "UPDATE contour.collector_authorization SET active_revision=%d,enabled=true WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (current, tenant, collector)
         execute(text)
         return (body, collector, source)
+
+    def refresh():
+        refresh_probe = str(Path(probe).with_name('refresh_probe'))
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-refresh.py'))['run_cases'](container,execute,setup,refresh_probe,port,directory,environment)
+
+    if refresh_only:
+        refresh()
+        return
 
     if https_only or delivery_only:
         execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
@@ -255,6 +263,8 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         check(split)
     print('Restricted TLS authority scope/signature/revision/source/all-record/16MiB gate and split assertions passed')
     print('Authority lock-wait timeout/cancel invalidation, live-runtime cleanup, fresh disable and expiry refresh passed')
+    # Recovery can republish the loopback port; finish reads before that restart.
+    refresh()
     submit_probe = str(Path(probe).with_name('submit_probe'))
     runpy.run_path(str(ROOT / 'scripts/test-postgres-submit.py'))['run_cases'](container, execute, setup, submit_probe, port, directory, environment)
 if __name__ == '__main__':

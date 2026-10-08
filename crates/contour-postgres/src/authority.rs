@@ -15,7 +15,7 @@ use std::{
 };
 use time::OffsetDateTime;
 use tokio::time::{Instant, timeout_at};
-use tokio_postgres::Transaction;
+use tokio_postgres::{Row, Transaction};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorityError {
@@ -202,14 +202,7 @@ pub(crate) async fn stage_current(
     deadline: Instant,
 ) -> Result<StagedCurrent, AuthorityError> {
     let current = current_revision(transaction, expected).await?.to_string();
-    let row = transaction.query_opt("SELECT octet_length(signed_envelope) FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?.ok_or(AuthorityError::Missing)?;
-    let size = usize::try_from(
-        row.try_get::<_, i32>(0)
-            .map_err(|_| AuthorityError::Database)?,
-    )
-    .map_err(|_| AuthorityError::Database)?;
-    budget([size])?;
-    let row = transaction.query_one("SELECT signed_envelope FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?;
+    let (size, row) = current_envelope(transaction, expected, &current).await?;
     let policy = verify_policy(
         row.try_get(0).map_err(|_| AuthorityError::Database)?,
         keys,
@@ -222,6 +215,27 @@ pub(crate) async fn stage_current(
         .validate_capture_at(now)
         .map_err(|_| AuthorityError::Admission)?;
     Ok(StagedCurrent { policy, size })
+}
+// Metadata is checked before fetch; Row lets existing consumers borrow unchanged
+// bytes without an additional owned envelope copy.
+pub(crate) async fn current_envelope(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    current: &str,
+) -> Result<(usize, Row), AuthorityError> {
+    let row = transaction.query_opt("SELECT octet_length(signed_envelope) FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?.ok_or(AuthorityError::Missing)?;
+    let size = usize::try_from(
+        row.try_get::<_, i32>(0)
+            .map_err(|_| AuthorityError::Database)?,
+    )
+    .map_err(|_| AuthorityError::Database)?;
+    budget([size])?;
+    let row = transaction.query_one("SELECT signed_envelope FROM contour.policy_revisions WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND revision=$3::text::numeric", &[&expected[0], &expected[1], &current]).await.map_err(database_error)?;
+    let bytes: &[u8] = row.try_get(0).map_err(|_| AuthorityError::Database)?;
+    if bytes.len() != size {
+        return Err(AuthorityError::Policy);
+    }
+    Ok((size, row))
 }
 pub(crate) async fn load_staged(
     transaction: &Transaction<'_>,
