@@ -54,6 +54,14 @@ Approved request header names, response header names and query parameter names c
 
 Count is the number of locally observed interactions represented by one record. It is not total traffic unless the collector proves complete coverage. Sampling numerator/denominator and source identity accompany the count. Multiple collectors can see the same interaction. The platform shows separate source counts and does not sum them as unique business requests.
 
+The checked batch operation projection borrows each record's structure and full
+evidence: record/source identifiers, policy revision, canonicalization version,
+visibility, completeness, reasons, count, sampling, status, observation times,
+queue times and approved header/query names. It does not combine records or turn
+sampled counts into traffic estimates. Unknown nodes remain unknown. A catalog
+worker must validate durable inbox integrity and trusted scope before persisting
+this projection; a decoded batch alone does not establish authority.
+
 ## PostgreSQL model
 
 | Table group | Keys and purpose |
