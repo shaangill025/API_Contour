@@ -49,6 +49,8 @@ pub struct QueueStats {
     /// frozen serialization and one transport copy. Not resident memory usage.
     pub bytes: usize,
     pub dropped: u64,
+    /// Pending records individually exceeding an explicit pre-send wire bound.
+    pub oversized: u64,
     pub expired: u64,
     pub purged: u64,
     pub rejected: u64,
@@ -104,6 +106,22 @@ impl MemoryQueue {
     }
     pub fn stats(&self) -> QueueStats {
         self.stats
+    }
+    /// Borrow checked IDs and original retention timestamps in FIFO order:
+    /// frozen records first, then pending, each exactly once (at most 500).
+    /// Inspection neither reconciles authority/expiry nor grants capture or send.
+    pub fn retained_record_times(&self) -> impl Iterator<Item = (&str, &Timestamp, &Timestamp)> {
+        self.frozen
+            .iter()
+            .flat_map(|frozen| frozen.entries.iter())
+            .chain(self.entries.iter())
+            .map(|entry| {
+                (
+                    entry.record.record.record_id(),
+                    entry.record.queued_at(),
+                    entry.record.expires_at(),
+                )
+            })
     }
     /// Irreversible for this object. No transfer or reactivation API exists.
     pub fn revoke(&mut self) {

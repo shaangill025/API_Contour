@@ -1,6 +1,7 @@
 """Actual enrolled mTLS authority snapshots and shared database capacity."""
 import contextlib
 import datetime
+from decimal import Decimal
 import http.client
 import json
 import queue
@@ -57,11 +58,15 @@ def run_cases(container, execute, setup, server, request, context, directory):
     first, _, source = setup('online_http', current=1, history=(1,2))
     second, _, second_source = setup('online_http_other', current=1, history=(1,), tenant='bbbbbbbb-0000-0000-0000-000000000000')
     with server(first, additional_identity=second) as port:
-        before = execute('SELECT clock_timestamp();')
+        before = Decimal(execute('SELECT extract(epoch FROM clock_timestamp());'))
         result = call(port, payload(source))
-        after = execute('SELECT clock_timestamp();')
-        instant = datetime.datetime.fromisoformat(result['checked_at'].replace('Z','+00:00'))
-        assert datetime.datetime.fromisoformat(before) <= instant <= datetime.datetime.fromisoformat(after)
+        after = Decimal(execute('SELECT extract(epoch FROM clock_timestamp());'))
+        # Preserve variable-width fractions on Python 3.9 without rounding.
+        assert result['checked_at'].endswith('Z')
+        whole, separator, fraction = result['checked_at'][:-1].partition('.')
+        seconds = int(datetime.datetime.fromisoformat(whole+'+00:00').timestamp())
+        instant = Decimal(seconds) + (Decimal('0.'+fraction) if separator else Decimal(0))
+        assert before <= instant <= after
         assert (result['tenant_id'], result['collector_id']) == (first['tenant_id'], first['collector_id'])
         signed = json.loads(bytes.fromhex(execute("SELECT encode(signed_envelope,'hex') FROM contour.policy_revisions WHERE %s AND revision=1;" % scope(first))))
         assert result['signed_policy'] == signed, 'signed policy fields changed in transport'

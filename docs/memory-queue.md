@@ -102,3 +102,22 @@ different content; there is no unbounded retired-ID ledger or global reuse guara
 The server's immutable digest conflict check remains mandatory. Local generations
 prevent stale callbacks releasing a replacement, including deliberate same-ID
 reuse. Random UUID generation and authenticated HTTP delivery remain separate work.
+
+`freeze_with_limits(batch_id, maximum_records, maximum_wire_bytes, inputs)`
+selects the longest pending FIFO prefix within 1..500 records and 1..1MiB
+serialized bytes. Exact borrowed serialization length is counted before wire or
+digest allocation; binary search avoids counting every prefix. Records individually
+exceeding the requested wire bound are deleted and counted in `oversized`; surviving
+records keep their original queue timestamps, expiry, identity and upfront 3C charge.
+The existing `freeze` keeps its original all-or-error prefix behavior.
+
+Any frozen generation blocks another freeze, even after dropping its delivery
+reservation or constructing another retry controller. A lost reply may mean that
+its parent already committed; a subsequent 413 cannot authorize new child IDs.
+Pre-send chunking does not implement general post-413 recovery. That protocol still
+requires durable exclusion of concurrent parent commits before children can exist.
+
+`retained_record_times()` lends only checked record IDs and original queue/expiry
+metadata, frozen FIFO records followed by pending records exactly once, within the
+existing 500-record cap. It performs no expiry reconciliation or authority check;
+inspection grants no admission or delivery and exports no payload.
