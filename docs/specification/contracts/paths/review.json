@@ -1,0 +1,371 @@
+{
+  "/v1/comparisons": {
+    "post": {
+      "operationId": "compareContracts",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/Comparison"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/review.json#/ComparisonRequest"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/reviews": {
+    "post": {
+      "operationId": "createReview",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/Review"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/review.json#/ReviewRequest"
+            }
+          }
+        }
+      }
+    },
+    "get": {
+      "operationId": "listReviews",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/ReviewList"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      ]
+    }
+  },
+  "/v1/reviews/{id}/decision": {
+    "post": {
+      "operationId": "decideReview",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/Review"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/review.json#/Decision"
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    }
+  },
+  "/v1/audit-events": {
+    "get": {
+      "operationId": "listAudit",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/AuditEventList"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      ]
+    }
+  },
+  "/v1/ci-checks": {
+    "post": {
+      "operationId": "checkContract",
+      "security": [
+        {
+          "ciToken": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Successful authorized operation",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/CiResult"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error; status semantics are defined in the API specification",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "../schemas/review.json#/CiRequest"
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/reviews/{id}": {
+    "get": {
+      "operationId": "getReview",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Exact review state and referenced versions",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/Review"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/v1/comparisons/{id}": {
+    "get": {
+      "operationId": "getComparison",
+      "security": [
+        {
+          "userOidc": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Immutable comparison with exact version references and differences",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/review.json#/Comparison"
+              }
+            }
+          }
+        },
+        "default": {
+          "description": "Safe error",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/collector.json#/Error"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
