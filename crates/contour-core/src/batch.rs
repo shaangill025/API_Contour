@@ -347,6 +347,22 @@ impl Batch {
                 policy_revision: record.policy_revision.get(),
                 visibility: &record.visibility,
                 route_uncertain: record.route_uncertain,
+                record_id: &record.record_id,
+                canonicalization_version: 1,
+                structure: &record.structure.0,
+                completeness: &record.completeness,
+                reasons: &record.reasons.0,
+                count: record.count.get(),
+                first_seen: &record.first_seen,
+                last_seen: &record.last_seen,
+                sample_numerator: record.sample_numerator.get(),
+                sample_denominator: record.sample_denominator.get(),
+                status_code: record.status_code.map(|status| status.get()),
+                request_header_names: &record.request_header_names.0,
+                response_header_names: &record.response_header_names.0,
+                query_parameter_names: &record.query_parameter_names.0,
+                queued_at: &record.queued_at,
+                expires_at: &record.expires_at,
             })
     }
     pub(crate) fn records(&self) -> &[Record] {
