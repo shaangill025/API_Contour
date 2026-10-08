@@ -170,6 +170,26 @@ impl Fixture {
         fs::read(self.0.join(name)).unwrap()
     }
     fn server(&self, deadline: Duration) -> CollectorTls {
+        // Diagnose synthetic fixture configuration without printing key material.
+        let provider = rustls::crypto::ring::default_provider();
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(self.read("ca.der")))
+            .expect("synthetic root DER");
+        rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(provider.clone()),
+        )
+        .build()
+        .expect("synthetic client verifier");
+        let key = PrivateKeyDer::try_from(self.read("server.key.der"))
+            .expect("synthetic private-key DER encoding");
+        rustls::sign::CertifiedKey::from_der(
+            vec![CertificateDer::from(self.read("server.der"))],
+            key,
+            &provider,
+        )
+        .expect("synthetic server certificate and private-key consistency");
         CollectorTls::from_der(
             &[&self.read("server.der")],
             &self.read("server.key.der"),
