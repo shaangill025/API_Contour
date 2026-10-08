@@ -8,6 +8,22 @@ Each record also carries source_id, an enrolled UUID scoped to tenant and collec
 
 Do not merge operations across services by path alone. Do not infer shared identity from an IP address alone. Unknown attribution remains explicit. Identity rules and aliases are versioned. A changed rule creates a reviewable remapping; it must not silently rewrite approved history.
 
+### Operation key encoding v1
+
+The checked batch projection encodes an eight-string JSON array in this order:
+tenant, project, service, environment, protocol, direction, operation, template.
+Use exact UTF-8, no whitespace, no Unicode normalization or aliases. Escape quote
+and backslash; encode every control character as lowercase `\u00xx`. Output is
+bounded to 2,048 bytes. The key fingerprint is lowercase SHA-256 of UTF-8
+`apicontour/operation/1\n` followed by those bytes. The future catalog must retain
+the version and exact tuple, not trust a caller-supplied hash as identity proof.
+
+Deployment, collector, source, parser profile, policy revision, visibility and
+route uncertainty remain separate provenance. Equal keys do not authorize merging
+uncertain attribution or summing sources as unique traffic. Projection checks
+syntax only; trusted inbox integrity and scope checks remain required before
+persistence. Catalog processing and versioned remapping remain separate work.
+
 ## Structure nodes
 
 The initial node model has kinds null, boolean, integer, number, string, binary, object, array, union and unknown. Nodes contain no observed values, value lengths, enum values or value hashes. Schema files use JSON Schema 2020-12 as a wire definition, not as the inference algorithm.
