@@ -46,7 +46,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
                 actual = ' '.join(parts[:3])
             expected = 'Invalidated' if wanted == 'Cancel' else 'Accepted' if wanted == 'AcceptedInvalidated' else wanted
             if not (actual == expected or expected == 'Accepted' and actual.startswith('Accepted ')):
-                raise AssertionError('submission marker mismatch')
+                raise AssertionError('submission marker mismatch: expected ' + expected + ', got ' + actual)
             until = time.monotonic() + 5
             while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';") != '0':
                 if time.monotonic() > until:
@@ -97,6 +97,27 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
     def change_authority(body, update):
         execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); UPDATE contour.collector_authorization SET %s WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (body['tenant_id'], body['tenant_id'], body['collector_id'], update, body['tenant_id'], body['collector_id']))
 
+    def future_expiry():
+        value = int(execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;'))
+        instant = datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)+datetime.timedelta(microseconds=value,seconds=15)
+        return instant.isoformat(timespec='microseconds').replace('+00:00','Z')
+
+    def wait_expired(text):
+        instant = datetime.datetime.fromisoformat(text.replace('Z','+00:00'))
+        delta = instant-datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)
+        target = (delta.days*86400+delta.seconds)*1000000+delta.microseconds
+        until = time.monotonic()+20
+        while True:
+            remaining = until-time.monotonic()
+            if remaining<=0:
+                raise AssertionError('bounded actual submission expiry wait failed')
+            value = int(execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;',timeout=min(5,remaining)))
+            if time.monotonic()>until:
+                raise AssertionError('bounded actual submission expiry wait failed')
+            if value>=target:
+                return
+            time.sleep(min(0.1,max(0,until-time.monotonic())))
+
     body, _, _ = setup('submit_valid')
     receipt = check(body, status='accepted')
     pairs(body, 1)
@@ -141,10 +162,9 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         check(candidate, 'Corrupt')
 
     candidate, _, _ = setup('submit_expired_retry')
-    now = datetime.datetime.fromisoformat(candidate['created_at'].replace('Z', '+00:00'))
-    candidate['records'][0]['expires_at'] = (now + datetime.timedelta(seconds=2)).isoformat().replace('+00:00', 'Z')
+    candidate['records'][0]['expires_at'] = future_expiry()
     receipt = check(candidate)
-    time.sleep(2.1)
+    wait_expired(candidate['records'][0]['expires_at'])
     if check(candidate, status='duplicate') != receipt:
         raise AssertionError('committed retry re-admitted expired record')
     for update, wanted in [('enabled=false', 'Disabled'), ('enabled=false,revoked_at=clock_timestamp()', 'Revoked')]:
@@ -153,9 +173,13 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         change_authority(candidate, update)
         check(candidate, wanted)
         pairs(candidate, 1)
-    candidate, _, _ = setup('submit_lease_retry', lambda value: value.update(expires_at=(datetime.datetime.fromisoformat(value['issued_at'].replace('Z', '+00:00')) + datetime.timedelta(seconds=33)).isoformat().replace('+00:00', 'Z')))
+    expiry = []
+    def lease(value):
+        expiry.append(future_expiry())
+        value.update(expires_at=expiry[0])
+    candidate, _, _ = setup('submit_lease_retry',lease)
     check(candidate)
-    time.sleep(3.1)
+    wait_expired(expiry[0])
     check(candidate, 'Policy')
     pairs(candidate, 1)
 

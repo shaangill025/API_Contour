@@ -58,6 +58,12 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 scripts/test-postgres-tls.py --authority
+      - name: Test operator-mapped HTTPS durable ingestion
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 scripts/test-postgres-tls.py --https-only
 
   postgres:
     name: PostgreSQL 16 identity
