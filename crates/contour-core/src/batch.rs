@@ -1,4 +1,6 @@
-use crate::{Kind, Shape, Timestamp, UnsignedInteger};
+use crate::{
+    Completeness, Kind, Observation, ObservationReason, Shape, Timestamp, UnsignedInteger,
+};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, SeqAccess, Visitor},
@@ -27,6 +29,185 @@ impl std::error::Error for BatchError {}
 pub struct Batch {
     envelope: Envelope,
 }
+/// Borrowed value-free metadata. Syntax validity does not approve capture or names.
+/// Workload order: project, service, environment, deployment. IDs are supplied by
+/// the caller; UUID syntax checks do not establish randomness or authenticated identity.
+pub struct RecordMetadata<'a> {
+    pub record_id: &'a str,
+    pub source_id: &'a str,
+    pub workload: [&'a str; 4],
+    pub protocol: &'a str,
+    pub direction: &'a str,
+    pub visibility: &'a str,
+    pub operation: &'a str,
+    pub route_template: &'a str,
+    pub route_uncertain: bool,
+    pub parser_profile: &'a str,
+    pub policy_revision: u64,
+    pub count: u64,
+    pub first_seen: Timestamp,
+    pub last_seen: Timestamp,
+    pub sample_numerator: u64,
+    pub sample_denominator: u64,
+    pub status_code: Option<u16>,
+    pub request_header_names: &'a [&'a str],
+    pub response_header_names: &'a [&'a str],
+    pub query_parameter_names: &'a [&'a str],
+}
+/// Checked observation and metadata, without declared queue admission timestamps.
+/// A future queue must accept drafts, check policy/source/full metadata approval,
+/// reserve capacity, then privately stamp actual queue/expiry times on success.
+pub struct RecordDraft {
+    pub(crate) record: Record,
+}
+/// Immutable record with explicitly declared times, not proof of actual enqueue.
+pub struct CheckedRecord {
+    pub(crate) record: Record,
+}
+impl fmt::Debug for RecordMetadata<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecordMetadata")
+    }
+}
+impl fmt::Debug for RecordDraft {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecordDraft")
+    }
+}
+impl fmt::Debug for CheckedRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CheckedRecord")
+    }
+}
+impl RecordDraft {
+    // Conservative per-entry wire charge: timestamp replacements (2*35), comma,
+    // and a complete batch envelope (320). Never retained as an extra byte buffer.
+    pub(crate) fn retention_charge(&self) -> Result<usize, BatchError> {
+        encode(&self.record)?
+            .len()
+            .checked_add(391)
+            .ok_or(BatchError::Size)
+    }
+    pub fn from_observation(
+        metadata: RecordMetadata<'_>,
+        observation: Observation,
+    ) -> Result<Self, BatchError> {
+        // All borrowed strings and list lengths are bounded before any copying.
+        if !uuid(metadata.record_id)
+            || !uuid(metadata.source_id)
+            || metadata.workload.iter().any(|id| !uuid(id))
+            || [metadata.protocol, metadata.direction, metadata.visibility]
+                .iter()
+                .any(|text| text.len() > 16)
+            || !string_bound(metadata.operation, 32)
+            || !string_bound(metadata.route_template, 256)
+            || !profile(metadata.parser_profile)
+            || observation.reasons.len() > 8
+            || [
+                metadata.request_header_names,
+                metadata.response_header_names,
+                metadata.query_parameter_names,
+            ]
+            .iter()
+            .any(|names| names.len() > 128 || names.iter().any(|name| !string_bound(name, 64)))
+        {
+            return Err(BatchError::Semantic);
+        }
+        let reasons = observation
+            .reasons
+            .iter()
+            .map(|reason| {
+                match reason {
+                    ObservationReason::Limit => "limit",
+                    ObservationReason::Permission => "permission",
+                    ObservationReason::Malformed => "malformed",
+                }
+                .to_owned()
+            })
+            .collect();
+        let completeness = match observation.completeness {
+            Completeness::Complete => "complete",
+            Completeness::Partial => "partial",
+            Completeness::Unavailable => "unavailable",
+        };
+        // These private placeholders permit reuse of the complete wire validator.
+        // Drafts cannot be serialized or assembled; both are replaced on declaration.
+        let validation_time = metadata.last_seen.clone();
+        let record = Record {
+            record_id: metadata.record_id.to_owned(),
+            source_id: metadata.source_id.to_owned(),
+            project_id: metadata.workload[0].to_owned(),
+            service_id: metadata.workload[1].to_owned(),
+            environment_id: metadata.workload[2].to_owned(),
+            deployment_id: metadata.workload[3].to_owned(),
+            protocol: metadata.protocol.to_owned(),
+            direction: metadata.direction.to_owned(),
+            visibility: metadata.visibility.to_owned(),
+            operation: metadata.operation.to_owned(),
+            route_template: metadata.route_template.to_owned(),
+            route_uncertain: metadata.route_uncertain,
+            parser_profile: metadata.parser_profile.to_owned(),
+            policy_revision: UnsignedInteger::new(metadata.policy_revision),
+            completeness: completeness.to_owned(),
+            reasons: Bounded(reasons),
+            structure: WireShape(observation.shape),
+            count: UnsignedInteger::new(metadata.count),
+            first_seen: metadata.first_seen,
+            last_seen: metadata.last_seen,
+            sample_numerator: UnsignedInteger::new(metadata.sample_numerator),
+            sample_denominator: UnsignedInteger::new(metadata.sample_denominator),
+            status_code: metadata
+                .status_code
+                .map(|status| UnsignedInteger::new(u64::from(status))),
+            request_header_names: Bounded(
+                metadata
+                    .request_header_names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            ),
+            response_header_names: Bounded(
+                metadata
+                    .response_header_names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            ),
+            query_parameter_names: Bounded(
+                metadata
+                    .query_parameter_names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            ),
+            queued_at: validation_time.clone(),
+            expires_at: validation_time,
+        };
+        record.validate(record.last_seen.instant())?;
+        Ok(Self { record })
+    }
+    /// Pure declared-time construction. This does not reserve capacity or enqueue.
+    pub fn declare_queue_times(
+        mut self,
+        queued_at: Timestamp,
+        expires_at: Timestamp,
+    ) -> Result<CheckedRecord, BatchError> {
+        self.record.queued_at = queued_at;
+        self.record.expires_at = expires_at;
+        self.record.validate(self.record.queued_at.instant())?;
+        Ok(CheckedRecord {
+            record: self.record,
+        })
+    }
+}
+impl CheckedRecord {
+    pub fn queued_at(&self) -> &Timestamp {
+        &self.record.queued_at
+    }
+    pub fn expires_at(&self) -> &Timestamp {
+        &self.record.expires_at
+    }
+}
 /// Minimal immutable authority lookup projection from an already checked batch.
 pub struct AuthorityRequest<'a> {
     source_id: &'a str,
@@ -50,6 +231,33 @@ impl fmt::Debug for Batch {
     }
 }
 impl Batch {
+    /// Assemble syntax-checked records. Actual policy admission is still mandatory.
+    pub fn assemble(
+        batch_id: &str,
+        identity: [&str; 2],
+        created_at: Timestamp,
+        records: Vec<CheckedRecord>,
+    ) -> Result<Self, BatchError> {
+        if records.is_empty()
+            || records.len() > 500
+            || !uuid(batch_id)
+            || identity.iter().any(|id| !uuid(id))
+        {
+            return Err(BatchError::Semantic);
+        }
+        let envelope = Envelope {
+            wire_version: UnsignedInteger::new(1),
+            batch_id: batch_id.to_owned(),
+            tenant_id: identity[0].to_owned(),
+            collector_id: identity[1].to_owned(),
+            created_at,
+            records: Bounded(records.into_iter().map(|record| record.record).collect()),
+        };
+        envelope.validate()?;
+        let batch = Self { envelope };
+        batch.to_wire_json()?;
+        Ok(batch)
+    }
     /// Check wire syntax and consistency; names and identities still need policy authorization.
     pub fn from_wire_json(bytes: &[u8]) -> Result<Self, BatchError> {
         if bytes.len() > MAX_BATCH_BYTES {
@@ -194,6 +402,9 @@ impl Envelope {
 }
 
 impl Record {
+    pub(crate) fn record_id(&self) -> &str {
+        &self.record_id
+    }
     fn validate(&self, created: OffsetDateTime) -> Result<(), BatchError> {
         let reasons = &self.reasons.0;
         if [

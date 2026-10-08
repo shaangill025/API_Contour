@@ -79,8 +79,8 @@ impl SourceAssignment {
 /// Caller-supplied authoritative snapshot, never deserialized from a batch.
 /// Caller must authenticate, reject revocation and recheck at commit time.
 pub struct AdmissionInputs<'a> {
-    identity: [&'a str; 2],
-    current: &'a VerifiedPolicy,
+    pub(crate) identity: [&'a str; 2],
+    pub(crate) current: &'a VerifiedPolicy,
     historical: BTreeMap<u64, &'a VerifiedPolicy>,
     sources: BTreeMap<&'a str, &'a SourceAssignment>,
 }
@@ -159,79 +159,102 @@ pub fn validate_admission(
         .validate_capture_at(now)
         .map_err(|_| AdmissionError::Time)?;
     for record in batch.records() {
-        let historical = inputs
-            .historical
-            .get(&record.policy_revision.get())
-            .ok_or(AdmissionError::Revision)?;
-        historical
-            .validate_capture_at(record.queued_at.instant())
-            .map_err(|_| AdmissionError::Time)?;
-        let source = inputs
-            .sources
-            .get(record.source_id.as_str())
-            .ok_or(AdmissionError::Source)?;
-        if source.identity.iter().map(String::as_str).ne([
-            batch.tenant_id(),
-            batch.collector_id(),
-            &record.project_id,
+        validate_record(
+            record,
+            inputs,
+            record.queued_at.instant(),
+            record.expires_at.instant(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+pub(crate) fn validate_record(
+    record: &crate::batch::Record,
+    inputs: &AdmissionInputs<'_>,
+    queued: OffsetDateTime,
+    expires: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<(), AdmissionError> {
+    inputs
+        .current
+        .validate_capture_at(now)
+        .map_err(|_| AdmissionError::Time)?;
+    if expires <= now {
+        return Err(AdmissionError::Time);
+    }
+    let historical = inputs
+        .historical
+        .get(&record.policy_revision.get())
+        .ok_or(AdmissionError::Revision)?;
+    historical
+        .validate_capture_at(queued)
+        .map_err(|_| AdmissionError::Time)?;
+    let source = inputs
+        .sources
+        .get(record.source_id.as_str())
+        .ok_or(AdmissionError::Source)?;
+    if source.identity.iter().map(String::as_str).ne([
+        inputs.identity[0],
+        inputs.identity[1],
+        &record.project_id,
+        &record.service_id,
+        &record.environment_id,
+        &record.deployment_id,
+    ]) || !source
+        .parsers
+        .iter()
+        .any(|name| name == &record.parser_profile)
+    {
+        return Err(AdmissionError::Source);
+    }
+    let segments = route(&record.route_template)?;
+    for policy in [*historical, inputs.current] {
+        if !policy.approves(
             &record.service_id,
-            &record.environment_id,
-            &record.deployment_id,
-        ]) || !source
-            .parsers
+            &source.technique,
+            &record.parser_profile,
+        ) || !policy.approves_name(&record.operation)
+            || [
+                &record.request_header_names.0,
+                &record.response_header_names.0,
+                &record.query_parameter_names.0,
+            ]
             .iter()
-            .any(|name| name == &record.parser_profile)
+            .any(|names| names.iter().any(|name| !policy.approves_name(name)))
+            || record.structure.0.depth() > policy.depth_limit()
+            || !approved_shape(&record.structure.0, policy)
         {
-            return Err(AdmissionError::Source);
+            return Err(AdmissionError::Scope);
         }
-        let segments = route(&record.route_template)?;
-        for policy in [*historical, inputs.current] {
-            if !policy.approves(
-                &record.service_id,
-                &source.technique,
-                &record.parser_profile,
-            ) || !policy.approves_name(&record.operation)
-                || [
-                    &record.request_header_names.0,
-                    &record.response_header_names.0,
-                    &record.query_parameter_names.0,
-                ]
-                .iter()
-                .any(|names| names.iter().any(|name| !policy.approves_name(name)))
-                || record.structure.0.depth() > policy.depth_limit()
-                || !approved_shape(&record.structure.0, policy)
-            {
-                return Err(AdmissionError::Scope);
-            }
-            if segments
-                .iter()
-                .any(|segment| !placeholder(segment) && !policy.approves_segment(segment))
+        if segments
+            .iter()
+            .any(|segment| !placeholder(segment) && !policy.approves_segment(segment))
+        {
+            return Err(AdmissionError::Route);
+        }
+        for denied in policy.denied_templates() {
+            let denied = route(denied)?;
+            if denied.len() == segments.len()
+                && denied
+                    .iter()
+                    .zip(&segments)
+                    .all(|(a, b)| a == b || placeholder(a) || placeholder(b))
             {
                 return Err(AdmissionError::Route);
             }
-            for denied in policy.denied_templates() {
-                let denied = route(denied)?;
-                if denied.len() == segments.len()
-                    && denied
-                        .iter()
-                        .zip(&segments)
-                        .all(|(a, b)| a == b || placeholder(a) || placeholder(b))
-                {
-                    return Err(AdmissionError::Route);
-                }
-            }
-            let ttl = Duration::seconds(policy.ttl() as i64);
-            if record.expires_at.instant() - record.queued_at.instant() > ttl {
-                return Err(AdmissionError::Retention);
-            }
         }
-        // Recompute locally; an eventual persistence consumer must bind dimensions too.
-        record
-            .structure
-            .0
-            .fingerprint()
-            .map_err(|_| AdmissionError::Structure)?;
+        let ttl = Duration::seconds(policy.ttl() as i64);
+        if expires - queued > ttl {
+            return Err(AdmissionError::Retention);
+        }
     }
+    // Recompute locally; an eventual persistence consumer must bind dimensions too.
+    record
+        .structure
+        .0
+        .fingerprint()
+        .map_err(|_| AdmissionError::Structure)?;
     Ok(())
 }
 fn approved_shape(shape: &Shape, policy: &VerifiedPolicy) -> bool {
