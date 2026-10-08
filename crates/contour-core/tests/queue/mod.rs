@@ -364,3 +364,314 @@ fn distinct_snapshot_identity_and_nested_name_reject_without_retention() {
     assert_eq!(queue.stats().bytes, 0);
     assert_eq!(queue.stats().purged, 1);
 }
+
+#[test]
+fn frozen_retry_bytes_digest_deadlines_and_inflight_capacity_are_immutable() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(2, 100000);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    admit(&mut queue, draft(2), &inputs, time(6)).unwrap();
+    let charges = queue.stats().bytes;
+    queue.freeze_at(ID, 2, &inputs, time(7)).unwrap();
+    let view = queue.delivery_at(&inputs, time(8)).unwrap().unwrap();
+    let wire = view.wire().to_vec();
+    let digest = *view.digest();
+    let binding = view.binding();
+    let deadline = view.deadline();
+    let decoded = crate::Batch::from_wire_json(&wire).unwrap();
+    assert_eq!(decoded.request_digest_bytes().unwrap(), digest);
+    assert_eq!(decoded.batch_id(), ID);
+    let requests = decoded
+        .authority_requests()
+        .map(|request| request.queued_at())
+        .collect::<Vec<_>>();
+    assert_eq!(requests, vec![time(5), time(6)]);
+    assert_eq!(deadline, time(86405));
+    assert_eq!(queue.stats().records, 2);
+    assert_eq!(queue.stats().bytes, charges + wire.len());
+    assert_eq!(
+        admit(&mut queue, draft(3), &inputs, time(9)),
+        Err(QueueError::Full)
+    );
+    let retry = queue.delivery_at(&inputs, time(10)).unwrap().unwrap();
+    assert_eq!(retry.wire(), wire);
+    assert_eq!(*retry.digest(), digest);
+    assert_eq!(retry.binding(), binding);
+    assert_eq!(retry.deadline(), deadline);
+    assert_eq!(retry.created_at().instant(), time(7));
+    assert_eq!(retry.record_count(), 2);
+}
+
+#[test]
+fn failed_freeze_does_not_release_or_move_records() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let charge = draft(1).retention_charge().unwrap();
+    let mut queue = queue(2, charge);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    let before = queue.stats();
+    assert_eq!(
+        queue.freeze_at(ID, 1, &inputs, time(6)),
+        Err(QueueError::Full)
+    );
+    assert_eq!(queue.stats(), before);
+    assert_eq!(queue.entries.len(), 1);
+    assert!(queue.frozen.is_none());
+    assert_eq!(
+        queue.freeze_at("bad", 1, &inputs, time(6)),
+        Err(QueueError::Limits)
+    );
+    assert_eq!(queue.stats(), before);
+}
+
+#[test]
+fn acknowledgement_binds_active_attempt_scope_digest_and_checked_receipt() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(3, 100000);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    admit(&mut queue, draft(2), &inputs, time(6)).unwrap();
+    queue.freeze_at(ID, 1, &inputs, time(7)).unwrap();
+    let accepted = Timestamp::from_instant(time(8)).unwrap();
+    let other = "00000000-0000-4000-8000-000000000099";
+    let view = queue.freeze(ID, 1, &inputs); // Cannot overwrite a frozen payload.
+    assert_eq!(view.unwrap_err(), QueueError::Ownership);
+    let frozen = queue.frozen.as_ref().unwrap();
+    // Exercise receipt rejection before ownership is marked in flight.
+    let binding = frozen.binding;
+    let digest = frozen.digest;
+    let receipt =
+        Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap();
+    let before = queue.stats();
+    assert_eq!(queue.acknowledge(receipt), Err(QueueError::Receipt));
+    assert_eq!(queue.stats(), before);
+    queue.delivery_at(&inputs, time(8)).unwrap();
+    for (identity, id, digest_value) in [
+        ([other, ID], ID, digest),
+        ([ID; 2], other, digest),
+        ([ID; 2], ID, [0; 32]),
+    ] {
+        let receipt =
+            Acknowledgement::from_transport(binding, identity, id, &digest_value, ID, &accepted)
+                .unwrap();
+        assert_eq!(queue.acknowledge(receipt), Err(QueueError::Receipt));
+        assert_eq!(queue.stats(), before);
+    }
+    assert_eq!(
+        Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, "SECRET", &accepted)
+            .unwrap_err(),
+        QueueError::Receipt
+    );
+    queue
+        .acknowledge(
+            Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(queue.stats().records, 1);
+    assert_eq!(queue.stats().acknowledged, 1);
+    assert_eq!(queue.stats().purged, 0);
+    assert_eq!(
+        queue.acknowledge(
+            Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap()
+        ),
+        Err(QueueError::Ownership)
+    );
+}
+
+#[test]
+fn whole_frozen_batch_cancels_on_selected_record_expiry_narrowing_and_revoke() {
+    let mut value = policy();
+    value["queue_ttl_seconds"] = json!(10);
+    let old = signed(&value);
+    let sources = [source()];
+    let initial = AdmissionInputs::new([ID; 2], &old, &[&old], &sources).unwrap();
+    let mut queue = queue(4, 100000);
+    admit(&mut queue, draft(1), &initial, time(1)).unwrap();
+    admit(&mut queue, draft(2), &initial, time(2)).unwrap();
+    admit(&mut queue, draft(3), &initial, time(3)).unwrap();
+    queue.freeze_at(ID, 2, &initial, time(4)).unwrap();
+    assert!(queue.delivery_at(&initial, time(11)).unwrap().is_none());
+    assert_eq!(queue.stats().records, 1);
+    assert_eq!(queue.stats().expired, 1);
+    assert_eq!(queue.stats().purged, 1);
+    assert_eq!(queue.stats().bytes, queue.entries.front().unwrap().charge);
+    queue.freeze_at(ID, 1, &initial, time(11)).unwrap();
+    let mut narrowed = value.clone();
+    narrowed["revision"] = json!(2);
+    narrowed["approved_names"] = json!(["GET"]);
+    let current = signed(&narrowed);
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&old], &sources).unwrap();
+    assert!(queue.delivery_at(&inputs, time(12)).unwrap().is_none());
+    assert_eq!(queue.stats().records, 0);
+    let mut revoked =
+        super::MemoryQueue::new([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+    admit(&mut revoked, draft(4), &initial, time(5)).unwrap();
+    revoked.freeze_at(ID, 1, &initial, time(6)).unwrap();
+    revoked.revoke();
+    assert_eq!(revoked.stats().records, 0);
+    assert_eq!(revoked.stats().bytes, 0);
+    assert_eq!(revoked.stats().purged, 1);
+}
+
+#[test]
+fn stale_and_cross_instance_receipts_cannot_release_replacement_batches() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut first = queue(2, 100000);
+    admit(&mut first, draft(1), &inputs, time(1)).unwrap();
+    first.freeze_at(ID, 1, &inputs, time(2)).unwrap();
+    let view = first.delivery_at(&inputs, time(3)).unwrap().unwrap();
+    let old_binding = view.binding();
+    let old_digest = *view.digest();
+    first.discard_frozen(old_binding).unwrap();
+    assert_eq!(first.stats().records, 0);
+    assert_eq!(first.stats().bytes, 0);
+    assert_eq!(first.stats().purged, 1);
+    // Deliberately reuse the same syntactic ID/content to isolate local callback binding.
+    // Production callers still must provide unique IDs for different content.
+    admit(&mut first, draft(1), &inputs, time(1)).unwrap();
+    first.freeze_at(ID, 1, &inputs, time(2)).unwrap();
+    let view = first.delivery_at(&inputs, time(3)).unwrap().unwrap();
+    let binding = view.binding();
+    let digest = *view.digest();
+    assert_eq!(digest, old_digest);
+    assert_ne!(binding, old_binding);
+    let accepted = Timestamp::from_instant(time(3)).unwrap();
+    let before = first.stats();
+    assert_eq!(
+        first.acknowledge(
+            Acknowledgement::from_transport(old_binding, [ID; 2], ID, &digest, ID, &accepted)
+                .unwrap()
+        ),
+        Err(QueueError::Receipt)
+    );
+    assert_eq!(
+        first.discard_frozen(old_binding),
+        Err(QueueError::Ownership)
+    );
+    assert_eq!(first.stats(), before);
+    let mut second = queue(2, 100000);
+    admit(&mut second, draft(1), &inputs, time(1)).unwrap();
+    second.freeze_at(ID, 1, &inputs, time(2)).unwrap();
+    let foreign_binding = second
+        .delivery_at(&inputs, time(3))
+        .unwrap()
+        .unwrap()
+        .binding();
+    assert_ne!(foreign_binding, binding);
+    assert_eq!(
+        first.acknowledge(
+            Acknowledgement::from_transport(foreign_binding, [ID; 2], ID, &digest, ID, &accepted)
+                .unwrap()
+        ),
+        Err(QueueError::Receipt)
+    );
+    assert_eq!(first.stats(), before);
+    first
+        .acknowledge(
+            Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(first.stats().records, 0);
+    assert_eq!(first.stats().bytes, 0);
+    assert_eq!(first.stats().acknowledged, 1);
+}
+
+#[test]
+fn serialization_quota_shrink_cancels_whole_frozen_batch_then_keeps_pending() {
+    let old = signed(&policy());
+    let sources = [source()];
+    let initial = AdmissionInputs::new([ID; 2], &old, &[&old], &sources).unwrap();
+    let mut queue = queue(3, 100000);
+    admit(&mut queue, draft(1), &initial, time(1)).unwrap();
+    admit(&mut queue, draft(2), &initial, time(2)).unwrap();
+    let record_charges = queue.stats().bytes;
+    queue.freeze_at(ID, 1, &initial, time(3)).unwrap();
+    assert!(queue.stats().bytes > record_charges);
+    let mut value = policy();
+    value["revision"] = json!(2);
+    value["queue_bytes"] = json!(record_charges);
+    let current = signed(&value);
+    let narrowed = AdmissionInputs::new([ID; 2], &current, &[&old], &sources).unwrap();
+    assert!(queue.delivery_at(&narrowed, time(4)).unwrap().is_none());
+    assert_eq!(queue.stats().records, 1);
+    assert_eq!(queue.stats().purged, 1);
+    assert_eq!(queue.stats().bytes, queue.entries.front().unwrap().charge);
+}
+
+#[test]
+fn disabled_or_expired_current_authority_prevents_retry_and_releases_all_charges() {
+    for disabled in [true, false] {
+        let old = signed(&policy());
+        let sources = [source()];
+        let initial = AdmissionInputs::new([ID; 2], &old, &[&old], &sources).unwrap();
+        let mut queue = queue(2, 100000);
+        admit(&mut queue, draft(1), &initial, time(1)).unwrap();
+        queue.freeze_at(ID, 1, &initial, time(2)).unwrap();
+        let mut value = policy();
+        value["revision"] = json!(2);
+        if disabled {
+            value["enabled"] = json!(false);
+        }
+        let current = signed(&value);
+        let inputs = AdmissionInputs::new([ID; 2], &current, &[&old], &sources).unwrap();
+        assert_eq!(
+            queue
+                .delivery_at(&inputs, if disabled { time(3) } else { time(900) })
+                .unwrap_err(),
+            QueueError::Admission(AdmissionError::Time)
+        );
+        assert_eq!(queue.stats().records, 0);
+        assert_eq!(queue.stats().bytes, 0);
+        assert_eq!(queue.stats().purged, 1);
+    }
+}
+
+#[test]
+fn oversized_freeze_is_atomic_and_a_bounded_prefix_can_be_frozen() {
+    let names = (0..128)
+        .map(|index| format!("{index:03}{}", "🦀".repeat(61)))
+        .collect::<Vec<_>>();
+    let mut value = policy();
+    value["approved_names"]
+        .as_array_mut()
+        .unwrap()
+        .extend(names.iter().map(|name| json!(name)));
+    let current = signed(&value);
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(12, 10000000);
+    for index in 0..12 {
+        let mut large = draft(index);
+        large.record.request_header_names = crate::batch::Bounded(names.clone());
+        large.record.response_header_names = crate::batch::Bounded(names.clone());
+        large.record.query_parameter_names = crate::batch::Bounded(names.clone());
+        admit(&mut queue, large, &inputs, time(index as i64 + 1)).unwrap();
+    }
+    let before = queue.stats();
+    assert_eq!(
+        queue.freeze_at(ID, 12, &inputs, time(20)),
+        Err(QueueError::Record)
+    );
+    assert_eq!(queue.stats(), before);
+    assert_eq!(queue.entries.len(), 12);
+    assert!(queue.frozen.is_none());
+    queue.freeze_at(ID, 8, &inputs, time(20)).unwrap();
+    let view = queue.delivery_at(&inputs, time(21)).unwrap().unwrap();
+    assert_eq!(view.record_count(), 8);
+    assert!(view.wire().len() <= 1048576);
+    assert_eq!(
+        crate::Batch::from_wire_json(view.wire())
+            .unwrap()
+            .request_digest_bytes()
+            .unwrap(),
+        *view.digest()
+    );
+    assert_eq!(queue.stats().records, 12);
+    assert_eq!(queue.entries.len(), 4);
+}
