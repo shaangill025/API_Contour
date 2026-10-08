@@ -9,30 +9,32 @@ import subprocess
 import threading
 
 
+@contextlib.contextmanager
+def sentinel():
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(0.2)
+        yield listener
+def untouched(listener):
+    try: contact,_=listener.accept()
+    except socket.timeout: return
+    contact.close()
+    raise AssertionError('terminal/expired/revoked state contacted owned endpoint sentinel')
+def disable(body,policy_path,directory,execute):
+    envelope=json.loads(policy_path.read_bytes())
+    raw=envelope['payload_base64url'];policy=json.loads(base64.urlsafe_b64decode(raw+'='*((4-len(raw)%4)%4)))
+    policy.update(revision=2,enabled=False)
+    payload=json.dumps(policy,separators=(',',':')).encode()
+    message=directory/'retry-message';signature=directory/'retry-signature'
+    message.write_bytes(b'apicontour/policy/1\n'+payload)
+    subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(directory/'signer.key'),'-in',str(message),'-out',str(signature)],capture_output=True,check=True,timeout=5)
+    encode=lambda data:base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+    envelope.update(payload_base64url=encode(payload),signature_base64url=encode(signature.read_bytes()))
+    signed=json.dumps(envelope,separators=(',',':')).encode()
+    execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); INSERT INTO contour.policy_revisions VALUES('%s','%s',2,decode('%s','hex')); UPDATE contour.collector_authorization SET active_revision=2,enabled=false WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (body['tenant_id'],body['tenant_id'],body['collector_id'],body['tenant_id'],body['collector_id'],signed.hex(),body['tenant_id'],body['collector_id']))
+    policy_path.write_bytes(signed)
+
+
 def run_cases(execute,setup,server,relay,directory,environment,probe):
-    @contextlib.contextmanager
-    def sentinel():
-        with socket.socket() as listener:
-            listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(0.2)
-            yield listener
-    def untouched(listener):
-        try: contact,_=listener.accept()
-        except socket.timeout: return
-        contact.close()
-        raise AssertionError('terminal/expired/revoked state contacted owned endpoint sentinel')
-    def disable(body,policy_path):
-        envelope=json.loads(policy_path.read_bytes())
-        raw=envelope['payload_base64url'];policy=json.loads(base64.urlsafe_b64decode(raw+'='*((4-len(raw)%4)%4)))
-        policy.update(revision=2,enabled=False)
-        payload=json.dumps(policy,separators=(',',':')).encode()
-        message=directory/'retry-message';signature=directory/'retry-signature'
-        message.write_bytes(b'apicontour/policy/1\n'+payload)
-        subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(directory/'signer.key'),'-in',str(message),'-out',str(signature)],capture_output=True,check=True,timeout=5)
-        encode=lambda data:base64.urlsafe_b64encode(data).rstrip(b'=').decode()
-        envelope.update(payload_base64url=encode(payload),signature_base64url=encode(signature.read_bytes()))
-        signed=json.dumps(envelope,separators=(',',':')).encode()
-        execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); INSERT INTO contour.policy_revisions VALUES('%s','%s',2,decode('%s','hex')); UPDATE contour.collector_authorization SET active_revision=2,enabled=false WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (body['tenant_id'],body['tenant_id'],body['collector_id'],body['tenant_id'],body['collector_id'],signed.hex(),body['tenant_id'],body['collector_id']))
-        policy_path.write_bytes(signed)
     modes=['seconds','date','lost','malformed','duplicate','cap','ttl','revoke','cancel','binding','400','422','401','403','409','413']
     for mode in modes:
         print('Controller case: '+mode,flush=True)
@@ -80,7 +82,7 @@ def run_cases(execute,setup,server,relay,directory,environment,probe):
                         if mode in ['cap','revoke','cancel']:
                             control,_=listener.accept();control.settimeout(2);owned.enter_context(control)
                             assert control.recv(1)==b'A', 'retry wait was not explicitly pending'
-                            if mode=='revoke':disable(body,policy_path)
+                            if mode=='revoke':disable(body,policy_path,directory,execute)
                             control.sendall(b'C')
                         result=marker();_,error=process.communicate(timeout=3)
                         assert process.returncode==0 and not error,'controller probe failed: '+error

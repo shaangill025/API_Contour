@@ -242,3 +242,5 @@ def run_cases(execute, setup, server, directory, environment, probe):
     print('Bad trust/name retained queue without commit; committed lost/truncated/mismatched/unknown/duplicate-field/oversized receipt retries preserved bytes and duplicate receipt identity')
 
     runpy.run_path(str(Path(__file__).with_name('test-collector-retry.py')))['run_cases'](execute,setup,server,relay,directory,environment,probe)
+
+    runpy.run_path(str(Path(__file__).with_name('test-collector-bounded.py')))['run_cases'](execute,setup,server,relay,directory,environment,probe)

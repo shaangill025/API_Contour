@@ -169,6 +169,42 @@ impl MemoryQueue {
         self.reconcile_at(inputs, now)?;
         Ok(self.frozen.as_ref().map(|frozen| FrozenView { frozen }))
     }
+    /// Freeze the longest FIFO prefix fitting exact record and wire bounds.
+    /// Individually oversized pending records are lost with `stats.oversized`.
+    /// Any existing frozen generation, exposed or not, remains immutable; this
+    /// is pre-send chunking, never permission to split an uncertain committed batch.
+    pub fn freeze_with_limits(
+        &mut self,
+        batch_id: &str,
+        maximum_records: usize,
+        maximum_wire_bytes: usize,
+        inputs: &AdmissionInputs<'_>,
+    ) -> Result<Option<FrozenView<'_>>, QueueError> {
+        let now = self.now()?;
+        self.freeze_with_limits_at(batch_id, maximum_records, maximum_wire_bytes, inputs, now)?;
+        let now = self.now()?;
+        self.reconcile_at(inputs, now)?;
+        Ok(self.frozen.as_ref().map(|frozen| FrozenView { frozen }))
+    }
+    pub(super) fn freeze_with_limits_at(
+        &mut self,
+        batch_id: &str,
+        maximum_records: usize,
+        maximum_wire_bytes: usize,
+        inputs: &AdmissionInputs<'_>,
+        now: OffsetDateTime,
+    ) -> Result<(), QueueError> {
+        if !(1..=1_048_576).contains(&maximum_wire_bytes) {
+            return Err(QueueError::Limits);
+        }
+        self.freeze_inner(
+            batch_id,
+            maximum_records,
+            Some(maximum_wire_bytes),
+            inputs,
+            now,
+        )
+    }
     /// Prepare/retry the exact owned payload. In-flight data remains fully charged.
     /// The caller must authenticate transport and cancel actual I/O on invalidation.
     pub fn delivery_view(
@@ -258,6 +294,16 @@ impl MemoryQueue {
         inputs: &AdmissionInputs<'_>,
         now: OffsetDateTime,
     ) -> Result<(), QueueError> {
+        self.freeze_inner(batch_id, maximum_records, None, inputs, now)
+    }
+    fn freeze_inner(
+        &mut self,
+        batch_id: &str,
+        maximum_records: usize,
+        maximum_wire_bytes: Option<usize>,
+        inputs: &AdmissionInputs<'_>,
+        now: OffsetDateTime,
+    ) -> Result<(), QueueError> {
         if !crate::policy::uuid(batch_id) || !(1..=500).contains(&maximum_records) {
             return Err(QueueError::Limits);
         }
@@ -272,8 +318,33 @@ impl MemoryQueue {
             .generation
             .checked_add(1)
             .ok_or(QueueError::Ownership)?;
-        let count = maximum_records.min(self.entries.len());
         let created = Timestamp::from_instant(now).map_err(|_| QueueError::Clock)?;
+        let mut count = maximum_records.min(self.entries.len());
+        if let Some(limit) = maximum_wire_bytes {
+            // Counting streams serialization; no candidate wire/digest is allocated.
+            // Every added record contributes positive bytes, so prefix length is
+            // monotone. After up to 500 individual oversized-head checks,
+            // binary search counts at most nine additional prefix candidates.
+            while !self.entries.is_empty() && !self.prefix_fits(batch_id, &created, 1, limit)? {
+                self.entries.pop_front();
+                self.stats.oversized = self.stats.oversized.saturating_add(1);
+                self.recount();
+            }
+            if self.entries.is_empty() {
+                return Ok(());
+            }
+            let mut lower = 1;
+            let mut upper = maximum_records.min(self.entries.len());
+            while lower < upper {
+                let middle = lower + (upper - lower).div_ceil(2);
+                if self.prefix_fits(batch_id, &created, middle, limit)? {
+                    lower = middle;
+                } else {
+                    upper = middle - 1;
+                }
+            }
+            count = lower;
+        }
         let records = self
             .entries
             .iter()
@@ -328,6 +399,32 @@ impl MemoryQueue {
         });
         self.recount();
         Ok(())
+    }
+    fn prefix_fits(
+        &self,
+        batch_id: &str,
+        created: &Timestamp,
+        count: usize,
+        limit: usize,
+    ) -> Result<bool, QueueError> {
+        let records = self
+            .entries
+            .iter()
+            .take(count)
+            .map(|entry| &entry.record.record)
+            .collect::<Vec<_>>();
+        let batch = BorrowedBatch::new(
+            batch_id,
+            [&self.identity[0], &self.identity[1]],
+            created,
+            &records,
+        )
+        .map_err(|_| QueueError::Record)?;
+        match batch.length() {
+            Ok(length) => Ok(length <= limit),
+            Err(crate::batch::BatchError::Size) => Ok(false),
+            Err(_) => Err(QueueError::Record),
+        }
     }
     pub(super) fn delivery_at(
         &mut self,
