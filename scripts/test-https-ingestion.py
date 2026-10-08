@@ -15,7 +15,7 @@ import runpy
 from pathlib import Path
 
 
-def run_cases(container, execute, setup, probe, pg_port, directory, environment):
+def run_cases(container, execute, setup, probe, pg_port, directory, environment, delivery_only=False):
     print('Starting actual operator-mapped HTTPS ingestion fixture',flush=True)
     (directory/'http-request.cnf').write_text('[req]\ndistinguished_name=dn\n[dn]\n')
     def command(argv, timeout=10):
@@ -97,6 +97,10 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment)
                 reader.join(2)
                 for pipe in [process.stdin,process.stdout,process.stderr]:
                     pipe.close()
+
+    if delivery_only:
+        runpy.run_path(str(Path(__file__).with_name('test-collector-delivery.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('delivery_probe')))
+        return
 
     def request(port, body, wanted=200, client='http-client', headers=None, method='POST', target='/v1/batches'):
         connection = http.client.HTTPSConnection('localhost',port,context=context(client),timeout=8)

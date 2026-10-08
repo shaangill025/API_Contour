@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment, https_only=False):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -83,10 +83,10 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         execute(text)
         return (body, collector, source)
 
-    if https_only:
+    if https_only or delivery_only:
         execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
         https_probe = str(Path(probe).with_name('https_probe'))
-        runpy.run_path(str(ROOT / 'scripts/test-https-ingestion.py'))['run_cases'](container,execute,setup,https_probe,port,directory,environment)
+        runpy.run_path(str(ROOT / 'scripts/test-https-ingestion.py'))['run_cases'](container,execute,setup,https_probe,port,directory,environment,delivery_only=delivery_only)
         return
 
     def logs():
