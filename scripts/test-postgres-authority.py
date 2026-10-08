@@ -263,8 +263,9 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         check(split)
     print('Restricted TLS authority scope/signature/revision/source/all-record/16MiB gate and split assertions passed')
     print('Authority lock-wait timeout/cancel invalidation, live-runtime cleanup, fresh disable and expiry refresh passed')
+    # Recovery can republish the loopback port; finish reads before that restart.
+    refresh()
     submit_probe = str(Path(probe).with_name('submit_probe'))
     runpy.run_path(str(ROOT / 'scripts/test-postgres-submit.py'))['run_cases'](container, execute, setup, submit_probe, port, directory, environment)
-    refresh()
 if __name__ == '__main__':
     subprocess.run(['python3', str(ROOT / 'scripts/test-postgres-tls.py'), '--authority'], check=True)
