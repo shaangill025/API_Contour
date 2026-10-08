@@ -41,6 +41,12 @@ impl Fixture {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let fixture = Self(path);
+        // Do not inherit host request extensions from the OpenSSL configuration.
+        fs::write(
+            fixture.0.join("fixture.cnf"),
+            "[req]\ndistinguished_name=dn\n[dn]\n",
+        )
+        .unwrap();
         fixture.ca("ca");
         fixture.ca("other");
         fixture.leaf("server", "ca", "serverAuth", true);
@@ -74,6 +80,8 @@ impl Fixture {
     fn ca(&self, name: &str) {
         self.command(&[
             "req",
+            "-config",
+            "fixture.cnf",
             "-x509",
             "-newkey",
             "rsa:2048",
@@ -104,6 +112,8 @@ impl Fixture {
     fn leaf(&self, name: &str, ca: &str, purpose: &str, server: bool) {
         self.command(&[
             "req",
+            "-config",
+            "fixture.cnf",
             "-new",
             "-newkey",
             "rsa:2048",
