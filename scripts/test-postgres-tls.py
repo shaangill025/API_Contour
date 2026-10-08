@@ -137,6 +137,7 @@ def main():
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
     if "--https-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-core", "--example", "operation_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-delivery", "--example", "owner_probe", "--locked", "--offline"], timeout=180)
     if "--delivery-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-delivery", "--example", "delivery_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))

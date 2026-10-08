@@ -95,6 +95,13 @@ impl MemoryQueue {
             generation: 0,
         })
     }
+    /// Revisions of retained pending and frozen records; duplicates are possible.
+    pub fn retained_policy_revisions(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries
+            .iter()
+            .chain(self.frozen.iter().flat_map(|frozen| frozen.entries.iter()))
+            .map(|entry| entry.record.record.policy_revision.get())
+    }
     pub fn stats(&self) -> QueueStats {
         self.stats
     }
