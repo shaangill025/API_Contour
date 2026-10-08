@@ -50,6 +50,11 @@ jobs:
         run: cargo +1.88.0 test --workspace --locked --offline
       - name: Build native workspace
         run: cargo +1.88.0 build --workspace --locked --offline
+      - name: Test native C structural interface
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 scripts/test-native-abi.py
       - name: Fetch pinned TLS database fixture
         if: runner.os == 'Linux'
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
