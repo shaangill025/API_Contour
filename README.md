@@ -11,8 +11,8 @@ observed structures with declared and approved contracts, then review changes.
 **Status: under development.** This repository currently contains the Rust core
 and three PostgreSQL migrations for identity, policy, and inbox storage. The Rust
 database adapter validates authority, stores batches, and returns durable receipts.
-It does not yet provide a runnable platform,
-collector, ingestion service, or web UI. The architecture and packages below
+The core also provides checked record construction and bounded in-memory retention.
+It does not yet provide a runnable platform, collector, ingestion service, or web UI. The architecture and packages below
 describe the intended release.
 
 ## Enterprise workflows
@@ -51,7 +51,8 @@ system of record. React and TypeScript will supply the web UI.
 Collectors will send bounded batches to the ingestion API; they will not connect
 to PostgreSQL directly. Embedded collectors will use bounded memory by default.
 Standalone collectors may use an optional local SQLite queue for sanitized data.
-The queue and delivery service are not implemented yet.
+Bounded in-memory retention is implemented in the shared core. Durable storage,
+batch delivery, and integration with capture callbacks still need implementation.
 
 Collection must not wait for a remote response on the application request path.
 If a collector reaches its limits, it must report loss or incomplete visibility.
@@ -86,6 +87,8 @@ and production target are still pending. No production deployment is included ye
 - Checked structural types, canonical encoding, and SHA-256 fingerprints.
 - Bounded local JSON extraction that returns structure without observed values.
 - Strict sanitized batch decoding, time checks, and canonical request digests.
+- Checked record construction and a bounded memory queue with expiry, policy
+  reconciliation, capacity loss counters, and permanent local revocation.
 - Signed Ed25519 policy verification, identity checks, and bounded policy leases.
 - Pure batch admission against historical and current policies and supplied source assignments.
 - PostgreSQL identity tables, tenant row security, and restricted runtime roles.
@@ -106,7 +109,7 @@ and production target are still pending. No production deployment is included ye
 - Rust CI on Linux and macOS, plus actual PostgreSQL integration tests.
 
 Pure admission validates a supplied snapshot. HTTP authentication, capture-side
-revocation integration, collector revision high-water storage, collector queues,
+revocation integration, collector revision high-water storage, durable queue storage and delivery,
 all collectors, contract comparison, and the UI still need implementation.
 Full platform, device, cloud, backup/restore, and performance acceptance is pending.
 
@@ -139,6 +142,8 @@ test the current foundation; they do not start an APIContour service.
 
 ## Design documents
 
+- [Complete specification and validation commands](docs/specification/README.md)
+- [Implemented memory queue and its limits](docs/memory-queue.md)
 - [Product scope and required workflows](docs/specification/01-product.md)
 - [Privacy, signed policy, and admission rules](docs/specification/03-privacy.md)
 - [Structural data and PostgreSQL model](docs/specification/04-data.md)

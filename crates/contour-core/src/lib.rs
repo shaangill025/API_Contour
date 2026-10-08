@@ -10,7 +10,9 @@ mod policy;
 mod queue;
 mod scalar;
 pub use policy::{PolicyError, PolicyKeys, VerifiedPolicy};
-pub use queue::{MemoryQueue, QueueError, QueueLimits, QueueStats};
+pub use queue::{
+    Acknowledgement, DeliveryBinding, FrozenView, MemoryQueue, QueueError, QueueLimits, QueueStats,
+};
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
 mod wire;
 pub use extract::{Completeness, ExtractionPolicy, Observation, ObservationReason, extract_json};
