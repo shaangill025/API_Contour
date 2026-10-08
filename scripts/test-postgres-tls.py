@@ -215,7 +215,7 @@ def main():
 
             def check(host, port, ca, mode, milliseconds=3000):
                 output = run([probe, host, str(port), str(directory/ca), str(milliseconds), mode], timeout=12, env=environment)
-                expected = "Deadline" if mode == "HealthDeadline" else mode
+                expected = "Deadline" if mode == "HealthDeadline" else "Connection" if mode == "SingleConnection" else mode
                 if password in output or output != expected:
                     raise AssertionError("unsafe or unexpected fixture output")
 
@@ -252,6 +252,7 @@ def main():
                         pipe.close()
             check("localhost", port, "untrusted.crt", "Connection")
             check("127.0.0.1", port, "ca.crt", "Connection")
+            check("127.0.0.1", port, "ca.crt", "SingleConnection")
             print("Actual PostgreSQL trusted CA, TLS health, bad CA, wrong hostname and backend cleanup passed")
             if "--https-only" in sys.argv or "--delivery-only" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
