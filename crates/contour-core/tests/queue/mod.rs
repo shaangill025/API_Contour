@@ -105,7 +105,7 @@ fn exact_record_and_wire_charge_capacity_drop_new() {
     let current = signed(&policy());
     let sources = [source()];
     let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
-    let charge = draft(1).retention_charge().unwrap();
+    let charge = draft(1).retention_charge().unwrap().checked_mul(3).unwrap();
     let mut full = queue(2, charge - 1);
     assert_eq!(
         admit(&mut full, draft(1), &inputs, time(5)),
@@ -139,7 +139,8 @@ fn exact_record_and_wire_charge_capacity_drop_new() {
     .unwrap()
     .to_wire_json()
     .unwrap();
-    assert!(encoded.len() <= entry.charge);
+    assert!(encoded.len() <= entry.base_allowance);
+    assert_eq!(entry.charge, entry.base_allowance * 3);
 }
 #[test]
 fn successful_reservation_owns_timestamps_and_expiry_boundary() {
@@ -390,7 +391,8 @@ fn frozen_retry_bytes_digest_deadlines_and_inflight_capacity_are_immutable() {
     assert_eq!(requests, vec![time(5), time(6)]);
     assert_eq!(deadline, time(86405));
     assert_eq!(queue.stats().records, 2);
-    assert_eq!(queue.stats().bytes, charges + wire.len());
+    assert_eq!(queue.stats().bytes, charges);
+    assert!(wire.len() * 3 <= charges);
     assert_eq!(
         admit(&mut queue, draft(3), &inputs, time(9)),
         Err(QueueError::Full)
@@ -409,13 +411,15 @@ fn failed_freeze_does_not_release_or_move_records() {
     let current = signed(&policy());
     let sources = [source()];
     let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
-    let charge = draft(1).retention_charge().unwrap();
+    let charge = draft(1).retention_charge().unwrap().checked_mul(3).unwrap();
     let mut queue = queue(2, charge);
     admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
     let before = queue.stats();
+    // An unexpectedly understated selected allowance fails closed before retention.
+    queue.entries.front_mut().unwrap().base_allowance = 1;
     assert_eq!(
         queue.freeze_at(ID, 1, &inputs, time(6)),
-        Err(QueueError::Full)
+        Err(QueueError::Record)
     );
     assert_eq!(queue.stats(), before);
     assert_eq!(queue.entries.len(), 1);
@@ -592,10 +596,10 @@ fn serialization_quota_shrink_cancels_whole_frozen_batch_then_keeps_pending() {
     admit(&mut queue, draft(2), &initial, time(2)).unwrap();
     let record_charges = queue.stats().bytes;
     queue.freeze_at(ID, 1, &initial, time(3)).unwrap();
-    assert!(queue.stats().bytes > record_charges);
+    assert_eq!(queue.stats().bytes, record_charges);
     let mut value = policy();
     value["revision"] = json!(2);
-    value["queue_bytes"] = json!(record_charges);
+    value["queue_bytes"] = json!(queue.entries.front().unwrap().charge);
     let current = signed(&value);
     let narrowed = AdmissionInputs::new([ID; 2], &current, &[&old], &sources).unwrap();
     assert!(queue.delivery_at(&narrowed, time(4)).unwrap().is_none());
@@ -674,4 +678,106 @@ fn oversized_freeze_is_atomic_and_a_bounded_prefix_can_be_frozen() {
     );
     assert_eq!(queue.stats().records, 12);
     assert_eq!(queue.entries.len(), 4);
+}
+
+#[test]
+fn admitted_record_reserves_frozen_wire_and_one_transport_copy_upfront() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let base = draft(1).retention_charge().unwrap();
+    let budget = base.checked_mul(3).unwrap();
+    let mut queue = queue(1, budget);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    assert_eq!(
+        queue.stats().bytes,
+        budget,
+        "all three allowances reserved at admission"
+    );
+    queue.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    assert_eq!(
+        queue.stats().bytes,
+        budget,
+        "freeze needs no extra headroom"
+    );
+    let (binding, digest) = {
+        let mut attempt = queue
+            .reserve_delivery_at(&inputs, time(7))
+            .unwrap()
+            .unwrap();
+        let view = attempt.view();
+        assert!(view.wire().len() <= base);
+        assert!(crate::Batch::from_wire_json(view.wire()).is_ok());
+        (view.binding(), *view.digest())
+    }; // Cancellation/drop keeps the frozen payload and all upfront charges.
+    assert_eq!(queue.stats().bytes, budget);
+    assert_eq!(queue.stats().records, 1);
+    let mut attempt = queue
+        .reserve_delivery_at(&inputs, time(8))
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.view().binding(), binding);
+    assert_eq!(attempt.view().digest(), &digest);
+    let accepted = Timestamp::from_instant(time(8)).unwrap();
+    let receipt =
+        Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap();
+    attempt.acknowledge(receipt).unwrap();
+    assert_eq!(queue.stats().bytes, 0);
+    assert_eq!(queue.stats().records, 0);
+    assert_eq!(queue.stats().acknowledged, 1);
+}
+
+#[test]
+fn full_queue_prefix_acknowledgment_keeps_pending_reservations() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let charge = draft(1).retention_charge().unwrap().checked_mul(3).unwrap();
+    let mut queue = queue(2, charge * 2);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    admit(&mut queue, draft(2), &inputs, time(5)).unwrap();
+    assert_eq!(queue.stats().bytes, charge * 2);
+    queue.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    let mut attempt = queue
+        .reserve_delivery_at(&inputs, time(7))
+        .unwrap()
+        .unwrap();
+    let view = attempt.view();
+    let binding = view.binding();
+    let digest = *view.digest();
+    assert_eq!(view.record_count(), 1);
+    let accepted = Timestamp::from_instant(time(7)).unwrap();
+    attempt
+        .acknowledge(
+            Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(queue.stats().bytes, charge);
+    assert_eq!(queue.stats().records, 1);
+    queue.freeze_at(ID, 1, &inputs, time(8)).unwrap();
+    let mut attempt = queue
+        .reserve_delivery_at(&inputs, time(9))
+        .unwrap()
+        .unwrap();
+    let view = attempt.view();
+    let next = view.binding();
+    let next_digest = *view.digest();
+    assert_eq!(
+        attempt.acknowledge(
+            Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap()
+        ),
+        Err(QueueError::Receipt)
+    );
+    assert_eq!(queue.stats().bytes, charge);
+    let attempt = queue
+        .reserve_delivery_at(&inputs, time(10))
+        .unwrap()
+        .unwrap();
+    attempt
+        .acknowledge(
+            Acknowledgement::from_transport(next, [ID; 2], ID, &next_digest, ID, &accepted)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(queue.stats().bytes, 0);
 }
