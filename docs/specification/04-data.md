@@ -143,3 +143,12 @@ canonical bounds. A limit returns an explicit error without a partial comparison
 No truncated result can imply compatibility. The result is an in-memory native
 projection; comparison persistence, declared models and the public HTTP API remain
 separate implementation work.
+
+The mandatory `--catalog-reader` fixture runs comparison cases after reader checks.
+It submits signed-policy-admitted records, processes their accepted inbox batches,
+and reloads the records through the restricted reader before comparison. Coverage
+includes a synthetic source-authorized parser-profile mismatch and separate
+per-path, aggregate UTF-8 path-byte, and recursive-equality work limits. These
+fixtures do not establish support for the synthetic parser profile. The 10,000
+difference-count guard remains inspected rather than executed; the simple input
+size bound does not prove that guard unreachable.
