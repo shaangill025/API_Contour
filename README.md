@@ -9,8 +9,11 @@ only approved structural information to a central catalog. Teams will compare
 observed structures with declared and approved contracts, then review changes.
 
 **Status: under development.** This repository currently contains the Rust core
-and three PostgreSQL migrations for identity, policy, and inbox storage. The Rust
-database adapter validates authority, stores batches, and returns durable receipts.
+and four PostgreSQL migrations for identity, policy, inbox, and immutable catalog
+storage. The Rust database adapter validates authority, stores batches, and returns
+durable receipts. A separate catalog worker processes accepted history atomically.
+An internal reader returns bounded pages under explicit operator scope. Public
+catalog HTTP queries and end-user authorization remain pending.
 The core also provides checked record construction and bounded in-memory retention.
 Operator-configured mTLS HTTPS libraries provide ingestion and online authority
 refresh. A caller-driven collector owner integrates refresh, admission, bounded
@@ -113,8 +116,14 @@ and production target are still pending. No production deployment is included ye
   not authorize a later write; submission checks authority again while holding the
   collector lock.
 - Immutable inbox headers and bounded batch storage with tenant isolation and
-  ingestion-only access. Atomic submission returns server-generated receipts; exact
+  restricted ingestion writes and catalog-worker reads. Atomic submission returns
+  server-generated receipts; exact
   retries verify stored content and return the original receipt.
+- Immutable catalog operations, collector-scoped variants and original source
+  evidence, with atomic batch processing and restricted worker/reader roles.
+- Internal operator-scoped catalog reads with checked canonical bytes, bounded
+  UUID keyset pages and exact source counts, names and timestamp text. This does
+  not implement public HTTP pagination or end-user authorization.
 - Real PostgreSQL process-crash recovery and lost COMMIT reply tests. A confirmed
   commit retains its receipt even if connection cleanup then fails.
 - Authenticated collector authority refresh with fresh challenges, scoped source
@@ -151,6 +160,7 @@ For database tests, install Docker and fetch the pinned PostgreSQL fixture:
 docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
 bash scripts/test-postgres.sh
 python3 -u scripts/test-postgres-tls.py --authority
+python3 -u scripts/test-postgres-tls.py --catalog-reader
 python3 -u scripts/test-postgres-tls.py --https-only
 python3 -u scripts/test-postgres-tls.py --delivery-only
 ```

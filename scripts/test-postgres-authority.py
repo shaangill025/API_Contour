@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -82,6 +82,11 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         text += "UPDATE contour.collector_authorization SET active_revision=%d,enabled=true WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (current, tenant, collector)
         execute(text)
         return (body, collector, source)
+
+    if catalog_reader_only:
+        submit_probe = str(Path(probe).with_name('submit_probe'))
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-submit.py'))['run_cases'](container, execute, setup, submit_probe, port, directory, environment, catalog_reader_only=True)
+        return
 
     def refresh():
         refresh_probe = str(Path(probe).with_name('refresh_probe'))

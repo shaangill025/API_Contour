@@ -69,6 +69,8 @@ fn probe() -> Result<(), &'static str> {
                 && !(wanted == "Either"
                     && matches!(actual.as_str(), "Processed" | "AlreadyProcessed"))
             {
+                println!("{actual}");
+                io::stdout().flush().map_err(|_| "output failed")?;
                 return Err("catalog outcome mismatch");
             }
             if args[3] == "ProcessedInvalidated"
