@@ -11,7 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cases(container, execute, setup, submit, port, directory, environment):
+def run_cases(container, execute, setup, submit, port, directory, environment, reader_only=False):
     execute((ROOT / 'db/provision_catalog.sql').read_text())
     execute((ROOT / 'db/migrations/0004_catalog.sql').read_text())
     execute("CREATE ROLE contour_catalog_tls LOGIN PASSWORD '%s'; GRANT contour_catalog_worker TO contour_catalog_tls; ALTER ROLE contour_catalog_tls SET log_statement='all';" % environment['CONTOUR_FIXTURE_PASSWORD'])
@@ -111,6 +111,10 @@ def run_cases(container, execute, setup, submit, port, directory, environment):
     relation = execute("SELECT operation_id::text,variant_id::text FROM contour.observation_windows WHERE %s;" % scope(second)).split('|')
     if relation[0] != rows[0]['operation_id'] or relation[1] == rows[0]['variant_id']:
         raise AssertionError('collector-scoped policy variant identity changed')
+
+    if reader_only:
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog-reader.py'))['run_cases'](container, execute, setup, submit, check, port, directory, environment, body, second)
+        return
 
     candidate = accepted('parallel', 2)
     # Hold the first worker after its unique claim but before any observation can

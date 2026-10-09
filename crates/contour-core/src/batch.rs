@@ -458,30 +458,14 @@ impl Record {
         ]
         .iter()
         .any(|id| !uuid(id))
-            || ![
-                "http",
-                "graphql",
-                "grpc",
-                "websocket",
-                "kafka",
-                "mqtt",
-                "cloud",
-            ]
-            .contains(&self.protocol.as_str())
-            || ![
-                "request",
-                "response",
-                "publish",
-                "consume",
-                "operation",
-                "connection",
-            ]
-            .contains(&self.direction.as_str())
+            || !valid_operation(
+                &self.protocol,
+                &self.direction,
+                &self.operation,
+                &self.route_template,
+            )
             || !["structure", "operation", "connection"].contains(&self.visibility.as_str())
             || !["complete", "partial", "unavailable"].contains(&self.completeness.as_str())
-            || !string_bound(&self.operation, 32)
-            || !string_bound(&self.route_template, 256)
-            || self.route_template.contains(['?', '#'])
             || !profile(&self.parser_profile)
             || self.policy_revision.get() == 0
             || !(1..=1_000_000_000).contains(&self.count.get())
@@ -551,7 +535,37 @@ impl Record {
     }
 }
 
-fn uuid(text: &str) -> bool {
+pub(crate) fn valid_operation(
+    protocol: &str,
+    direction: &str,
+    operation: &str,
+    template: &str,
+) -> bool {
+    [
+        "http",
+        "graphql",
+        "grpc",
+        "websocket",
+        "kafka",
+        "mqtt",
+        "cloud",
+    ]
+    .contains(&protocol)
+        && [
+            "request",
+            "response",
+            "publish",
+            "consume",
+            "operation",
+            "connection",
+        ]
+        .contains(&direction)
+        && string_bound(operation, 32)
+        && string_bound(template, 256)
+        && !template.contains(['?', '#'])
+}
+
+pub(crate) fn uuid(text: &str) -> bool {
     text.len() == 36
         && text.bytes().enumerate().all(|(i, byte)| {
             if [8, 13, 18, 23].contains(&i) {

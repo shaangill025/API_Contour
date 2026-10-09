@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 
 
-def run_cases(container, execute, setup, probe, port, directory, environment):
+def run_cases(container, execute, setup, probe, port, directory, environment, catalog_reader_only=False):
     execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
     sequence = itertools.count()
 
@@ -26,9 +26,9 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         if counts != '%d|%d' % (wanted, wanted):
             raise AssertionError('inbox atomic pair count mismatch')
 
-    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False):
+    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False, compact_utf8=False):
         path = directory / ('submit-%d.json' % next(sequence))
-        path.write_text(json.dumps(body))
+        path.write_text(json.dumps(body, ensure_ascii=False, separators=(',', ':')) if compact_utf8 else json.dumps(body))
         process = subprocess.Popen([probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda: output.put(process.stdout.readline()), daemon=True)
@@ -70,6 +70,10 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
             reader.join(2)
             for pipe in [process.stdin, process.stdout, process.stderr]:
                 pipe.close()
+
+    if catalog_reader_only:
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment, reader_only=True)
+        return
 
     def parallel(body, wanted='Accepted', deadline=5000, include_status=False):
         outcomes = queue.Queue()
