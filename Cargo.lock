@@ -183,6 +183,7 @@ dependencies = [
  "contour-core",
  "native-tls",
  "postgres-native-tls",
+ "serde_json",
  "time",
  "tokio",
  "tokio-postgres",

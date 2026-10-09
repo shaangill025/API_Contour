@@ -4,6 +4,7 @@
 use std::{fmt, net::IpAddr, time::Duration};
 use tokio_postgres::{Config, config::SslMode};
 mod authority;
+mod catalog;
 mod catalog_reader;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};
 mod refresh;
@@ -11,6 +12,7 @@ mod submit;
 mod transaction;
 mod transport;
 pub use authority::AuthorityError;
+pub use catalog::{CatalogError, CatalogStatus};
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
 pub use submit::{DurableReceipt, ReceiptStatus, SubmitError};
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
