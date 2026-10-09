@@ -9,11 +9,12 @@ use contour_core::{Batch, OperationKey, Shape};
 use serde_json::{Value, json};
 use std::{fmt, io};
 use tokio::time::{Instant, timeout_at};
-use tokio_postgres::{IsolationLevel, Row, Transaction};
+use tokio_postgres::{IsolationLevel, Row, Statement, Transaction};
 
 const MAX_PAGE: usize = 1_048_576;
 // Includes all eight UUID strings in the private cursor and conservative metadata.
 const CURSOR_BUDGET: usize = 512;
+const EVIDENCE_SQL: &str = "SELECT row_to_json(w)::text,v.parser_profile,v.policy_revision::text,v.canonical_structure,v.structure_wire,encode(v.structure_hash,'hex') FROM contour.observation_windows w JOIN contour.variants v USING(tenant_id,variant_id,operation_id,collector_id) WHERE w.tenant_id=$1::text::uuid AND w.project_id=$2::text::uuid AND w.service_id=$3::text::uuid AND w.operation_id=$4::text::uuid AND w.variant_id=$5::text::uuid AND w.source_id=$6::text::uuid AND w.batch_id=$7::text::uuid AND w.record_id=$8::text::uuid";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogReadError {
     Scope,
@@ -236,6 +237,18 @@ async fn page(
     {
         return Err(CatalogReadError::Corrupt);
     }
+    // Reuse one preparation per page, while fetching just one bounded row at a
+    // time. SQL strings otherwise cause a fresh prepare round trip on every row.
+    let statement = if rows.is_empty() {
+        None
+    } else {
+        Some(
+            transaction
+                .prepare(EVIDENCE_SQL)
+                .await
+                .map_err(database_error)?,
+        )
+    };
     let mut bytes = b"{\"operation\":".to_vec();
     bytes.extend_from_slice(&encode(
         &json!({"id":operation,"identity_version":1,"key":parts}),
@@ -246,7 +259,14 @@ async fn page(
     let mut more = rows.len() > usize::from(limit);
     for (index, row) in rows.iter().take(usize::from(limit)).enumerate() {
         check_deadline(deadline)?;
-        let item = evidence(transaction, scope, &parts, row).await?;
+        let item = evidence(
+            transaction,
+            statement.as_ref().ok_or(CatalogReadError::Corrupt)?,
+            scope,
+            &parts,
+            row,
+        )
+        .await?;
         let encoded = encode(&item)?;
         let needed =
             bytes.len() + encoded.len() + usize::from(index > 0) + suffix.len() + CURSOR_BUDGET;
@@ -281,6 +301,7 @@ async fn page(
 }
 async fn evidence(
     transaction: &Transaction<'_>,
+    statement: &Statement,
     scope: &CatalogReadScope,
     parts: &[String; 8],
     metadata: &Row,
@@ -291,7 +312,15 @@ async fn evidence(
     let batch: &str = metadata.try_get(2).map_err(corrupt)?;
     let record: &str = metadata.try_get(3).map_err(corrupt)?;
     let collector: &str = metadata.try_get(4).map_err(corrupt)?;
-    let row=transaction.query_one("SELECT row_to_json(w)::text,v.parser_profile,v.policy_revision::text,v.canonical_structure,v.structure_wire,encode(v.structure_hash,'hex') FROM contour.observation_windows w JOIN contour.variants v USING(tenant_id,variant_id,operation_id,collector_id) WHERE w.tenant_id=$1::text::uuid AND w.project_id=$2::text::uuid AND w.service_id=$3::text::uuid AND w.operation_id=$4::text::uuid AND w.variant_id=$5::text::uuid AND w.source_id=$6::text::uuid AND w.batch_id=$7::text::uuid AND w.record_id=$8::text::uuid", &[tenant,project,service,operation,&variant,&source,&batch,&record]).await.map_err(database_error)?;
+    let row = transaction
+        .query_one(
+            statement,
+            &[
+                tenant, project, service, operation, &variant, &source, &batch, &record,
+            ],
+        )
+        .await
+        .map_err(database_error)?;
     let stored: Value = serde_json::from_str(row.try_get(0).map_err(corrupt)?).map_err(corrupt)?;
     let wire: &[u8] = row.try_get(4).map_err(corrupt)?;
     let shape = Shape::from_wire_json(wire).map_err(corrupt)?;

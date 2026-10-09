@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -26,7 +27,10 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
         try:
             line = output.get(timeout=30)
             if not line:
-                raise AssertionError('reader failed before result')
+                process.wait(timeout=3)
+                safe={'reader TLS setup failed','reader cancel did not remain pending','catalog reader probe failed'}
+                stages=[line for line in process.stderr.read().splitlines() if line in safe]
+                raise AssertionError('reader failed before result: expected '+wanted+'; '+','.join(stages))
             if not line.startswith('{'):
                 raise AssertionError('reader closed-enum outcome mismatch: '+line.strip())
             result = json.loads(line)
@@ -70,7 +74,11 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
     for index in range(4):
         wrong = list(scope); wrong[index] = '00000000-0000-0000-0000-000000ffffff'
         read('NotFound', selected=wrong)
+    before = subprocess.run(['docker','logs',container],capture_output=True,text=True,check=True,timeout=5)
     read(limit=200)
+    after = subprocess.run(['docker','logs',container],capture_output=True,text=True,check=True,timeout=5)
+    queries = re.findall(r'execute (\w+): SELECT row_to_json\(w\)',(after.stdout+after.stderr)[len(before.stdout+before.stderr):])
+    assert len(queries)==3 and len(set(queries))==1, 'reader prepared evidence SQL per row'
     forbidden = "SELECT has_table_privilege(current_user,'contour.ingestion_payloads','SELECT'),has_table_privilege(current_user,'contour.catalog_processed_batches','SELECT'),has_table_privilege(current_user,'contour.operations','INSERT'),has_table_privilege(current_user,'contour.collector_authorization','SELECT');"
     result = subprocess.run(['docker', 'exec', '-i', container, 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'contour_catalog_reader_tls', '-d', 'contour_fixture'], input=forbidden, text=True, capture_output=True, timeout=5, check=True)
     assert result.stdout.strip() == 'f|f|f|f', 'reader privileges expanded'
@@ -146,11 +154,18 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
 
     # A real full-size row page, not merely passing 200 for a tiny result.
     small,_,_=setup('reader_row_limit',current=1)
-    small['records']=[dict(small['records'][0],record_id='00000000-0000-4000-8000-%012x' % (index+1)) for index in range(201)]
-    submit(small,status='accepted');consume(small)
+    expected_small=[]
+    # Prepare all 201 rows through real submissions with the unchanged consumer
+    # deadline. Reader pagination does not require one large consumer transaction.
+    for start in range(0,201,50):
+        body=copy.deepcopy(small);body['batch_id']='00000000-0000-4000-8000-%012x' % (0xbeef000+start)
+        body['records']=[dict(body['records'][0],record_id='00000000-0000-4000-8000-%012x' % (index+1)) for index in range(start,min(start+50,201))]
+        submit(body,status='accepted');consume(body)
+        expected_small.extend((body['batch_id'],record['record_id']) for record in body['records'])
     full=read(limit=200)
     assert [len(page['page']['items']) for page in full['pages']]==[200,4]
     assert len(items(full))==204
+    assert sorted((item['batch_id'],item['record']['record_id']) for item in items(full) if item['collector_id']==small['collector_id'])==sorted(expected_small), 'row-limit traversal lost or duplicated evidence'
     default=read()
     assert [len(page['page']['items']) for page in default['pages']]==[50,50,50,50,4]
 
