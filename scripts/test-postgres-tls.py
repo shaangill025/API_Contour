@@ -132,6 +132,7 @@ def main():
     if "--authority" in sys.argv or "--refresh-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_reader_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
     elif "--https-only" in sys.argv or "--delivery-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
@@ -209,7 +210,7 @@ def main():
                 time.sleep(min(0.2,max(0,deadline-time.monotonic())))
             sql = ["docker", "exec", "-i", container, "psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "contour_fixture"]
             run(sql, "CREATE ROLE contour_tls LOGIN PASSWORD '"+password+"';")
-            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls all scram-sha-256\nhostssl all all all reject\n"
+            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_catalog_reader_tls all scram-sha-256\nhostssl all all all reject\n"
             run(["docker", "exec", "-i", container, "sh", "-c", "cat > /var/lib/postgresql/data/pg_hba.conf"], hba)
             run(sql, "SELECT pg_reload_conf();")
             bindings = json.loads(run(["docker", "inspect", container]))[0]["NetworkSettings"]["Ports"]["5432/tcp"]

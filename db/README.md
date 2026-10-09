@@ -326,3 +326,39 @@ capture policy expiry, narrowing or revocation; this does not grant new capture
 permission. The future reader must also bind authenticated project/service scope:
 tenant RLS alone is not end-user authorization. No Rust worker, scheduler, catalog
 HTTP endpoint, retention or public pagination is implemented by this migration.
+
+## Internal bounded catalog reader
+
+The reader uses a separate `contour_catalog_reader` login and verified TLS.
+`CatalogReadScope` contains trusted operator tenant, project, service and operation
+UUIDs. It does not authorize end users. `read_catalog` returns internal JSON with
+the checked operation tuple and original evidence records; this is not the public
+HTTP schema. No observed counts are aggregated. Missing and wrong scope both
+return `NotFound`, and scope predicates apply before document retrieval.
+
+Pages default to 50 items and permit 1–200. UUID keyset order is variant, source,
+batch, record; repeated variant IDs do not lose evidence. A private in-memory
+cursor binds the full scope and the last emitted row. Each call uses a read-only
+repeatable-read transaction; calls do not share a snapshot, so concurrent inserts
+before a previous cursor are not promised in that traversal. No public cursor
+wire format or authentication claim is provided. Public evidence ordering by
+variant/source/window timestamps remains a separate required adapter contract;
+the internal UUID order does not implement that public ordering.
+
+The reader preflights limit+1 metadata rows, then fetches bounded documents one
+at a time. It checks operation canonical bytes and hash, shape wire/canonical/hash,
+and all record rules through the core decoder. A private one-record envelope uses
+original queued_at as created_at only for validation; this synthetic field is not
+returned. Timestamp instants enforce ordering and lifetime without discarding
+original nanosecond text or numeric offsets. Invalid evidence returns an error,
+never a partly successful page.
+
+Normalized structure wire and canonical bytes each have a 65,536-byte limit;
+operation keys have a 2,048-byte limit. Each approved-name array has a conservative
+49,537-byte JSON bound before decode. Serialized page bytes plus 512 bytes reserved
+for private cursor/metadata must fit 1 MiB. Complete non-fitting items remain for
+the next page; structures are never truncated. Bounded per-item scratch is separate
+from the page buffer. Deadline/cancellation or uncertain cleanup invalidates the
+session. Historical evidence remains readable after capture revocation. Public
+HTTP, end-user authorization, summaries, health and approved-contract stores remain
+separate work.

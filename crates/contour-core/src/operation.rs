@@ -16,6 +16,38 @@ impl fmt::Debug for OperationKey<'_> {
     }
 }
 impl<'a> OperationKey<'a> {
+    /// Checked syntax only, never workload authorization.
+    pub fn from_components(components: [&'a str; 8]) -> Result<Self, Error> {
+        if components[..4]
+            .iter()
+            .any(|value| !crate::batch::uuid(value))
+            || !crate::batch::valid_operation(
+                components[4],
+                components[5],
+                components[6],
+                components[7],
+            )
+        {
+            return Err(Error::InvalidWireJson);
+        }
+        let key = Self { components };
+        key.canonical_bytes()?;
+        Ok(key)
+    }
+    /// Decode a bounded, exact canonical tuple, including escaped control names.
+    /// The returned owned strings have passed the same operation rules as records.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<[String; 8], Error> {
+        if bytes.len() > MAX_OPERATION_BYTES {
+            return Err(Error::WireTooLarge);
+        }
+        let parts: [String; 8] =
+            serde_json::from_slice(bytes).map_err(|_| Error::InvalidWireJson)?;
+        let key = OperationKey::from_components(parts.each_ref().map(String::as_str))?;
+        if key.canonical_bytes()? != bytes {
+            return Err(Error::InvalidWireJson);
+        }
+        Ok(parts)
+    }
     pub fn components(&self) -> [&'a str; 8] {
         self.components
     }
