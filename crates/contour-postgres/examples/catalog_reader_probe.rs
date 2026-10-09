@@ -28,24 +28,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Some(args[6].parse::<u16>()?)
     };
+    let read_budget = Duration::from_millis(args[8].parse()?);
+    // Establish TLS before measuring the deliberately short lock-wait deadline.
+    let connection_budget = read_budget.max(Duration::from_secs(10));
     let settings = DatabaseSettings::new(
         "localhost",
         args[0].parse()?,
         "contour_fixture",
         "contour_catalog_reader_tls",
         env::var("CONTOUR_FIXTURE_PASSWORD")?.as_bytes(),
-        Duration::from_millis(args[8].parse()?),
+        connection_budget,
     )?;
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-        let mut connection=settings.connect(&trust).await?;
+        let mut connection=settings.connect(&trust).await.map_err(|_| {
+            eprintln!("reader TLS setup failed");
+            "reader TLS setup failed"
+        })?;
         let mut pages=Vec::new();
         let mut cursor=None;
         let mut actual="Read".to_owned();
         if args[7]=="Cancel" {
-            let mut future=Box::pin(connection.read_catalog(&scope,limit,None));
+            let mut future=Box::pin(connection.read_catalog_until(&scope,limit,None,tokio::time::Instant::now()+read_budget));
             let until=tokio::time::Instant::now()+Duration::from_millis(600);
             while tokio::time::Instant::now()<until {
-                if std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_ready())).await { return Err("cancel not pending".into()); }
+                if std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_ready())).await { eprintln!("reader cancel did not remain pending"); return Err("cancel not pending".into()); }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             drop(future);
@@ -53,7 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             actual="Invalidated".to_owned();
         } else {
             for _ in 0..100 {
-                match connection.read_catalog(&scope,limit,cursor.as_ref()).await {
+                match connection.read_catalog_until(&scope,limit,cursor.as_ref(),tokio::time::Instant::now()+read_budget).await {
                     Ok(page)=> {
                         let value:serde_json::Value=serde_json::from_slice(page.json())?;
                         pages.push(json!({"page":value,"bytes":page.json().len(),"more":page.next().is_some()}));
@@ -76,7 +82,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else { connection.health().await?;connection.close().await?; }
         tokio::task::yield_now().await;
         println!("{}",json!({"outcome":actual,"pages":pages}));io::stdout().flush()?;
-        let mut ack=String::new();if io::stdin().read_line(&mut ack)?==0 { return Err("ack missing".into()); }
+        let acknowledged=tokio::task::spawn_blocking(|| {
+            let mut ack=String::new();io::stdin().read_line(&mut ack)
+        }).await??;
+        if acknowledged==0 { return Err("ack missing".into()); }
         Ok::<(),Box<dyn std::error::Error>>(())
     })
 }
