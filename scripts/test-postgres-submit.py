@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 
 
-def run_cases(container, execute, setup, probe, port, directory, environment):
+def run_cases(container, execute, setup, probe, port, directory, environment, catalog_reader_only=False):
     execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
     sequence = itertools.count()
 
@@ -70,6 +70,10 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
             reader.join(2)
             for pipe in [process.stdin, process.stdout, process.stderr]:
                 pipe.close()
+
+    if catalog_reader_only:
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment, reader_only=True)
+        return
 
     def parallel(body, wanted='Accepted', deadline=5000, include_status=False):
         outcomes = queue.Queue()

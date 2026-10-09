@@ -399,3 +399,10 @@ from the page buffer. Deadline/cancellation or uncertain cleanup invalidates the
 session. Historical evidence remains readable after capture revocation. Public
 HTTP, end-user authorization, summaries, health and approved-contract stores remain
 separate work.
+
+The mandatory `--catalog-reader` TLS fixture submits real batches, processes them
+with the restricted worker, and reads the resulting evidence with the restricted
+reader. It tests full pages, byte-budget continuation, corrupt storage, preserved
+timestamps and names, scope concealment, denied SQL access and cancellation.
+The separate `--authority` fixture retains all submission and consumer recovery
+cases. Both checks are required.

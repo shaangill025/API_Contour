@@ -160,6 +160,7 @@ For database tests, install Docker and fetch the pinned PostgreSQL fixture:
 docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
 bash scripts/test-postgres.sh
 python3 -u scripts/test-postgres-tls.py --authority
+python3 -u scripts/test-postgres-tls.py --catalog-reader
 python3 -u scripts/test-postgres-tls.py --https-only
 python3 -u scripts/test-postgres-tls.py --delivery-only
 ```
