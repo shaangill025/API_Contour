@@ -26,9 +26,9 @@ def run_cases(container, execute, setup, probe, port, directory, environment):
         if counts != '%d|%d' % (wanted, wanted):
             raise AssertionError('inbox atomic pair count mismatch')
 
-    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False):
+    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False, compact_utf8=False):
         path = directory / ('submit-%d.json' % next(sequence))
-        path.write_text(json.dumps(body))
+        path.write_text(json.dumps(body, ensure_ascii=False, separators=(',', ':')) if compact_utf8 else json.dumps(body))
         process = subprocess.Popen([probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda: output.put(process.stdout.readline()), daemon=True)

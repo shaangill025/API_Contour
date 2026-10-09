@@ -112,6 +112,8 @@ def run_cases(container, execute, setup, submit, port, directory, environment):
     if relation[0] != rows[0]['operation_id'] or relation[1] == rows[0]['variant_id']:
         raise AssertionError('collector-scoped policy variant identity changed')
 
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog-reader.py'))['run_cases'](container, execute, setup, submit, check, port, directory, environment, body, second)
+
     candidate = accepted('parallel', 2)
     # Hold the first worker after its unique claim but before any observation can
     # finish. The second worker must wait on that transaction's claim, not arrive

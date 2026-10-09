@@ -27,6 +27,8 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
             line = output.get(timeout=30)
             if not line:
                 raise AssertionError('reader failed before result')
+            if not line.startswith('{'):
+                raise AssertionError('reader closed-enum outcome mismatch: '+line.strip())
             result = json.loads(line)
             until = time.monotonic()+5
             while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_catalog_reader_tls';") != '0':

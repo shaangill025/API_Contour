@@ -70,7 +70,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let wanted=if args[7]=="Cancel" { "Invalidated" } else { &args[7] };
-        if actual!=wanted { return Err("outcome mismatch".into()); }
+        if actual!=wanted { println!("{actual}");io::stdout().flush()?;return Err("outcome mismatch".into()); }
         if matches!(actual.as_str(),"Deadline"|"Invalidated") {
             if connection.health().await!=Err(TransportError::Shutdown) { return Err("failed session reused".into()); }
         } else { connection.health().await?;connection.close().await?; }

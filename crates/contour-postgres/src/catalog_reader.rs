@@ -265,7 +265,7 @@ async fn page(
             row.try_get(3).map_err(corrupt)?,
         ]);
     }
-    bytes.extend_from_slice(&suffix);
+    bytes.extend_from_slice(suffix);
     if more && last.is_none() {
         return Err(CatalogReadError::Corrupt);
     }
