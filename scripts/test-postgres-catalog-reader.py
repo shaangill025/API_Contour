@@ -213,3 +213,76 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
             thread.join(2)
             for pipe in [holder.stdin,holder.stdout,holder.stderr]: pipe.close()
     print('Restricted reader exact source evidence, scope/keyset/byte bounds, NUL/max shape, nanosecond offsets, corruption preflight, cancellation and history passed',flush=True)
+    run_mixed_evidence(execute, setup, submit, consume, read, items)
+
+
+def run_mixed_evidence(execute, setup, submit, consume, read, items):
+    body, collector, source1 = setup(
+        'mixed_catalog_evidence',
+        lambda policy: policy.update(approved_names=policy['approved_names'] + ['PATCH']),
+        current=1)
+    original = body['records'][0]
+    tenant = body['tenant_id']
+    source2 = '00000000-0000-4000-8000-00000e020002'
+    project, service, environment, deployment = [original[key] for key in
+        ['project_id', 'service_id', 'environment_id', 'deployment_id']]
+    # Every interpolated value is a synthetic fixture UUID, never user input.
+    execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); "
+            "SELECT contour.lock_collector('%s','%s'); "
+            "INSERT INTO contour.sources(tenant_id,source_id,collector_id,project_id,service_id,environment_id,deployment_id,source_nonce) "
+            "VALUES('%s','%s','%s','%s','%s','%s','%s','%s'); "
+            "INSERT INTO contour.source_authorization(tenant_id,source_id,collector_id,technique,parser_profiles) "
+            "VALUES('%s','%s','%s','runtime',ARRAY['http_json_v1']); COMMIT;" %
+            (tenant, tenant, collector, tenant, source2, collector, project, service,
+             environment, deployment, source2, tenant, source2, collector))
+    complete = dict(kind='object', fields={'id': {'kind': 'string'},
+                    'quantity': {'kind': 'integer'}}, additional=None)
+    records = [copy.deepcopy(original) for _ in range(4)]
+    for index, record in enumerate(records):
+        record.update(record_id='00000000-0000-4000-8000-%012x' % (0xe020100 + index),
+                      operation='PATCH', direction='response', status_code=200, route_uncertain=False,
+                      source_id=source1, structure=copy.deepcopy(complete),
+                      visibility='structure', completeness='complete', reasons=[],
+                      sample_numerator=1, sample_denominator=1, count=11)
+    records[1].update(source_id=source2, count=7, sample_denominator=97, reasons=['sampled'])
+    records[2].update(count=3, completeness='partial', reasons=['limit'])
+    records[2]['structure']['fields']['quantity'] = dict(kind='unknown', reason='limit')
+    records[3].update(source_id=source2, count=1, completeness='unavailable',
+                      visibility='connection', reasons=['encrypted'],
+                      structure=dict(kind='unknown', reason='encrypted'))
+    body['records'] = records
+    receipt = submit(body, status='accepted', compact_utf8=True)
+    consume(body)
+    where = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (
+        tenant, collector, body['batch_id'])
+    operation = execute('SELECT DISTINCT operation_id::text FROM contour.observation_windows WHERE ' + where + ';')
+    assert len(operation) == 36 and '\n' not in operation
+    selected = [tenant, project, service, operation]
+    before = items(read(limit=200, selected=selected))
+    expected = {record['record_id']: record for record in records}
+    assert len(before) == 4
+    actual = {item['record']['record_id']: item for item in before}
+    assert set(actual) == set(expected)
+    for record_id, record in expected.items():
+        item = actual[record_id]
+        assert item['record'] == record
+        assert item['collector_id'] == collector and item['batch_id'] == body['batch_id']
+    ordered = [actual[record['record_id']] for record in records]
+    variants = [item['variant_id'] for item in ordered]
+    assert variants[0] == variants[1] and len(set(variants)) == 3
+    assert [(item['record']['source_id'], item['record']['count']) for item in ordered] == [
+        (source1, 11), (source2, 7), (source1, 3), (source2, 1)]
+    assert ordered[2]['record']['structure']['fields']['quantity'] == dict(kind='unknown', reason='limit')
+    assert ordered[3]['record']['structure'] == dict(kind='unknown', reason='encrypted')
+    def counts():
+        return execute("SELECT (SELECT count(*) FROM contour.catalog_processed_batches WHERE %s),"
+                       "(SELECT count(*) FROM contour.observation_windows WHERE %s);" % (where, where))
+    assert counts() == '1|4'
+    assert submit(body, status='duplicate', compact_utf8=True) == receipt
+    consume(body, 'AlreadyProcessed')
+    assert counts() == '1|4'
+    assert items(read(limit=200, selected=selected)) == before
+    paged = read(limit=1, selected=selected)
+    assert [len(page['page']['items']) for page in paged['pages']] == [1, 1, 1, 1]
+    assert items(paged) == before
+    print('Mixed catalog evidence: four exact records, two sources, three variants, unchanged counts, duplicate replay and one-item pages passed', flush=True)
