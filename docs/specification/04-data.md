@@ -152,3 +152,35 @@ per-path, aggregate UTF-8 path-byte, and recursive-equality work limits. These
 fixtures do not establish support for the synthetic parser profile. The 10,000
 difference-count guard remains inspected rather than executed; the simple input
 size bound does not prove that guard unreachable.
+
+### Internal declared graph codec v1
+
+The checked declared model is a flat graph, separate from observed shapes. Node
+IDs and local definition names are preserved. Object properties have an explicit
+required boolean. Nullability is Null membership in a union, not a second flag.
+Additional properties are explicitly allowed, forbidden, or constrained by a node.
+Arrays and unions refer to node IDs. Every edge resolves. Structural edges must
+be acyclic; recursive paths use named Reference nodes and are never expanded.
+Unions contain 2–64 distinct target IDs. This is not semantic graph-isomorphism
+normalization: different IDs can describe equal shapes.
+
+Unknown reasons are unspecified, omitted and unsupported. Omitted nodes require
+removed_value; unsupported nodes require unsupported_construct. Every node has
+closed omission codes, and the document summary equals their union. Codes contain
+no values, prose or source URLs. Local names still need trusted import sanitization;
+this codec does not establish that a name is safe to publish.
+
+Input and deterministic compact UTF-8 output each have a 1 MiB bound. There are
+at most 4,096 nodes, 32,768 edges including root/definition/reference edges, 256
+properties per object, 256 definitions and 64 Unicode scalars per local name.
+Operation identity reuses the checked eight-component key and its 2,048-byte
+bound. Node/collection limits apply during decoding; the edge accumulator also
+bounds retained node edges before a new node is stored. A single bounded node
+is temporary scratch. Graph validation uses bounded iterative traversal.
+
+Serialization sorts node IDs, definition/property names by UTF-8 and union target
+IDs. Duplicate IDs/names/targets, unresolved references, unknown fields/tags and
+inconsistent omission summaries are rejected. The codec has no observed-structure
+fingerprint and makes no graph-isomorphism hash claim. It is an internal sanitized
+model, not an OpenAPI/JSON Schema importer, database migration or compatibility
+engine. Those adapters remain required work.
