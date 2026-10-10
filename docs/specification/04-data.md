@@ -104,6 +104,55 @@ inheriting ingestion or administrative access. Storage alone does not implement
 trusted processing or authenticated user queries. See `db/README.md` for the
 transaction and adapter obligations.
 
+### Bounded observed structural comparison
+
+The native `compare_observed` function compares two checked operation observations.
+The left side is the baseline; the right side is the candidate. Their full operation
+keys must match, including tenant, project, service, environment, protocol and
+request/response direction. Parser profiles and canonical versions must also match.
+This check is not user authorization. An adapter must load both observations through
+an authorized catalog scope before it calls the comparison function.
+
+A successful observed comparison is always `Inconclusive`, including equal known
+structures with no differences. Field addition, observed field absence, type changes,
+and null membership changes describe evidence. They do not establish requiredness,
+contract removal or request/response compatibility. Unknown nodes emit insufficient
+evidence, including unknown items in an empty array. Incomplete, sampled or uncertain
+observations retain an explicit evidence limitation without hiding other differences.
+Changed general unions emit an unsupported-construct result; the function does not
+attempt general union subtyping. An object `additional` observation is not a declared
+additional-properties permission or prohibition.
+
+Paths address the structural model. The nonempty root is `#`. Object fields use
+`#/fields/<name>`, with `~` escaped as `~0` and `/` as `~1`; arrays use `#/items`,
+additional observed structure uses `#/additional`, and general union members use
+`#/alternatives/<normalized-index>`. Nested paths use the same segments. These are
+JSON-pointer-style model paths, not URLs or paths into captured payload values.
+Unicode and NUL remain intact in JSON strings. A field named `items`, `additional`,
+`*` or `$` stays under `fields` and cannot collide with a structural segment.
+Nullable single-base unions compare the base at the same logical path.
+
+Traversal follows normalized UTF-8 field and union order. Limits are 1,024 Unicode
+scalars per path, 10,000 differences, 1 MiB of aggregate stored path bytes, and 32,768
+traversal visits, including recursive equality checks. Each visit can inspect at
+most 64 immediate union members and bounded field names. Null-membership flags
+are unknown when a union contains unknown evidence without an observed null member.
+Primitive null-to-non-null changes retain both null-membership and type differences.
+Checked input shapes retain their existing 32-level and 65,536-byte
+canonical bounds. A limit returns an explicit error without a partial comparison.
+No truncated result can imply compatibility. The result is an in-memory native
+projection; comparison persistence, declared models and the public HTTP API remain
+separate implementation work.
+
+The mandatory `--catalog-reader` fixture runs comparison cases after reader checks.
+It submits signed-policy-admitted records, processes their accepted inbox batches,
+and reloads the records through the restricted reader before comparison. Coverage
+includes a synthetic source-authorized parser-profile mismatch and separate
+per-path, aggregate UTF-8 path-byte, and recursive-equality work limits. These
+fixtures do not establish support for the synthetic parser profile. The 10,000
+difference-count guard remains inspected rather than executed; the simple input
+size bound does not prove that guard unreachable.
+
 ### Internal declared graph codec v1
 
 The checked declared model is a flat graph, separate from observed shapes. Node
