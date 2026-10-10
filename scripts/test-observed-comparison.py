@@ -105,8 +105,9 @@ def run_cases(execute, setup, submit, consume, read, items, target):
     empty=persist('empty',dict(kind='array',items=dict(kind='unknown',reason='empty')))
     assert any(diff['path']=='#/items' and diff['kind']=='InsufficientEvidence' and diff['left_unknown']=='Empty' for diff in differences(empty,empty)), 'empty array guessed its item type'
 
-    union_a=persist('union_a',dict(kind='union',alternatives=[string,integer]))
-    union_b=persist('union_b',dict(kind='union',alternatives=[string,{'kind':'boolean'}]))
+    # Submit canonical alternative order so exact persisted-record equality holds.
+    union_a=persist('union_a',dict(kind='union',alternatives=[integer,string]))
+    union_b=persist('union_b',dict(kind='union',alternatives=[{'kind':'boolean'},string]))
     assert any(diff['kind']=='UnsupportedConstruct' for diff in differences(union_a,union_b)), 'general union relationship invented'
     assert differences(union_a,union_a)==[]
 
@@ -162,7 +163,7 @@ def run_cases(execute, setup, submit, consume, read, items, target):
     # as the final diff walk. The shape stays within the existing wire/depth caps.
     work_shape=object_shape({'g%d' % group:object_shape({'f%03d' % index:{'kind':'null'} for index in range(200)}) for group in range(12)})
     for _ in range(14):
-        work_shape=dict(kind='union',alternatives=[string,object_shape({'n':work_shape})])
+        work_shape=dict(kind='union',alternatives=[object_shape({'n':work_shape}),string])
     assert len(json.dumps(work_shape,ensure_ascii=False,separators=(',',':')).encode()) <= 65536
     bounded_work=persist('work_limit',work_shape)
     assert compare(bounded_work,bounded_work)==dict(error='WorkLimit'), 'recursive union equality bypassed the work budget'
