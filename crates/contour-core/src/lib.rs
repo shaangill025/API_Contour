@@ -5,6 +5,12 @@ mod admission;
 pub use admission::{AdmissionError, AdmissionInputs, SourceAssignment, validate_admission};
 mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
+mod comparison;
+pub use comparison::{
+    ComparisonError, MAX_COMPARISON_DIFFERENCES, MAX_COMPARISON_PATH_BYTES,
+    MAX_COMPARISON_PATH_SCALARS, MAX_COMPARISON_VISITS, ObservedComparison, ObservedCompatibility,
+    ObservedDifference, ObservedDifferenceKind, compare_observed,
+};
 mod extract;
 mod operation;
 pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};

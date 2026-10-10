@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import queue
 import re
+import runpy
 import subprocess
 import threading
 import time
@@ -213,6 +214,7 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
             thread.join(2)
             for pipe in [holder.stdin,holder.stdout,holder.stderr]: pipe.close()
     print('Restricted reader exact source evidence, scope/keyset/byte bounds, NUL/max shape, nanosecond offsets, corruption preflight, cancellation and history passed',flush=True)
+    runpy.run_path(str(ROOT / 'scripts/test-observed-comparison.py'))['run_cases'](execute, setup, submit, consume, read, items, target)
     run_mixed_evidence(execute, setup, submit, consume, read, items)
 
 

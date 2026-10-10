@@ -137,6 +137,7 @@ def main():
     elif "--catalog-reader" in sys.argv:
         for example in ["submit_probe", "catalog_probe", "catalog_reader_probe"]:
             run(["cargo", "build", "-p", "contour-postgres", "--example", example, "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-core", "--example", "comparison_probe", "--locked", "--offline"], timeout=180)
     elif "--https-only" in sys.argv or "--delivery-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
     if "--https-only" in sys.argv:
