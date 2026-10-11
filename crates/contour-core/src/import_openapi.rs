@@ -135,7 +135,7 @@ impl<'a> Builder<'a> {
         self.pending.push((name, generated.clone()));
         Ok(generated)
     }
-    fn flags(&mut self, mut value: &Value) -> Result<(bool, bool), ImportError> {
+    fn flags(&mut self, mut value: &'a Value) -> Result<(bool, bool), ImportError> {
         let mut seen = BTreeSet::new();
         loop {
             if self.visits == 32768 {
@@ -156,7 +156,7 @@ impl<'a> Builder<'a> {
             value = self.target(&name)?;
         }
     }
-    fn schema(&mut self, value: &Value, depth: usize) -> Result<u32, ImportError> {
+    fn schema(&mut self, value: &'a Value, depth: usize) -> Result<u32, ImportError> {
         if depth > 64 || self.visits == 32768 {
             return Err(ImportError::Graph);
         }
@@ -229,13 +229,8 @@ impl<'a> Builder<'a> {
                     }
                 }
                 Some("object") => {
-                    let empty = Object::new();
-                    let props = o
-                        .get("properties")
-                        .map(object)
-                        .transpose()?
-                        .unwrap_or(&empty);
-                    if props.len() > 256 {
+                    let props = o.get("properties").map(object).transpose()?;
+                    if props.map_or(0, Object::len) > 256 {
                         return Err(ImportError::Graph);
                     }
                     let mut required = BTreeSet::new();
@@ -246,13 +241,15 @@ impl<'a> Builder<'a> {
                         }
                         for name in list {
                             let name = name.as_str().ok_or(ImportError::Invalid)?;
-                            if !props.contains_key(name) || !required.insert(name) {
+                            if !props.is_some_and(|props| props.contains_key(name))
+                                || !required.insert(name)
+                            {
                                 return Err(ImportError::Invalid);
                             }
                         }
                     }
                     let mut properties = Vec::new();
-                    for (name, schema) in props {
+                    for (name, schema) in props.into_iter().flatten() {
                         if !self.names.contains(&name.as_str()) {
                             return Err(ImportError::Name);
                         }

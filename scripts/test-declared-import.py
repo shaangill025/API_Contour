@@ -99,6 +99,9 @@ def main():
     assert len(model['definitions']) == 2
     for pointer in ('https://example.invalid/schema', 'file:///tmp/schema', '#/missing', '#/components/schemas/missing', '#/components/schemas/bad~2'):
         check(document({'$ref': pointer}), False)
+    # An external base must not be discarded even when its fragment resolves locally.
+    check(document({'$ref': 'https://example.invalid/api#/components/schemas/Known'},
+                   {'Known': {'type': 'string'}}), False, error=b'Reference')
     model, _ = check(document({'$ref': '#/components/schemas/a~1b~0c'}, {'a/b~c': {'type': 'integer'}}))
     assert any(n['kind'] == 'integer' for n in model['nodes'])
     schema = {'type': 'object', 'required': ['a'], 'properties': {'a': {'$ref': '#/components/schemas/Read', 'readOnly': False}}}
