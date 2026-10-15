@@ -12,12 +12,18 @@ pub use comparison::{
     ObservedDifference, ObservedDifferenceKind, compare_observed,
 };
 mod declared;
+mod declared_comparison;
 mod declared_wire;
 pub use declared::{
     DeclaredAdditional, DeclaredContract, DeclaredDefinition, DeclaredError, DeclaredKind,
     DeclaredNode, DeclaredProperty, DeclaredUnknown, MAX_DECLARED_BYTES, MAX_DECLARED_DEFINITIONS,
     MAX_DECLARED_EDGES, MAX_DECLARED_NODES, Omission,
 };
+pub use declared_comparison::{
+    DeclaredObservationComparison, DeclaredObservationDifference, DeclaredObservationKind,
+    compare_declared_observation,
+};
+
 mod import;
 mod import_json;
 mod import_openapi;
