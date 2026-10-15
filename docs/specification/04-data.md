@@ -184,3 +184,42 @@ inconsistent omission summaries are rejected. The codec has no observed-structur
 fingerprint and makes no graph-isomorphism hash claim. It is an internal sanitized
 model, not an OpenAPI/JSON Schema importer, database migration or compatibility
 engine. Those adapters remain required work.
+
+### Internal declared version containment
+
+`compare_declared_versions(baseline, candidate)` compares two independently checked
+flat declared graphs with the same complete eight-component operation key. Request
+compatibility means the baseline's accepted values are contained in the candidate's;
+response compatibility means the candidate's possible values are contained in the
+baseline's. Other directions return `UnsupportedDirection`. Finding labels always
+refer to baseline and candidate, including response comparisons.
+
+The supported proof covers primitives (integer is contained in number), null-only
+and simple nullable unions, arrays, object requiredness and additional properties,
+and acyclic local references. An absent explicit name inherits that object's
+additional policy. Thus an unrestricted request object narrowed to an optional
+integer property is incompatible even though the property remains optional.
+Typed findings report type, null membership, requiredness, explicit field and
+additional-policy changes, including compatible changes. Baseline/candidate labels
+include the changed requiredness, null membership or policy. Paths use `#`,
+`/fields/<JSON-Pointer-escaped-name>`, `/items`, and `/additional`, sorted by UTF-8.
+IDs and definition names do not establish equality across versions.
+
+Normalization scans both entire graphs, including unreachable nodes. Any unknown,
+omission, general union or recursive obligation yields `Inconclusive`, even for
+identical graphs. Known changes elsewhere are retained, while unsupported evidence
+dominates the overall compatibility verdict. Otherwise any
+proven containment failure yields `Incompatible`, and no failures yields
+`Compatible`, independently of whether structural changes were reported. These
+conclusions concern only the declared structural subset.
+
+Traversal is iterative. Active resolved pairs stop recursive comparison without
+deduplicating findings at independent reference paths. Each normalized node/edge,
+union-resolution scan, merged
+property and queued comparison obligation consumes the shared 32,768-visit budget.
+Results allow at most 10,000 findings, 1,024 Unicode scalars per path and 1 MiB total
+finding-path UTF-8 bytes. Pending paths have a separate 1 MiB allocation bound.
+Limit errors return no partial result. Checked local names still require authorized
+sanitization before publication. The internal function supplies no persistence,
+approved-baseline association, public comparison API or operation-set removal
+analysis; those remain required work for the complete comparison feature.
