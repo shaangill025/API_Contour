@@ -13,6 +13,8 @@ pub use comparison::{
 };
 mod declared;
 mod declared_versions;
+
+mod declared_comparison;
 mod declared_wire;
 pub use declared::{
     DeclaredAdditional, DeclaredContract, DeclaredDefinition, DeclaredError, DeclaredKind,
@@ -24,6 +26,16 @@ pub use declared_versions::{
     DeclaredVersionDifference, DeclaredVersionDifferenceKind, DeclaredVersionError,
     compare_declared_versions,
 };
+
+pub use declared_comparison::{
+    DeclaredObservationComparison, DeclaredObservationDifference, DeclaredObservationKind,
+    compare_declared_observation,
+};
+
+mod import;
+mod import_json;
+mod import_openapi;
+pub use import::{ImportError, ImportSelection, MAX_IMPORT_BYTES, import_declared};
 mod extract;
 mod operation;
 pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};

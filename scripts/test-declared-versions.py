@@ -235,6 +235,33 @@ def main():
     pair(nullable,primitive('integer'),'Incompatible','Compatible')
     nullable['nodes'] += [node(4,'union',alternatives=[3,5]),node(5,'null')];nullable['root']=4
     pair(nullable,primitive('integer',True),'Compatible','Compatible')
+    # Actual import output is independently reloaded before comparison.
+    subprocess.run(['cargo','build','-p','contour-core','--example','import_probe','--locked','--offline'],cwd=ROOT,check=True,capture_output=True,timeout=180)
+    importer=Path(metadata['target_directory'])/'debug/examples/import_probe'
+    def imported(schema,direction):
+        body={'content':{'application/json':{'schema':schema}}}
+        source={'openapi':'3.0.3','paths':{'/source':{'post':{'requestBody':body,'responses':{'200':body}}}}}
+        r=subprocess.run([str(importer),'openapi_json',direction,'POST','/source','application/json','-' if direction=='request' else '200','x'],input=json.dumps(source).encode(),capture_output=True,timeout=5)
+        assert r.returncode==0 and not r.stderr, 'import integration rejected fixture'
+        return json.loads(r.stdout)
+    def import_change(a,b,expected,change,direction):
+        out=check(a,b,expected,direction=direction)
+        assert any(d['kind']==change for d in out['differences']), 'imported structural change absent'
+    for direction in ['request','response']:
+        integer=imported({'type':'integer'},direction)
+        number=imported({'type':'number'},direction)
+        import_change(integer,number,'Compatible' if direction=='request' else 'Incompatible','TypeChanged',direction)
+        optional=imported({'type':'object','properties':{'x':{'type':'integer'}},'additionalProperties':False},direction)
+        required=imported({'type':'object','properties':{'x':{'type':'integer'}},'required':['x'],'additionalProperties':False},direction)
+        import_change(optional,required,'Incompatible' if direction=='request' else 'Compatible','RequirednessChanged',direction)
+        nullable=imported({'type':'integer','nullable':True},direction)
+        import_change(integer,nullable,'Compatible' if direction=='request' else 'Incompatible','NullMembershipChanged',direction)
+        allowed=imported({'type':'object','additionalProperties':True},direction)
+        typed=imported({'type':'object','properties':{'x':{'type':'integer'}},'additionalProperties':True},direction)
+        import_change(allowed,typed,'Incompatible' if direction=='request' else 'Compatible','FieldAdded',direction)
+    for direction in ['request','response']:
+        omitted=imported({'type':'integer','enum':[1,2]},direction)
+        check(omitted,imported({'type':'number'},direction),'Inconclusive',direction=direction)
     check(primitive('integer'),primitive('integer'))
     print('Declared version containment executable: %d cases passed; internal evidence only'%count)
 

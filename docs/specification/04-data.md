@@ -141,8 +141,8 @@ Primitive null-to-non-null changes retain both null-membership and type differen
 Checked input shapes retain their existing 32-level and 65,536-byte
 canonical bounds. A limit returns an explicit error without a partial comparison.
 No truncated result can imply compatibility. The result is an in-memory native
-projection; comparison persistence, declared models and the public HTTP API remain
-separate implementation work.
+projection. Declared contracts use the separate graph model below. Comparison
+persistence and the public HTTP API remain separate implementation work.
 
 The mandatory `--catalog-reader` fixture runs comparison cases after reader checks.
 It submits signed-policy-admitted records, processes their accepted inbox batches,
@@ -223,3 +223,72 @@ Limit errors return no partial result. Checked local names still require authori
 sanitization before publication. The internal function supplies no persistence,
 approved-baseline association, public comparison API or operation-set removal
 analysis; those remain required work for the complete comparison feature.
+
+### Internal declared-versus-observed comparison
+
+`compare_declared_observation` compares a checked declared graph with one checked
+operation observation. Callers must authorize both inputs. The complete operation
+key, including environment and request/response direction, must match. Every
+successful result is `Inconclusive`; matching evidence does not prove compliance.
+This slice does not compare two declared versions or expose a public endpoint.
+
+Typed findings distinguish type mismatch, null not declared, required field not
+observed, undeclared named field observed, insufficient evidence and unsupported
+constructs. Required field absence never means contract removal or changed
+requiredness. Optional field absence produces no finding. Integer evidence fits
+a declared number; number evidence does not establish an integer. Only simple
+nullable unions are aligned. Other unions remain explicitly unsupported.
+
+Declared additional-property rules apply to extra observed names. Unnamed observed
+additional-member evidence cannot identify the declared property it represents;
+it remains insufficient evidence for all three declared additional policies.
+Unknown nodes preserve typed reasons. Sampling, partial or unavailable capture,
+route uncertainty and declared omissions remain explicit even when known fields
+also produce findings. Unknown nodes are never treated as unconstrained matches.
+
+Named references resolve iteratively with a local cycle set. Productive recursion
+follows the bounded observed tree; reference-only cycles remain inconclusive.
+Repeated references at different paths are compared separately. All reference
+and comparison traversal consumes the 32,768-step work budget. Existing limits
+of 1,024 path scalars, 1 MiB aggregate result-path bytes and 10,000 findings apply.
+Limit errors return no partial result. Debug output does not expose field names.
+
+The catalog integration fixture uses accepted batches, PostgreSQL processing and
+the restricted reader to obtain observations, then reloads the declared graph
+through its checked codec. It checks absence, uncertainty, nulls, additional
+properties, recursion, scope, escaped paths and result/work limits. These fixtures
+require execution before verification can be claimed.
+
+### Internal selected OpenAPI body import
+
+The internal `import_declared` function accepts a trusted checked operation,
+explicit source path, media type, request or exact response selector, and approved
+property names. It implements selected OpenAPI 3.0.3 JSON schema bodies. Other
+formats and versions fail with a closed error. This is not the public import API,
+source persistence, YAML support, or a compatibility verdict.
+
+The transient JSON parser rejects duplicate keys and limits input to 5 MiB,
+container/value depth to 64, and keys plus values to 65,536. Decoded strings share
+a 5 MiB budget. Import traversal has 32,768 visits. Existing declared graph,
+name, edge and encoded-output bounds apply independently. Only approved property
+names, generated definition names, and the trusted operation enter the result.
+Diagnostics contain closed error tags.
+
+Explicit scalar, object and array types retain structural meaning. Object
+requiredness is separate from explicit nullable unions. Missing additional
+properties means allowed. Read-only and write-only flags adjust requiredness by
+body direction and carry an unsupported-semantics omission; both true is invalid.
+Source values, descriptions, examples, constraints and extensions are removed
+with closed omissions. Unsupported compositions remain opaque unknown nodes;
+references inside these omitted compositions are not resolved or fetched.
+References in supported schema positions must use valid local component-schema
+pointers. Missing, external and file references fail. Local cycles use generated
+named references without expansion. Reference siblings do not override targets.
+Unsupported wrapper references fail. The checked output is encoded and reloaded
+through the declared codec before return. No source reference is fetched.
+
+The executable importer fixture feeds actual import output into a separate
+checked-model process. It covers selectors, omissions, directional requiredness,
+nullable types, cyclic references, duplicate keys, approved names and allocation
+bounds. It is part of the native integration command; execution evidence is
+required before this slice can be treated as verified.
