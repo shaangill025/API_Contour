@@ -212,3 +212,47 @@ SELECT fixture.expect_state('DELETE FROM contour.catalog_processed_batches','235
 SQL
 python3 "$root/scripts/test-catalog-concurrency.py" "$container_id"
 echo 'PostgreSQL catalog storage fixture passed'
+admin_sql < "$root/db/provision_declared.sql"
+# As with catalog storage, owner membership is sufficient; no BYPASSRLS needed.
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0005_declared.sql" | docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture; then
+    echo 'Injected declared migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.declared_versions') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=5)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polrelid='contour.operations'::regclass
+        AND polname IN ('declared_operation_read','declared_operation_insert'))
+    AND NOT has_table_privilege('contour_declared_writer','contour.operations','SELECT,INSERT')
+    AND NOT has_table_privilege('contour_declared_reader','contour.operations','SELECT')
+    AND NOT has_schema_privilege('contour_declared_writer','contour','USAGE')
+    AND NOT has_schema_privilege('contour_declared_reader','contour','USAGE')
+    AND NOT has_function_privilege('contour_declared_writer','contour.tenant_context()','EXECUTE')
+    AND NOT has_function_privilege('contour_declared_reader','contour.tenant_context()','EXECUTE'),
+    'declared upgrade rolls back DDL policies grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0005_declared.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5]::integer[], 'five migration ledger entries');
+CREATE ROLE contour_declared_writer_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_declared_reader_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_declared_writer TO contour_declared_writer_test;
+GRANT contour_declared_reader TO contour_declared_reader_test;
+GRANT USAGE ON SCHEMA fixture TO contour_declared_writer_test, contour_declared_reader_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_declared_writer_test, contour_declared_reader_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_declared_writer_test -d contour_fixture < "$root/db/tests/declared.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.declared_versions SET declared_wire=declared_wire','23514');
+SELECT fixture.expect_state('DELETE FROM contour.declared_versions','23514');
+SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM contour.observation_windows
+    WHERE operation_id='00000000-0000-0000-0000-000000000051')
+    AND NOT EXISTS(SELECT 1 FROM contour.variants
+        WHERE operation_id='00000000-0000-0000-0000-000000000051'), 'declared operation needs no observed traffic');
+SQL
+echo 'PostgreSQL declared storage fixture passed'
