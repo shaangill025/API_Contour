@@ -224,6 +224,24 @@ sanitization before publication. The internal function supplies no persistence,
 approved-baseline association, public comparison API or operation-set removal
 analysis; those remain required work for the complete comparison feature.
 
+### Internal declared-version storage
+
+Migration 5 adds `declared_versions`, keyed by `(tenant_id, version_id UUID)` and
+bound to the exact operation/project/service/environment tuple by a composite
+foreign key. It stores only codec-v1 authoritative graph bytes (1–1,048,576 bytes)
+and a server creation timestamp. Immutable rows force tenant RLS. Separate
+restricted writer and reader groups can access declared versions and operation
+identity; only the writer can insert. A declared-only operation and its version
+can be inserted in one transaction before any traffic is observed. Other capture,
+ingestion and catalog roles gain no declared access.
+
+This UUID is an internal row identity, not the public Contract numeric revision.
+SQL byte bounds do not validate graph encoding, embedded operation identity or
+sanitized names. A future trusted adapter must check the codec and independent
+scope, handle exact retries/conflict reload, preflight bounded reads and own
+cancellation-safe transactions. Public revision allocation, approval associations,
+HTTP import and raw source storage are not implemented by this migration.
+
 ### Internal declared-versus-observed comparison
 
 `compare_declared_observation` compares a checked declared graph with one checked
