@@ -60,6 +60,8 @@ def main():
                      {'direction': 'response'}, {'status': '200'}, {'direction': 'response', 'status': '404'}):
         check(scalar, False, **override)
     check(scalar, direction='response', status='200')
+    for direction in ('publish', 'consume', 'operation', 'connection'):
+        check(scalar, False, direction=direction, error=b'Selection')
     for version in ('3.0.2', '3.1.0', 3):
         invalid = copy.deepcopy(scalar); invalid['openapi'] = version
         check(invalid, False)

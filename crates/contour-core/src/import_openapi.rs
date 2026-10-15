@@ -23,6 +23,7 @@ pub(crate) fn convert(
     }
     let components = operation.components();
     if components[4] != "http"
+        || !matches!(components[5], "request" | "response")
         || (components[5] == "response") != selection.response_status.is_some()
     {
         return Err(ImportError::Selection);
