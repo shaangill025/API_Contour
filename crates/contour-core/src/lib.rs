@@ -23,6 +23,11 @@ pub use declared_comparison::{
     DeclaredObservationComparison, DeclaredObservationDifference, DeclaredObservationKind,
     compare_declared_observation,
 };
+
+mod import;
+mod import_json;
+mod import_openapi;
+pub use import::{ImportError, ImportSelection, MAX_IMPORT_BYTES, import_declared};
 mod extract;
 mod operation;
 pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};
