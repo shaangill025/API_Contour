@@ -154,13 +154,14 @@ def run_cases(execute, setup, server, directory, environment, probe):
                         evidence['receipt']=value['receipt_id']
                         if mode.startswith('retry') and (mode!='retry503' or evidence['sends']==1):
                             self.send_response(int(mode[5:])); self.send_header('Retry-After','1'); self.send_header('Content-Length','0'); self.end_headers(); return
-                        if mode=='send-cancel':
-                            self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.end_headers()
-                            self.wfile.write(payload[:5]); self.wfile.flush()
-                            with control.accept()[0] as signal: signal.sendall(b'C')
-                            assert self.connection.recv(1)==b'', 'cancelled owner kept transport alive'
-                            evidence['eof']=True
-                            return
+                    if (self.path=='/v1/batches' and mode=='send-cancel') or (self.path=='/v1/collector-authority' and mode=='cancel'):
+                        self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.end_headers()
+                        self.wfile.write(payload[:5]); self.wfile.flush()
+                        with control.accept()[0] as signal: signal.sendall(b'C')
+                        assert self.connection.recv(1)==b'', 'cancelled owner kept transport alive'
+                        evidence['eof']=True
+                        evidence['eof_count']=evidence.get('eof_count',0)+1
+                        return
                     if mode in ['same-revision','rollback'] and len(challenges)==2: value['signed_policy']=evidence['changed']
                     if mode=='challenge': value['challenge']='0'*64
                     if mode=='source': value['sources'][0]['source_id']='ffffffff-ffff-ffff-ffff-ffffffffffff'
@@ -173,15 +174,18 @@ def run_cases(execute, setup, server, directory, environment, probe):
                         expiry=datetime.datetime.strptime(policy['expires_at'],'%Y-%m-%dT%H:%M:%S.%fZ')
                         value['checked_at']=(expiry-datetime.timedelta(milliseconds=50)).isoformat(timespec='microseconds')+'Z'
                         time.sleep(0.15)
-                    if mode=='cancel': time.sleep(0.3)
                     payload=json.dumps(value).encode()
                     self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.send_header('Connection','close'); self.end_headers()
-                    try: self.wfile.write(payload[:5] if mode=='truncated' else payload)
-                    except (BrokenPipeError,ConnectionResetError,ssl.SSLError):
-                        assert mode=='cancel'
+                    self.wfile.write(payload[:5] if mode=='truncated' else payload)
                 except Exception as error: errors.append(error)
                 finally: finished.set()
         service=http.server.HTTPServer(('127.0.0.1',0),Handler)
+        if mode=='cancel':
+            accept=service.get_request
+            def delayed_request():
+                time.sleep(0.2)  # Adversarial handshake scheduling exceeds the old100ms timer.
+                return accept()
+            service.get_request=delayed_request
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(directory/'server.crt',directory/'server.key')
         context.load_verify_locations(str(directory/'ca.crt')); context.verify_mode=ssl.CERT_REQUIRED; context.set_alpn_protocols(['http/1.1'])
         service.socket=context.wrap_socket(service.socket,server_side=True)
@@ -189,8 +193,8 @@ def run_cases(execute, setup, server, directory, environment, probe):
         try: yield service.server_port
         finally:
             service.shutdown(); service.server_close(); control.close(); thread.join(3)
-            assert not thread.is_alive() and not errors and finished.is_set(), 'authority fault relay failed'
-            assert len(challenges)==2, 'refresh did not obtain fresh per-request challenge'
+            assert not thread.is_alive() and not errors and finished.is_set(), 'authority fault relay failed mode=%s challenges=%d' % (mode,len(challenges))
+            assert len(challenges)==2, 'refresh did not obtain fresh per-request challenge mode=%s count=%d' % (mode,len(challenges))
 
     body,_,_=setup('owner_cancel_send',current=1,history=(1,))
     install(body,2,lambda p:p.update(denied_templates=['/orders/{id}']))
@@ -225,12 +229,16 @@ def run_cases(execute, setup, server, directory, environment, probe):
 
     for mode in ['challenge','source','identity','profiles','sources','profile-length','truncated','late','cancel']:
         body,_,_=setup('owner_'+mode,current=1,history=(1,))
-        with server(body) as upstream, relay(upstream,mode) as port, owner(body,port) as call:
-            for _ in range(2):
-                result=call('cancel-refresh' if mode=='cancel' else 'refresh')
+        evidence={}
+        with server(body) as upstream, relay(upstream,mode,evidence) as port, owner(body,port) as call:
+            for attempt in range(2):
+                result=call('cancel-refresh',control=evidence['control']) if mode=='cancel' else call('refresh')
                 if mode=='cancel': assert result['result']=={'cancelled':True} and not result['live']
                 else: denied(result)
                 denied(call('admit')); assert denied(call('send'))['bytes']==0
-                if mode=='cancel': time.sleep(0.35)
+                if mode=='cancel':
+                    until=time.monotonic()+3
+                    while evidence.get('eof_count',0)<attempt+1 and time.monotonic()<until: time.sleep(0.01)
+                    assert evidence.get('eof_count')==attempt+1, 'refresh cancellation did not close observed partial response'
         assert execute('SELECT count(*) FROM contour.ingestion_batches WHERE '+scope(body))=='0'
     print('Collector owner actual online mTLS/PG receipt, pause/renewal/narrowing/highwater and challenge/source/identity/late/cancel negatives passed',flush=True)
