@@ -97,16 +97,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     owner.refresh().await?;
                     Ok(json!({"ok":true}))
                 }
-                "cancel-refresh" => {
-                    if tokio::time::timeout(Duration::from_millis(100), owner.refresh())
-                        .await
-                        .is_ok()
-                    {
-                        return Err("refresh completed before cancellation".into());
-                    }
-                    Ok(json!({"cancelled":true}))
-                }
-                "cancel-send" => {
+                "cancel-refresh" | "cancel-send" => {
                     let mut signal = tokio::net::TcpStream::connect((
                         Ipv4Addr::LOCALHOST,
                         command["control"].as_u64().ok_or("control")? as u16,
@@ -114,17 +105,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     .await?;
                     let mut marker = [0];
                     let mut read = Box::pin(signal.read_exact(&mut marker));
-                    let mut send = Box::pin(owner.send_once());
+                    let mut operation = Box::pin(async {
+                        if action == "cancel-refresh" {
+                            owner.refresh().await
+                        } else {
+                            owner.send_once().await.map(|_| ())
+                        }
+                    });
                     poll_fn(|cx| {
-                        if send.as_mut().poll(cx).is_ready() {
+                        if operation.as_mut().poll(cx).is_ready() {
                             return std::task::Poll::Ready(Err(io::Error::other(
-                                "send completed before cancellation",
+                                "operation completed before cancellation",
                             )));
                         }
                         read.as_mut().poll(cx).map(|r| r.map(|_| ()))
                     })
                     .await?;
-                    drop(send);
+                    drop(read);
+                    if marker != [b'C'] {
+                        return Err("invalid cancellation marker".into());
+                    }
+                    drop(operation);
                     Ok(json!({"cancelled":true}))
                 }
                 "wait" => Ok(
