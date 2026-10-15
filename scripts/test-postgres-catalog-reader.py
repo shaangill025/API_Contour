@@ -216,6 +216,7 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
     print('Restricted reader exact source evidence, scope/keyset/byte bounds, NUL/max shape, nanosecond offsets, corruption preflight, cancellation and history passed',flush=True)
     runpy.run_path(str(ROOT / 'scripts/test-observed-comparison.py'))['run_cases'](execute, setup, submit, consume, read, items, target)
     run_mixed_evidence(execute, setup, submit, consume, read, items)
+    runpy.run_path(str(ROOT / 'scripts/test-declared-observation.py'))['run_cases'](execute, setup, submit, consume, read, items, target)
 
 
 def run_mixed_evidence(execute, setup, submit, consume, read, items):
