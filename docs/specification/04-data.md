@@ -184,3 +184,38 @@ inconsistent omission summaries are rejected. The codec has no observed-structur
 fingerprint and makes no graph-isomorphism hash claim. It is an internal sanitized
 model, not an OpenAPI/JSON Schema importer, database migration or compatibility
 engine. Those adapters remain required work.
+
+### Internal declared-versus-observed comparison
+
+`compare_declared_observation` compares a checked declared graph with one checked
+operation observation. Callers must authorize both inputs. The complete operation
+key, including environment and request/response direction, must match. Every
+successful result is `Inconclusive`; matching evidence does not prove compliance.
+This slice does not compare two declared versions or expose a public endpoint.
+
+Typed findings distinguish type mismatch, null not declared, required field not
+observed, undeclared named field observed, insufficient evidence and unsupported
+constructs. Required field absence never means contract removal or changed
+requiredness. Optional field absence produces no finding. Integer evidence fits
+a declared number; number evidence does not establish an integer. Only simple
+nullable unions are aligned. Other unions remain explicitly unsupported.
+
+Declared additional-property rules apply to extra observed names. Unnamed observed
+additional-member evidence cannot identify the declared property it represents;
+it remains insufficient evidence for all three declared additional policies.
+Unknown nodes preserve typed reasons. Sampling, partial or unavailable capture,
+route uncertainty and declared omissions remain explicit even when known fields
+also produce findings. Unknown nodes are never treated as unconstrained matches.
+
+Named references resolve iteratively with a local cycle set. Productive recursion
+follows the bounded observed tree; reference-only cycles remain inconclusive.
+Repeated references at different paths are compared separately. All reference
+and comparison traversal consumes the 32,768-step work budget. Existing limits
+of 1,024 path scalars, 1 MiB aggregate result-path bytes and 10,000 findings apply.
+Limit errors return no partial result. Debug output does not expose field names.
+
+The catalog integration fixture uses accepted batches, PostgreSQL processing and
+the restricted reader to obtain observations, then reloads the declared graph
+through its checked codec. It checks absence, uncertainty, nulls, additional
+properties, recursion, scope, escaped paths and result/work limits. These fixtures
+require execution before verification can be claimed.
