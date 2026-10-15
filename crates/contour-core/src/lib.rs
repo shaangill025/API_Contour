@@ -11,6 +11,13 @@ pub use comparison::{
     MAX_COMPARISON_PATH_SCALARS, MAX_COMPARISON_VISITS, ObservedComparison, ObservedCompatibility,
     ObservedDifference, ObservedDifferenceKind, compare_observed,
 };
+mod declared;
+mod declared_wire;
+pub use declared::{
+    DeclaredAdditional, DeclaredContract, DeclaredDefinition, DeclaredError, DeclaredKind,
+    DeclaredNode, DeclaredProperty, DeclaredUnknown, MAX_DECLARED_BYTES, MAX_DECLARED_DEFINITIONS,
+    MAX_DECLARED_EDGES, MAX_DECLARED_NODES, Omission,
+};
 mod extract;
 mod operation;
 pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};
