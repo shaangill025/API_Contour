@@ -406,3 +406,43 @@ reader. It tests full pages, byte-budget continuation, corrupt storage, preserve
 timestamps and names, scope concealment, denied SQL access and cancellation.
 The separate `--authority` fixture retains all submission and consumer recovery
 cases. Both checks are required.
+
+## Internal declared-version storage
+
+Provision `provision_declared.sql` as the database administrator and apply
+`0005_declared.sql` after migration 4 using owner membership. These isolated
+non-login groups inherit no other roles: `contour_declared_writer` can read and
+insert operations and declared versions; `contour_declared_reader` can read both.
+Neither can access observed evidence, the inbox or capture authority. Existing
+roles receive no declared-version privileges. Both tables force tenant RLS;
+trusted transaction-local tenant context is necessary and is not end-user
+project/service authorization.
+
+`declared_versions` stores immutable codec-v1 bytes, bounded to 1–1,048,576 bytes,
+with an internal UUID and server creation timestamp. A composite foreign key binds
+its tenant, operation, project, service and environment together. There is no
+source-document, prose, warning projection or semantic graph hash. Bytea preserves
+NUL, controls and Unicode exactly. The UUID is not the public Contract's numeric
+revision and does not define revision ordering. Multiple distinct versions can
+reference the same operation. SQL validates byte bounds and scope, not the checked
+graph encoding or its embedded operation identity.
+
+Restricted writers must name INSERT columns, excluding `created_at`; the server
+alone supplies that timestamp. UPDATE, DELETE and TRUNCATE are not granted, and
+UPDATE/DELETE row triggers reuse the immutable-row guard. A provisioning
+administrator can still change schema or truncate tables; these roles are not a
+boundary against the database administrator.
+
+The future adapter must decode/re-encode the checked graph, bind independently
+trusted scope, derive and verify operation identity, and create a missing operation
+and its declared version in one transaction. No prior observed traffic is required.
+Retry identity, conflict reload, exact-byte verification, bounded read preflight,
+transaction cancellation and public revision policy remain adapter work. No raw
+OpenAPI document should be stored in this table.
+
+`scripts/test-postgres.sh` adds real restricted writer/reader sessions, exact byte
+round trips and bounds, mixed-scope foreign keys, context isolation, forbidden
+mutation, server timestamps and transaction rollback. The migration failure probe
+checks DDL, policies, grants and ledger rollback before a successful owner-member
+upgrade. This is SQL evidence only; it does not establish codec validation or an
+application persistence API.
