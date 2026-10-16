@@ -256,3 +256,48 @@ SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM contour.observation_windows
         WHERE operation_id='00000000-0000-0000-0000-000000000051'), 'declared operation needs no observed traffic');
 SQL
 echo 'PostgreSQL declared storage fixture passed'
+admin_sql < "$root/db/provision_approval.sql"
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0006_approval.sql" | admin_sql; then
+    echo 'Injected approval migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.approval_events') IS NULL
+    AND to_regclass('contour.approval_heads') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=6)
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='declared_approval_scope'
+        AND conrelid='contour.declared_versions'::regclass)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polname IN ('approval_declared_read','approval_operation_read'))
+    AND NOT has_schema_privilege('contour_approval_writer','contour','USAGE')
+    AND NOT has_schema_privilege('contour_approval_reader','contour','USAGE')
+    AND NOT has_table_privilege('contour_approval_writer','contour.operations','SELECT')
+    AND NOT has_column_privilege('contour_approval_writer','contour.declared_versions','version_id','SELECT'),
+    'approval migration rolls back tables constraints policies grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0006_approval.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6]::integer[], 'six migration ledger entries');
+-- A valid second operation/version makes cross-operation FK tests discriminate.
+INSERT INTO contour.declared_versions (tenant_id,version_id,operation_id,project_id,service_id,
+    environment_id,codec_version,declared_wire)
+    SELECT tenant_id,'00000000-0000-0000-0000-000000000052',operation_id,project_id,service_id,
+        environment_id,1,decode('00','hex') FROM contour.operations
+    WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000'
+        AND operation_id='00000000-0000-0000-0000-000000000002';
+CREATE ROLE contour_approval_writer_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_approval_reader_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_approval_writer TO contour_approval_writer_test;
+GRANT contour_approval_reader TO contour_approval_reader_test;
+GRANT USAGE ON SCHEMA fixture TO contour_approval_writer_test, contour_approval_reader_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_approval_writer_test, contour_approval_reader_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_approval_writer_test -d contour_fixture < "$root/db/tests/approval.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.approval_events SET actor_id=actor_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.approval_events','23514');
+SQL
+echo 'PostgreSQL approval association storage fixture passed'

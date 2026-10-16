@@ -1,0 +1,7 @@
+-- Provisioning administrator only; no inherited capture or catalog privileges.
+BEGIN;
+CREATE ROLE contour_approval_writer NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_approval_reader NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+COMMIT;
