@@ -12,6 +12,8 @@ pub use comparison::{
     ObservedDifference, ObservedDifferenceKind, compare_observed,
 };
 mod declared;
+mod declared_versions;
+
 mod declared_comparison;
 mod declared_wire;
 pub use declared::{
@@ -19,6 +21,12 @@ pub use declared::{
     DeclaredNode, DeclaredProperty, DeclaredUnknown, MAX_DECLARED_BYTES, MAX_DECLARED_DEFINITIONS,
     MAX_DECLARED_EDGES, MAX_DECLARED_NODES, Omission,
 };
+pub use declared_versions::{
+    DeclaredAdditionalPolicy, DeclaredCompatibility, DeclaredVersionComparison,
+    DeclaredVersionDifference, DeclaredVersionDifferenceKind, DeclaredVersionError,
+    compare_declared_versions,
+};
+
 pub use declared_comparison::{
     DeclaredObservationComparison, DeclaredObservationDifference, DeclaredObservationKind,
     compare_declared_observation,
