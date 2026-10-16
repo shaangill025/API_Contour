@@ -310,3 +310,20 @@ checked-model process. It covers selectors, omissions, directional requiredness,
 nullable types, cyclic references, duplicate keys, approved names and allocation
 bounds. It is part of the native integration command; execution evidence is
 required before this slice can be treated as verified.
+
+### Internal approved-association storage
+
+Migration0006 adds a tenant/operation current-association row and immutable approval
+events. Each event is its audit association: exact scoped declared version, prior
+event UUID, trusted actor UUID and server time. Complete composite foreign keys
+preserve operation/project/service/environment identity for the version, prior
+event and current head. A null head represents no approval and permits a stable
+row to be locked before the first approval. Existing roles gain no approval rights;
+separate restricted groups have forced tenant RLS and no declared payload access.
+
+Storage does not enforce the application concurrency protocol. The transaction
+adapter must lock/check the current association and commit its replacement with
+the immutable event. Public review persistence, decision authorization and
+`Review.revision` checks remain separate requirements. Internal event UUIDs are
+neither public contract revisions nor public review revisions. SQL tests verify
+storage constraints and rollback only; they do not establish AT-P02-04 completion.

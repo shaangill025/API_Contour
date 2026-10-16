@@ -446,3 +446,30 @@ mutation, server timestamps and transaction rollback. The migration failure prob
 checks DDL, policies, grants and ledger rollback before a successful owner-member
 upgrade. This is SQL evidence only; it does not establish codec validation or an
 application persistence API.
+
+## Internal approval association storage
+
+After migration0005, provision the separate `contour_approval_writer` and
+`contour_approval_reader` groups with `db/provision_approval.sql`, then apply
+`db/migrations/0006_approval.sql` as the existing provisioning principal. Grant
+only the required group to trusted service logins. Both groups use transaction-local
+`apicontour.tenant_id` and forced tenant RLS; neither inherits catalog or declared
+writer privileges. These trusted database groups do not authenticate application users.
+
+`approval_events` is immutable history and its actor audit association: each event
+records an exact scoped declared-version UUID, the expected prior event UUID,
+an operator-supplied actor UUID and a server timestamp. There is no free-form audit
+payload. `approval_heads` supplies a stable operation row, initially nullable, for
+subsequent transaction locking. Composite references prevent cross-operation or
+cross-workload version, prior-event and current-event associations. Reader and
+writer can inspect declared identity columns but cannot read graph bytes. Only the
+writer can insert events or change the head's current-event column.
+
+This migration provides storage constraints, not compare-and-swap transactions.
+A future trusted adapter must lock the head, check the expected event, and insert
+history/update the head atomically. Event UUIDs distinguish A→B→A transitions and
+support exact retry reconciliation. Public `Decision.expected_revision` remains
+`Review.revision`; these event UUIDs do not allocate public contract revisions.
+The actor field is trusted metadata here, not proof of end-user authorization.
+`db/tests/approval.sql` exercises restricted logins, scoped references, immutable
+history, server timestamps and transaction rollback through `scripts/test-postgres.sh`.
