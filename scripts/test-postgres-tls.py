@@ -135,9 +135,9 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
     elif "--catalog-reader" in sys.argv:
-        for example in ["submit_probe", "catalog_probe", "catalog_reader_probe"]:
+        for example in ["submit_probe", "catalog_probe", "catalog_reader_probe", "declared_store_probe"]:
             run(["cargo", "build", "-p", "contour-postgres", "--example", example, "--locked", "--offline"], timeout=180)
-        run(["cargo", "build", "-p", "contour-core", "--example", "comparison_probe", "--example", "declared_comparison_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-core", "--example", "comparison_probe", "--example", "declared_comparison_probe", "--example", "import_probe", "--locked", "--offline"], timeout=180)
     elif "--https-only" in sys.argv or "--delivery-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-ingress", "--example", "https_probe", "--locked", "--offline"], timeout=180)
     if "--https-only" in sys.argv:
@@ -214,7 +214,7 @@ def main():
                 time.sleep(min(0.2,max(0,deadline-time.monotonic())))
             sql = ["docker", "exec", "-i", container, "psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "contour_fixture"]
             run(sql, "CREATE ROLE contour_tls LOGIN PASSWORD '"+password+"';")
-            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_catalog_tls,contour_catalog_reader_tls all scram-sha-256\nhostssl all all all reject\n"
+            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls all scram-sha-256\nhostssl all all all reject\n"
             run(["docker", "exec", "-i", container, "sh", "-c", "cat > /var/lib/postgresql/data/pg_hba.conf"], hba)
             run(sql, "SELECT pg_reload_conf();")
             bindings = json.loads(run(["docker", "inspect", container]))[0]["NetworkSettings"]["Ports"]["5432/tcp"]
@@ -269,6 +269,7 @@ def main():
             elif "--catalog-reader" in sys.argv:
                 submit_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"submit_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,submit_probe,port,directory,environment,catalog_reader_only=True)
+                runpy.run_path(str(ROOT/"scripts/test-declared-store.py"))["run_cases"](container,sql,port,directory,environment)
             elif "--refresh-only" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,refresh_only=True)

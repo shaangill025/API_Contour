@@ -5,7 +5,7 @@ use crate::{
         CancellationGuard, begin, check_deadline, configure_tenant, database_error, empty_context,
     },
 };
-use contour_core::{Batch, OperationObservation};
+use contour_core::{Batch, OperationKey, OperationObservation};
 use std::fmt;
 use tokio::time::{Instant, timeout_at};
 use tokio_postgres::Transaction;
@@ -193,36 +193,7 @@ async fn store(
     observation: OperationObservation<'_>,
 ) -> Result<(), CatalogError> {
     let parts = observation.key.components();
-    let key = observation
-        .key
-        .canonical_bytes()
-        .map_err(|_| CatalogError::Corrupt)?;
-    let hash = observation
-        .key
-        .fingerprint()
-        .map_err(|_| CatalogError::Corrupt)?;
-    transaction.execute("INSERT INTO contour.operations(tenant_id,operation_hash,identity_version,canonical_key,project_id,service_id,environment_id) VALUES($1::text::uuid,decode($2,'hex'),1,$3,$4::text::uuid,$5::text::uuid,$6::text::uuid) ON CONFLICT DO NOTHING", &[&parts[0], &hash, &key, &parts[1], &parts[2], &parts[3]]).await.map_err(database_error)?;
-    let row = transaction.query_one("SELECT operation_id::text,canonical_key,project_id::text,service_id::text,environment_id::text FROM contour.operations WHERE tenant_id=$1::text::uuid AND identity_version=1 AND operation_hash=decode($2,'hex') AND octet_length(canonical_key) BETWEEN 1 AND 2048", &[&parts[0], &hash]).await.map_err(database_error)?;
-    if row
-        .try_get::<_, &[u8]>(1)
-        .map_err(|_| CatalogError::Corrupt)?
-        != key
-        || row
-            .try_get::<_, &str>(2)
-            .map_err(|_| CatalogError::Corrupt)?
-            != parts[1]
-        || row
-            .try_get::<_, &str>(3)
-            .map_err(|_| CatalogError::Corrupt)?
-            != parts[2]
-        || row
-            .try_get::<_, &str>(4)
-            .map_err(|_| CatalogError::Corrupt)?
-            != parts[3]
-    {
-        return Err(CatalogError::Collision);
-    }
-    let operation: &str = row.try_get(0).map_err(|_| CatalogError::Corrupt)?;
+    let operation = store_operation(transaction, observation.key).await?;
     let canonical = observation
         .structure
         .canonical_bytes()
@@ -263,4 +234,39 @@ async fn store(
         serde_json::to_vec(observation.query_parameter_names).map_err(|_| CatalogError::Corrupt)?;
     transaction.execute("INSERT INTO contour.observation_windows(tenant_id,collector_id,batch_id,record_id,operation_id,variant_id,source_id,project_id,service_id,environment_id,deployment_id,observation_count,sample_numerator,sample_denominator,visibility,completeness,reasons,route_uncertain,status_code,first_seen,last_seen,queued_at,expires_at,request_header_names,response_header_names,query_parameter_names) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::text::uuid,$12::text::numeric,$13::text::numeric,$14::text::numeric,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)", &[&parts[0], &observation.collector_id, &batch_id, &observation.record_id, &operation, &variant, &observation.source_id, &parts[1], &parts[2], &parts[3], &observation.deployment_id, &count, &numerator, &denominator, &observation.visibility, &observation.completeness, &observation.reasons, &observation.route_uncertain, &status, &observation.first_seen.as_str(), &observation.last_seen.as_str(), &observation.queued_at.as_str(), &observation.expires_at.as_str(), &request_names, &response_names, &query_names]).await.map_err(database_error)?;
     Ok(())
+}
+
+// Used by accepted observations and declared imports. Conflict reload is a separate
+// READ COMMITTED statement so a concurrently committed identity is visible.
+pub(crate) async fn store_operation(
+    transaction: &Transaction<'_>,
+    operation: OperationKey<'_>,
+) -> Result<String, CatalogError> {
+    let parts = operation.components();
+    let key = operation
+        .canonical_bytes()
+        .map_err(|_| CatalogError::Corrupt)?;
+    let hash = operation.fingerprint().map_err(|_| CatalogError::Corrupt)?;
+    transaction.execute("INSERT INTO contour.operations(tenant_id,operation_hash,identity_version,canonical_key,project_id,service_id,environment_id) VALUES($1::text::uuid,decode($2,'hex'),1,$3,$4::text::uuid,$5::text::uuid,$6::text::uuid) ON CONFLICT DO NOTHING", &[&parts[0], &hash, &key, &parts[1], &parts[2], &parts[3]]).await.map_err(database_error)?;
+    let row = transaction.query_one("SELECT operation_id::text,canonical_key,project_id::text,service_id::text,environment_id::text FROM contour.operations WHERE tenant_id=$1::text::uuid AND identity_version=1 AND operation_hash=decode($2,'hex') AND octet_length(canonical_key) BETWEEN 1 AND 2048", &[&parts[0], &hash]).await.map_err(database_error)?;
+    if row
+        .try_get::<_, &[u8]>(1)
+        .map_err(|_| CatalogError::Corrupt)?
+        != key
+        || row
+            .try_get::<_, &str>(2)
+            .map_err(|_| CatalogError::Corrupt)?
+            != parts[1]
+        || row
+            .try_get::<_, &str>(3)
+            .map_err(|_| CatalogError::Corrupt)?
+            != parts[2]
+        || row
+            .try_get::<_, &str>(4)
+            .map_err(|_| CatalogError::Corrupt)?
+            != parts[3]
+    {
+        return Err(CatalogError::Collision);
+    }
+    row.try_get(0).map_err(|_| CatalogError::Corrupt)
 }

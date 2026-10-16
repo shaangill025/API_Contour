@@ -447,6 +447,37 @@ checks DDL, policies, grants and ledger rollback before a successful owner-membe
 upgrade. This is SQL evidence only; it does not establish codec validation or an
 application persistence API.
 
+## Internal checked declared adapter
+
+`ConnectedDatabase::store_declared` accepts a checked sanitized graph, stable
+caller version UUID and independently supplied `DeclaredScope` (tenant, project,
+service, environment). The graph's scope must match before database work. Use a
+separately provisioned `contour_declared_writer` login. Operation identity insert
+and exact conflict reload reuse the catalog consumer helper; a new operation and
+version commit together with `synchronous_commit=on`. A conflicting insert is
+followed by a separate READ COMMITTED SELECT, so concurrent retries inspect the
+committed winner. Exact retries return `Duplicate` with the original UUID and
+server creation microseconds; changed content or scope conflicts without changes.
+
+`read_declared` uses a separate `contour_declared_reader` login and read-only
+transaction. Missing and wrong scope return `NotFound`. Both reads and retries
+preflight codec and byte lengths before fetching graph/key bytes, independently
+reload the checked codec, require deterministic wire bytes, and verify embedded
+operation scope, canonical key and fingerprint. The returned checked graph is an
+internal model. No public contract revision, approval or HTTP policy is invented.
+
+Both paths use the established absolute deadline, tenant context, rollback checks
+and cancellation guard. Dropped futures and uncertain cleanup invalidate the
+connection. `OutcomeUnknown` means retry the original UUID and content on a new
+connection. A confirmed COMMIT returns `Stored` even if subsequent cleanup fails;
+the connection is then unusable. Successful reads and exact retries roll back.
+The mandatory catalog-reader TLS fixture also exercises actual import, fresh
+restricted reload, concurrent retries, scoped conflict rollback, privileged stored
+corruption, metadata preflight, real lock-wait cancellation while the runtime
+remains alive, and server COMMIT acknowledgement loss/cleanup faults. It does not
+establish production deployment, public user authorization or PostgreSQL power-loss
+recovery for declared versions.
+
 ## Internal approval association storage
 
 After migration0005, provision the separate `contour_approval_writer` and
