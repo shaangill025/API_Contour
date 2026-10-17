@@ -33,6 +33,18 @@ fn run() -> Result<serde_json::Value, String> {
     };
     let result = compare_declared_versions(&decode(pair[0].get())?, &decode(pair[1].get())?)
         .map_err(|e| e.to_string())?;
+    // Large valid comparisons can exceed the storage codec's separate byte cap.
+    match result.to_wire_json() {
+        Ok(wire) => {
+            let reloaded = contour_core::DeclaredVersionComparison::from_wire_json(&wire)
+                .map_err(|e| e.to_string())?;
+            if result != reloaded || reloaded.to_wire_json().map_err(|e| e.to_string())? != wire {
+                return Err("Reload".into());
+            }
+        }
+        Err(contour_core::DeclaredComparisonCodecError::Size) => (),
+        Err(error) => return Err(error.to_string()),
+    }
     Ok(
         serde_json::json!({"compatibility":format!("{:?}",result.compatibility()),"differences":result.differences().iter().map(|d|serde_json::json!({
         "path":d.path,"kind":format!("{:?}",d.kind),

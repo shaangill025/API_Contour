@@ -25,6 +25,7 @@ def command(argv, data=None, timeout=30):
 def main():
     runpy.run_path(str(ROOT / "scripts/test-declared-model.py"))["main"]()
     runpy.run_path(str(ROOT / "scripts/test-declared-versions.py"))["main"]()
+    runpy.run_path(str(ROOT / "scripts/test-comparison-codec.py"))["main"]()
 
     runpy.run_path(str(ROOT / "scripts/test-declared-import.py"))["main"]()
     started = datetime.now(timezone.utc).isoformat()

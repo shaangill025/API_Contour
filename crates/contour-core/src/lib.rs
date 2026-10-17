@@ -22,9 +22,9 @@ pub use declared::{
     MAX_DECLARED_EDGES, MAX_DECLARED_NODES, Omission,
 };
 pub use declared_versions::{
-    DeclaredAdditionalPolicy, DeclaredCompatibility, DeclaredVersionComparison,
-    DeclaredVersionDifference, DeclaredVersionDifferenceKind, DeclaredVersionError,
-    compare_declared_versions,
+    DeclaredAdditionalPolicy, DeclaredComparisonCodecError, DeclaredCompatibility,
+    DeclaredVersionComparison, DeclaredVersionDifference, DeclaredVersionDifferenceKind,
+    DeclaredVersionError, MAX_DECLARED_COMPARISON_BYTES, compare_declared_versions,
 };
 
 pub use declared_comparison::{
