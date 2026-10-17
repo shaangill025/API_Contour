@@ -563,3 +563,27 @@ The SQL fixture covers real restricted sessions, original approval-event reload
 after head advancement, ordered inputs, exact control/Unicode bytes, bounds, scoped
 references and immutable privileges. Migration failure rolls back constraints,
 policies, grants, tables and ledger. Transaction rollback removes inserted results.
+
+The internal checked comparison adapter requires dedicated service logins that
+combine `contour_comparison_writer` with `contour_declared_reader`, or
+`contour_comparison_reader` with `contour_declared_reader`. This explicit role
+composition permits checked source-graph reload without granting declared writes,
+approval writes, mutable heads or capture access. The comparison groups themselves
+retain their metadata-only source grants.
+
+Callers supply a trusted scope, operation, stable comparison UUID and ordered
+version/event identities. The adapter resolves approved inputs through immutable
+events, recomputes the result and verifies canonical bytes on reload and retry.
+Retry an uncertain commit with all original identities. Missing or invalid supplied
+inputs are resolved before comparison-ID conflict checks. The public review and
+contract revision model is separate from these internal UUIDs.
+
+Migration 0008 adds immutable review requests and terminal decisions. A request
+starts at revision 1; its unique decision projects revision 2 and preserves the
+actor association. The candidate must be the comparison's right declared input;
+an expected approved baseline must be the left input's exact event. Approval
+associations also bind candidate, prior event and deciding actor. Rejection stores
+no approval event. New restricted roles use forced tenant RLS; the writer's narrow
+request-column UPDATE grant permits row locking while triggers forbid mutation.
+The application must still authorize the actor and atomically lock/check the
+review and approved head before inserting a decision and replacing the baseline.
