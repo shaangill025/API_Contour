@@ -573,3 +573,15 @@ no approval event. New restricted roles use forced tenant RLS; the writer's narr
 request-column UPDATE grant permits row locking while triggers forbid mutation.
 The application must still authorize the actor and atomically lock/check the
 review and approved head before inserting a decision and replacing the baseline.
+
+The internal review adapter uses dedicated writer logins composed from
+`contour_review_writer` and `contour_approval_writer`; readers need only
+`contour_review_reader`. It checks scoped comparison metadata, without fetching or
+revalidating graph/result bytes. Trusted callers authorize actors separately.
+Create retries preserve every request identity and creator. Decision transactions
+lock the request before its stable approval head and compare both the review
+revision and expected head, including rejection. Approval creates a fresh event,
+updates the head and records the terminal decision atomically. Exact terminal
+retries return the original receipt even after later head advancement. A review
+revision is 1 pending and 2 terminal; it is neither a contract revision nor an event
+UUID. Retry uncertain commit acknowledgement with unchanged decision identities.
