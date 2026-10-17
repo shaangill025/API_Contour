@@ -13,6 +13,11 @@ pub use comparison_store::{
     ComparisonInput, ComparisonRequest, ComparisonStatus, ComparisonStoreError, ComparisonStored,
 };
 pub use declared_store::{DeclaredScope, DeclaredStatus, DeclaredStoreError, DeclaredStored};
+mod review_store;
+pub use review_store::{
+    ReviewDecisionRequest, ReviewRequest, ReviewStatus, ReviewStoreError, ReviewStoreStatus,
+    ReviewStored,
+};
 mod refresh;
 mod submit;
 mod transaction;
