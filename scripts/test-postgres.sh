@@ -426,3 +426,24 @@ SQL
 docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
     -h /var/run/postgresql -U contour_human_provisioner_test -d contour_fixture < "$root/db/tests/human.sql"
 echo 'PostgreSQL operator-provisioned human authorization metadata fixture passed'
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0010_public_contracts.sql" | admin_sql; then
+    echo 'Injected public contract migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.service_import_defaults') IS NULL
+    AND to_regclass('contour.public_declared_contracts') IS NULL
+    AND to_regclass('contour.public_declared_members') IS NULL
+    AND to_regprocedure('contour.check_public_contract_members()') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=10),
+    'public contract migration rolls back tables functions grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0010_public_contracts.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9,10]::integer[], 'ten migration ledger entries');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_declared_writer_test -d contour_fixture < "$root/db/tests/public_contracts.sql"
+echo 'PostgreSQL immutable whole-service contract membership fixture passed'
