@@ -369,3 +369,28 @@ finding order and explicit nulls; decoding constructs only a checked result.
 These checks validate representation, not correspondence to specific input graphs.
 Persistence must bind or recompute the result against its exact ordered inputs and
 evaluator version. Public per-finding assessments and reasons remain separate.
+
+The internal checked comparison adapter accepts only ordered declared-version or
+approval-event identities. It resolves exact scoped sources in one transaction,
+loads checked canonical declared graphs and evaluates them using evaluator 1.
+Read and retry validate bounded result metadata, canonical result bytes and equality
+with a fresh evaluation of those exact sources. Current approval heads are not
+consulted. Concurrent retries preserve the original server timestamp; substituted
+input kinds, events or ordering conflict even if they produce identical results.
+
+Dedicated comparison service logins also hold the existing declared-reader role.
+No comparison group gains graph access implicitly. Confirmed commits survive
+cleanup failures; uncertain acknowledgement requires the original comparison UUID
+and inputs on retry. Deadline/cancellation invalidates unfinished connections.
+Invalid input resolution may return its error before an existing-ID conflict.
+Public result projection, review revisions and authorization remain separate work.
+
+### Immutable review storage
+
+Migration 0008 retains a review request at revision 1 and an optional immutable
+terminal decision at revision 2. The request binds a scoped comparison, its right
+declared candidate and its left approved baseline event when present. A decision
+records actor and server time; approval references an event with that exact
+candidate, prior event and actor. Rejection has no approval association. These
+constraints preserve directional comparison meaning and actor history but do not
+replace the application's review/head concurrency transaction or authorization.

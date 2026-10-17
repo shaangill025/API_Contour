@@ -243,7 +243,7 @@ pub(crate) fn uuid(value: &str) -> bool {
             }
         })
 }
-async fn load(
+pub(crate) async fn load(
     transaction: &Transaction<'_>,
     scope: &DeclaredScope,
     version_id: &str,

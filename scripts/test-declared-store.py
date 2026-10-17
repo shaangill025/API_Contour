@@ -21,13 +21,22 @@ class EofRelay:
     def __init__(self, port):
         self.listener = socket.socket()
         self.listener.bind(('127.0.0.1', 0)); self.listener.listen(1)
-        self.listener.settimeout(3)
+        self.listener.settimeout(0.1)
         self.port = self.listener.getsockname()[1]
         self.eof = threading.Event(); self.stop = threading.Event()
         self.error = None; self.streams = []
         def serve():
             try:
-                front, _ = self.listener.accept(); self.streams.append(front)
+                until = time.monotonic()+3
+                while not self.stop.is_set():
+                    try:
+                        front, _ = self.listener.accept()
+                        break
+                    except socket.timeout:
+                        assert time.monotonic()<until, 'EOF relay accept deadline'
+                else:
+                    return
+                self.streams.append(front)
                 back = socket.create_connection(('127.0.0.1', port), timeout=3)
                 self.streams.append(back)
                 for stream in self.streams: stream.settimeout(3)
