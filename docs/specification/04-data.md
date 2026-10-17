@@ -369,3 +369,13 @@ finding order and explicit nulls; decoding constructs only a checked result.
 These checks validate representation, not correspondence to specific input graphs.
 Persistence must bind or recompute the result against its exact ordered inputs and
 evaluator version. Public per-finding assessments and reasons remain separate.
+
+### Immutable review storage
+
+Migration 0008 retains a review request at revision 1 and an optional immutable
+terminal decision at revision 2. The request binds a scoped comparison, its right
+declared candidate and its left approved baseline event when present. A decision
+records actor and server time; approval references an event with that exact
+candidate, prior event and actor. Rejection has no approval association. These
+constraints preserve directional comparison meaning and actor history but do not
+replace the application's review/head concurrency transaction or authorization.

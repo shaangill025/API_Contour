@@ -349,3 +349,45 @@ SELECT fixture.expect_state('UPDATE contour.comparisons SET result_wire=result_w
 SELECT fixture.expect_state('DELETE FROM contour.comparisons','23514');
 SQL
 echo 'PostgreSQL immutable comparison storage fixture passed'
+admin_sql < "$root/db/provision_review.sql"
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0008_review.sql" | admin_sql; then
+    echo 'Injected review migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.review_requests') IS NULL
+    AND to_regclass('contour.review_decisions') IS NULL
+    AND to_regprocedure('contour.check_review_request()') IS NULL
+    AND to_regprocedure('contour.check_review_decision()') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=8)
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='comparison_review_scope'
+        AND conrelid='contour.comparisons'::regclass)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polname IN ('review_comparison_read','review_approval_read'))
+    AND NOT has_schema_privilege('contour_review_writer','contour','USAGE')
+    AND NOT has_schema_privilege('contour_review_reader','contour','USAGE')
+    AND NOT has_column_privilege('contour_review_writer','contour.comparisons','comparison_id','SELECT')
+    AND NOT has_column_privilege('contour_review_writer','contour.approval_events','actor_id','SELECT'),
+    'review migration rolls back tables functions constraints policies grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0008_review.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8]::integer[], 'eight migration ledger entries');
+CREATE ROLE contour_review_writer_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_review_reader_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_review_writer TO contour_review_writer_test;
+GRANT contour_review_reader TO contour_review_reader_test;
+GRANT USAGE ON SCHEMA fixture TO contour_review_writer_test, contour_review_reader_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_review_writer_test, contour_review_reader_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_review_writer_test -d contour_fixture < "$root/db/tests/review.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.review_requests SET review_id=review_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.review_requests','23514');
+SELECT fixture.expect_state('UPDATE contour.review_decisions SET actor_id=actor_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.review_decisions','23514');
+SQL
+echo 'PostgreSQL immutable review request and decision storage fixture passed'
