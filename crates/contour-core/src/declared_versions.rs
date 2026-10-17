@@ -5,6 +5,8 @@ use crate::{
     MAX_COMPARISON_VISITS,
 };
 use std::{collections::BTreeSet, fmt};
+mod wire;
+pub use wire::{DeclaredComparisonCodecError, MAX_DECLARED_COMPARISON_BYTES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeclaredCompatibility {

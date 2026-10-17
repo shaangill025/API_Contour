@@ -351,3 +351,21 @@ semantic results; the checked adapter remains required. Observed comparisons nee
 a frozen evidence selection identity before persistence, because a variant UUID
 alone does not identify observation coverage. Public result mapping, review
 revision checks and authenticated decisions remain outside this storage slice.
+
+### Internal declared comparison result codec
+
+`DeclaredVersionComparison` has a version-1 deterministic JSON representation.
+It retains aggregate compatibility, ordered findings, and baseline/candidate typed
+metadata. Every nullable field must be present. Unknown fields, duplicate keys,
+invalid enums, malformed escaped paths, out-of-order paths, duplicate finding
+kinds at one path, and inconsistent per-kind metadata are rejected. Version uses
+existing exact unsigned numeric semantics. Normalized type and null findings
+cannot label an unknown node; a null label must include null membership.
+
+Input and encoded output each have an independent 1 MiB limit. Existing limits of
+10,000 findings, 1,024 scalars per path and 1 MiB total path bytes also apply.
+Escaping can exhaust the output limit before structural limits. Encoding preserves
+finding order and explicit nulls; decoding constructs only a checked result.
+These checks validate representation, not correspondence to specific input graphs.
+Persistence must bind or recompute the result against its exact ordered inputs and
+evaluator version. Public per-finding assessments and reasons remain separate.
