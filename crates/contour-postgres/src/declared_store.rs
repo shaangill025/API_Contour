@@ -50,7 +50,7 @@ impl From<CatalogError> for DeclaredStoreError {
 /// Independently trusted operator scope: tenant, project, service, environment.
 #[derive(Clone)]
 pub struct DeclaredScope {
-    ids: [String; 4],
+    pub(crate) ids: [String; 4],
 }
 impl DeclaredScope {
     pub fn new(ids: [&str; 4]) -> Result<Self, DeclaredStoreError> {
@@ -233,7 +233,7 @@ impl ConnectedDatabase {
         }
     }
 }
-fn uuid(value: &str) -> bool {
+pub(crate) fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
             if [8, 13, 18, 23].contains(&i) {

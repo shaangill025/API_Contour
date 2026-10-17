@@ -283,3 +283,6 @@ mod tests {
         assert_eq!(SettingsError::Password.to_string(), "Password");
     }
 }
+
+mod approval;
+pub use approval::{ApprovalError, ApprovalRequest, ApprovalStatus, ApprovalStored};

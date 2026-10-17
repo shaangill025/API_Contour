@@ -327,3 +327,12 @@ the immutable event. Public review persistence, decision authorization and
 `Review.revision` checks remain separate requirements. Internal event UUIDs are
 neither public contract revisions nor public review revisions. SQL tests verify
 storage constraints and rollback only; they do not establish AT-P02-04 completion.
+
+The internal PostgreSQL approval adapter implements head locking and expected-event
+comparison for declared versions. It preserves exact-request event retries after
+head advancement, rejects changed inputs, and atomically stores the immutable actor
+event with the new head. A server-confirmed commit remains successful after cleanup
+failure; uncertain commit acknowledgement requires exact-request reconciliation.
+Trusted actor metadata and event UUIDs do not replace public review authorization,
+`Decision.expected_revision`, or the persisted comparison/review model. Full public
+approval acceptance remains pending those components.
