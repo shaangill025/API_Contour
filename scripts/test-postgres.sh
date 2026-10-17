@@ -391,3 +391,38 @@ SELECT fixture.expect_state('UPDATE contour.review_decisions SET actor_id=actor_
 SELECT fixture.expect_state('DELETE FROM contour.review_decisions','23514');
 SQL
 echo 'PostgreSQL immutable review request and decision storage fixture passed'
+admin_sql < "$root/db/provision_human.sql"
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0009_human.sql" | admin_sql; then
+    echo 'Injected human metadata migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.human_actors') IS NULL
+    AND to_regclass('contour.human_identities') IS NULL
+    AND to_regclass('contour.human_tenant_memberships') IS NULL
+    AND to_regclass('contour.human_project_memberships') IS NULL
+    AND to_regclass('contour.human_service_roles') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=9)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polname IN
+        ('human_lookup','human_lookup_lock','human_provision'))
+    AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='human_stable_actor')
+    AND NOT has_schema_privilege('contour_human_provisioner','contour','USAGE')
+    AND NOT has_schema_privilege('contour_human_lookup','contour','USAGE'),
+    'human migration rolls back tables constraints policies triggers grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0009_human.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9]::integer[], 'nine migration ledger entries');
+CREATE ROLE contour_human_provisioner_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_human_lookup_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_human_provisioner TO contour_human_provisioner_test;
+GRANT contour_human_lookup TO contour_human_lookup_test;
+GRANT USAGE ON SCHEMA fixture TO contour_human_provisioner_test,contour_human_lookup_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text),fixture.expect_state(text,text)
+    TO contour_human_provisioner_test,contour_human_lookup_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_human_provisioner_test -d contour_fixture < "$root/db/tests/human.sql"
+echo 'PostgreSQL operator-provisioned human authorization metadata fixture passed'
