@@ -301,3 +301,51 @@ SELECT fixture.expect_state('UPDATE contour.approval_events SET actor_id=actor_i
 SELECT fixture.expect_state('DELETE FROM contour.approval_events','23514');
 SQL
 echo 'PostgreSQL approval association storage fixture passed'
+admin_sql < "$root/db/provision_comparison.sql"
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0007_comparison.sql" | admin_sql; then
+    echo 'Injected comparison migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.comparisons') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=7)
+    AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='approval_comparison_scope'
+        AND conrelid='contour.approval_events'::regclass)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polname IN ('comparison_declared_read','comparison_approval_read'))
+    AND NOT has_schema_privilege('contour_comparison_writer','contour','USAGE')
+    AND NOT has_schema_privilege('contour_comparison_reader','contour','USAGE')
+    AND NOT has_column_privilege('contour_comparison_writer','contour.declared_versions','version_id','SELECT')
+    AND NOT has_column_privilege('contour_comparison_reader','contour.approval_events','event_id','SELECT'),
+    'comparison upgrade rolls back tables constraints policies grants and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0007_comparison.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7]::integer[], 'seven migration ledger entries');
+-- Same operation, different immutable declared version and approval event.
+INSERT INTO contour.declared_versions (tenant_id,version_id,operation_id,project_id,service_id,
+    environment_id,codec_version,declared_wire)
+    SELECT tenant_id,'00000000-0000-0000-0000-000000000053',operation_id,project_id,service_id,
+        environment_id,codec_version,declared_wire FROM contour.declared_versions
+    WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000' AND version_id='00000000-0000-0000-0000-000000000051';
+INSERT INTO contour.approval_events (tenant_id,event_id,operation_id,project_id,service_id,
+    environment_id,version_id,expected_event_id,actor_id)
+    SELECT tenant_id,'00000000-0000-0000-0000-000000000063',operation_id,project_id,service_id,
+        environment_id,'00000000-0000-0000-0000-000000000053',event_id,actor_id
+    FROM contour.approval_events WHERE event_id='00000000-0000-0000-0000-000000000061';
+CREATE ROLE contour_comparison_writer_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_comparison_reader_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_comparison_writer TO contour_comparison_writer_test;
+GRANT contour_comparison_reader TO contour_comparison_reader_test;
+GRANT USAGE ON SCHEMA fixture TO contour_comparison_writer_test, contour_comparison_reader_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text), fixture.expect_state(text,text)
+    TO contour_comparison_writer_test, contour_comparison_reader_test;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_comparison_writer_test -d contour_fixture < "$root/db/tests/comparison.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.comparisons SET result_wire=result_wire','23514');
+SELECT fixture.expect_state('DELETE FROM contour.comparisons','23514');
+SQL
+echo 'PostgreSQL immutable comparison storage fixture passed'
