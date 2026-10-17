@@ -1,0 +1,10 @@
+{
+  "name": "apicontour-review-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.23.1 <23"},
+  "scripts": {"typecheck": "tsc --noEmit", "build": "node build.mjs", "test": "node --experimental-strip-types --test tests/*.test.ts"},
+  "dependencies": {"react": "19.3.1", "react-dom": "19.3.1"},
+  "devDependencies": {"@types/react": "19.3.0", "@types/react-dom": "19.3.0", "esbuild": "0.28.2", "typescript": "5.9.3"}
+}
