@@ -1,0 +1,7 @@
+-- Provisioning administrator only. Neither group inherits business/collector roles.
+BEGIN;
+CREATE ROLE contour_human_provisioner NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_human_lookup NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+COMMIT;

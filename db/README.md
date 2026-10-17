@@ -587,3 +587,21 @@ no approval event. New restricted roles use forced tenant RLS; the writer's narr
 request-column UPDATE grant permits row locking while triggers forbid mutation.
 The application must still authorize the actor and atomically lock/check the
 review and approved head before inserting a decision and replacing the baseline.
+
+Migration 0009 stores operator-provisioned human actors, exact case-sensitive
+issuer/subject identities and explicit tenant/project/service memberships. Service
+roles are closed, additive records scoped to one service and its project. All new
+records default disabled; provisioning can insert records and toggle enabled flags,
+while identity and scope keys remain fixed. Disable records instead of deleting or
+reassigning them; foreign keys do not cascade into actor history.
+
+`contour_human_lookup` is a trusted pretenant authentication metadata role, not a
+tenant-user role. Its explicit forced-RLS policies allow reading all five metadata
+tables, including disabled rows, before tenant selection. Its narrow actor-column
+UPDATE grant permits row locks; triggers reject even no-op actor updates. It cannot
+change enabled flags. `contour_human_provisioner` alone can provision and toggle
+metadata. Neither role inherits collector/business roles or receives business data
+access. No BYPASSRLS or security-definer function is introduced. Future authorization
+must check every enabled flag and exact resource scope per request and hold relevant
+locks through business commit; this migration does not implement that adapter,
+login/session handling, automatic enrollment, email identity or endpoint permissions.

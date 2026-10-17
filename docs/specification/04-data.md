@@ -394,3 +394,20 @@ records actor and server time; approval references an event with that exact
 candidate, prior event and actor. Rejection has no approval association. These
 constraints preserve directional comparison meaning and actor history but do not
 replace the application's review/head concurrency transaction or authorization.
+
+### Human authorization metadata
+
+Migration 0009 binds exact bounded issuer/subject pairs to stable human actors.
+Explicit tenant and project memberships constrain per-service role grants through
+scoped foreign keys. Grants are additive within that exact scope, with no wildcard
+or project-wide inheritance. Actors, identities, memberships and grants default
+disabled. Operator provisioning may toggle enabled flags but cannot reassign keys
+or delete history. Identity mapping uses neither email nor collector identity.
+
+The trusted pretenant lookup role intentionally reads all human authorization
+metadata under explicit forced-RLS policies; it is not a tenant-user identity or
+permission to read business records. A narrow column grant plus an unconditional
+immutable trigger permits row locking while forbidding actor changes. Provisioning
+and lookup remain separate restricted roles without BYPASSRLS or security-definer
+functions. Fresh authorization, enabled-state checks, revocation ordering, endpoint
+permissions and login/session transactions require separate application adapters.
