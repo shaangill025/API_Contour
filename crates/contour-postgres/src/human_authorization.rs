@@ -1,5 +1,23 @@
 //! Transaction-local authorization. Never expose a reusable authorization receipt.
-use crate::ServiceImportError;
+use crate::AuthorityError;
+#[derive(Clone, Copy)]
+pub(crate) enum HumanAuthorizationError {
+    Forbidden,
+    Corrupt,
+    Database,
+    Deadline,
+    Invalidated,
+}
+type Error = HumanAuthorizationError;
+impl From<AuthorityError> for Error {
+    fn from(value: AuthorityError) -> Self {
+        match value {
+            AuthorityError::Deadline => Self::Deadline,
+            AuthorityError::Invalidated => Self::Invalidated,
+            _ => Self::Database,
+        }
+    }
+}
 use crate::transaction::{clock, database_error};
 use contour_auth::VerifiedIdentity;
 use tokio_postgres::Transaction;
@@ -7,10 +25,10 @@ use tokio_postgres::Transaction;
 pub(crate) async fn check_expiry(
     tx: &Transaction<'_>,
     identity: &VerifiedIdentity,
-) -> Result<(), ServiceImportError> {
+) -> Result<(), Error> {
     let now = clock(tx).await?.unix_timestamp();
     if now < 0 || now as u64 >= identity.expires_at() {
-        return Err(ServiceImportError::Forbidden);
+        return Err(Error::Forbidden);
     }
     Ok(())
 }
@@ -23,18 +41,15 @@ pub(crate) async fn authorize(
     identity: &VerifiedIdentity,
     scope: [&str; 3],
     write: bool,
-) -> Result<(), ServiceImportError> {
+) -> Result<String, Error> {
     check_expiry(tx, identity).await?;
     let row = tx.query_opt(
         "SELECT actor_id::text,enabled FROM contour.human_identities WHERE issuer=$1 AND subject=$2 FOR SHARE",
         &[&identity.issuer(), &identity.subject()],
-    ).await.map_err(database_error)?.ok_or(ServiceImportError::Forbidden)?;
-    let actor: String = row.try_get(0).map_err(|_| ServiceImportError::Corrupt)?;
-    if !row
-        .try_get::<_, bool>(1)
-        .map_err(|_| ServiceImportError::Corrupt)?
-    {
-        return Err(ServiceImportError::Forbidden);
+    ).await.map_err(database_error)?.ok_or(Error::Forbidden)?;
+    let actor: String = row.try_get(0).map_err(|_| Error::Corrupt)?;
+    if !row.try_get::<_, bool>(1).map_err(|_| Error::Corrupt)? {
+        return Err(Error::Forbidden);
     }
     for (sql, params) in [
         (
@@ -56,12 +71,9 @@ pub(crate) async fn authorize(
             .query_opt(sql, &params)
             .await
             .map_err(database_error)?
-            .ok_or(ServiceImportError::Forbidden)?;
-        if !row
-            .try_get::<_, bool>(0)
-            .map_err(|_| ServiceImportError::Corrupt)?
-        {
-            return Err(ServiceImportError::Forbidden);
+            .ok_or(Error::Forbidden)?;
+        if !row.try_get::<_, bool>(0).map_err(|_| Error::Corrupt)? {
+            return Err(Error::Forbidden);
         }
     }
     let roles = if write {
@@ -75,13 +87,12 @@ pub(crate) async fn authorize(
     ).await.map_err(database_error)?;
     let mut enabled = false;
     for row in rows {
-        enabled |= row
-            .try_get::<_, bool>(0)
-            .map_err(|_| ServiceImportError::Corrupt)?;
+        enabled |= row.try_get::<_, bool>(0).map_err(|_| Error::Corrupt)?;
     }
     if !enabled {
-        return Err(ServiceImportError::Forbidden);
+        return Err(Error::Forbidden);
     }
     // A token can expire while any of the preceding row locks is waiting.
-    check_expiry(tx, identity).await
+    check_expiry(tx, identity).await?;
+    Ok(actor)
 }

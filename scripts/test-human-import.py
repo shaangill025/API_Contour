@@ -214,4 +214,5 @@ def run_cases(container, sql, port, directory, environment):
         assert check('Read', mode='read', number=number)['value'] == retry
         if fault == 'cleanup': assert result['value'] == retry
     wait_for("SELECT count(*) FROM pg_stat_activity WHERE usename IN ('contour_human_reader_tls','contour_human_writer_tls')", '0')
+    runpy.run_path(str(ROOT / 'scripts/test-human-review.py'))['run_cases'](execute, port, directory, environment, normal, token, holder, wait_for)
     print('Human exact identity/scope, all enabled flags, owner/viewer permissions, restricted readers, historical retry denial, concurrent reads, all revocation locks, reverse revocation, expiry after wait, cancellation EOF and COMMIT faults passed')

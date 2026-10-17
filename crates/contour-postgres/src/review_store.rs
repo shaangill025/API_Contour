@@ -12,6 +12,7 @@ use tokio_postgres::Transaction;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewStoreError {
     Scope,
+    Forbidden,
     NotFound,
     Conflict,
     Corrupt,
@@ -193,8 +194,113 @@ enum Action<'a> {
     Create(&'a ReviewRequest),
     Read,
     Decide(&'a ReviewDecisionRequest),
+    HumanCreate(&'a HumanReviewRequest),
+    HumanDecide(&'a HumanReviewDecisionRequest),
+}
+/// Human request: actor attribution comes only from locked identity metadata.
+pub struct HumanReviewRequest {
+    operation: String,
+    id: String,
+    comparison: String,
+    candidate: String,
+    expected: Option<String>,
+}
+impl HumanReviewRequest {
+    pub fn new(
+        operation: &str,
+        id: &str,
+        comparison: &str,
+        candidate: &str,
+        expected: Option<&str>,
+    ) -> Result<Self, Error> {
+        if ![operation, id, comparison, candidate].into_iter().all(uuid)
+            || expected.is_some_and(|id| !uuid(id))
+        {
+            return Err(Error::Scope);
+        }
+        Ok(Self {
+            operation: operation.into(),
+            id: id.into(),
+            comparison: comparison.into(),
+            candidate: candidate.into(),
+            expected: expected.map(str::to_owned),
+        })
+    }
+}
+pub struct HumanReviewDecisionRequest {
+    operation: String,
+    id: String,
+    revision: u64,
+    event: Option<String>,
+}
+impl HumanReviewDecisionRequest {
+    pub fn approve(operation: &str, id: &str, revision: u64, event: &str) -> Result<Self, Error> {
+        Self::new(operation, id, revision, Some(event))
+    }
+    pub fn reject(operation: &str, id: &str, revision: u64) -> Result<Self, Error> {
+        Self::new(operation, id, revision, None)
+    }
+    fn new(operation: &str, id: &str, revision: u64, event: Option<&str>) -> Result<Self, Error> {
+        if ![operation, id].into_iter().all(uuid)
+            || event.is_some_and(|id| !uuid(id))
+            || revision == 0
+        {
+            return Err(Error::Scope);
+        }
+        Ok(Self {
+            operation: operation.into(),
+            id: id.into(),
+            revision,
+            event: event.map(str::to_owned),
+        })
+    }
 }
 impl ConnectedDatabase {
+    pub async fn store_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &HumanReviewRequest,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Action::HumanCreate(request),
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
+    pub async fn read_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(scope, operation, id, Action::Read, Some(identity), deadline)
+            .await
+    }
+    pub async fn decide_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &HumanReviewDecisionRequest,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Action::HumanDecide(request),
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
     pub async fn store_review(
         &mut self,
         scope: &DeclaredScope,
@@ -209,8 +315,15 @@ impl ConnectedDatabase {
         r: &ReviewRequest,
         deadline: Instant,
     ) -> Result<ReviewStored, Error> {
-        self.review_transaction(scope, &r.operation, &r.id, Action::Create(r), deadline)
-            .await
+        self.review_transaction(
+            scope,
+            &r.operation,
+            &r.id,
+            Action::Create(r),
+            None,
+            deadline,
+        )
+        .await
     }
     pub async fn read_review(
         &mut self,
@@ -228,7 +341,7 @@ impl ConnectedDatabase {
         id: &str,
         deadline: Instant,
     ) -> Result<ReviewStored, Error> {
-        self.review_transaction(scope, operation, id, Action::Read, deadline)
+        self.review_transaction(scope, operation, id, Action::Read, None, deadline)
             .await
     }
     pub async fn decide_review(
@@ -245,8 +358,15 @@ impl ConnectedDatabase {
         r: &ReviewDecisionRequest,
         deadline: Instant,
     ) -> Result<ReviewStored, Error> {
-        self.review_transaction(scope, &r.operation, &r.id, Action::Decide(r), deadline)
-            .await
+        self.review_transaction(
+            scope,
+            &r.operation,
+            &r.id,
+            Action::Decide(r),
+            None,
+            deadline,
+        )
+        .await
     }
     async fn review_transaction(
         &mut self,
@@ -254,6 +374,7 @@ impl ConnectedDatabase {
         operation: &str,
         id: &str,
         action: Action<'_>,
+        identity: Option<&contour_auth::VerifiedIdentity>,
         deadline: Instant,
     ) -> Result<ReviewStored, Error> {
         if !uuid(operation) || !uuid(id) {
@@ -269,7 +390,7 @@ impl ConnectedDatabase {
         let mut committed = None;
         let work = async {
             let client = guard.connection.client.as_mut().ok_or(Error::Invalidated)?;
-            let tx = if matches!(action, Action::Read) {
+            let tx = if identity.is_none() && matches!(action, Action::Read) {
                 client
                     .build_transaction()
                     .read_only(true)
@@ -286,10 +407,44 @@ impl ConnectedDatabase {
                     deadline.saturating_duration_since(Instant::now()),
                 )
                 .await?;
+                let actor = if let Some(identity) = identity {
+                    Some(
+                        crate::human_authorization::authorize(
+                            &tx,
+                            identity,
+                            [&scope.ids[0], &scope.ids[1], &scope.ids[2]],
+                            !matches!(action, Action::Read),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
                 let result = match action {
                     Action::Create(r) => create(&tx, scope, r).await,
                     Action::Read => load(&tx, scope, operation, id, false).await,
                     Action::Decide(r) => decide(&tx, scope, r).await,
+                    Action::HumanCreate(r) => {
+                        let request = ReviewRequest::new(
+                            &r.operation,
+                            &r.id,
+                            &r.comparison,
+                            &r.candidate,
+                            r.expected.as_deref(),
+                            actor.as_deref().ok_or(Error::Forbidden)?,
+                        )?;
+                        create(&tx, scope, &request).await
+                    }
+                    Action::HumanDecide(r) => {
+                        let request = ReviewDecisionRequest::new(
+                            &r.operation,
+                            &r.id,
+                            r.revision,
+                            actor.as_deref().ok_or(Error::Forbidden)?,
+                            r.event.as_deref(),
+                        )?;
+                        decide(&tx, scope, &request).await
+                    }
                 }?;
                 if matches!(
                     result.status,
@@ -298,6 +453,9 @@ impl ConnectedDatabase {
                     tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                         .await
                         .map_err(database_error)?;
+                }
+                if let Some(identity) = identity {
+                    crate::human_authorization::check_expiry(&tx, identity).await?;
                 }
                 check_deadline(deadline)?;
                 Ok::<_, Error>(result)
@@ -492,4 +650,17 @@ async fn decide(
     let mut stored = load(tx, scope, &r.operation, &r.id, false).await?;
     stored.status = ReviewStoreStatus::Decided;
     Ok(stored)
+}
+
+impl From<crate::human_authorization::HumanAuthorizationError> for ReviewStoreError {
+    fn from(value: crate::human_authorization::HumanAuthorizationError) -> Self {
+        use crate::human_authorization::HumanAuthorizationError as H;
+        match value {
+            H::Forbidden => Self::Forbidden,
+            H::Corrupt => Self::Corrupt,
+            H::Database => Self::Database,
+            H::Deadline => Self::Deadline,
+            H::Invalidated => Self::Invalidated,
+        }
+    }
 }

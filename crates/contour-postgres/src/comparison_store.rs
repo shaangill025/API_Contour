@@ -14,6 +14,7 @@ use tokio_postgres::Transaction;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComparisonStoreError {
     Scope,
+    Forbidden,
     NotFound,
     Conflict,
     Corrupt,
@@ -161,6 +162,7 @@ impl ConnectedDatabase {
             &request.operation,
             &request.id,
             Some(&request.inputs),
+            None,
             deadline,
         )
         .await
@@ -182,7 +184,37 @@ impl ConnectedDatabase {
         id: &str,
         deadline: Instant,
     ) -> Result<ComparisonStored, Error> {
-        self.comparison_transaction(scope, operation, id, None, deadline)
+        self.comparison_transaction(scope, operation, id, None, None, deadline)
+            .await
+    }
+    /// Requires current service-owner access in the same transaction as evaluation and persistence.
+    pub async fn store_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &ComparisonRequest,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Some(&request.inputs),
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
+    /// Requires current viewer or service-owner access, including historical retries.
+    pub async fn read_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(scope, operation, id, None, Some(identity), deadline)
             .await
     }
     async fn comparison_transaction(
@@ -191,6 +223,7 @@ impl ConnectedDatabase {
         operation: &str,
         id: &str,
         inputs: Option<&[ComparisonInput; 2]>,
+        identity: Option<&contour_auth::VerifiedIdentity>,
         deadline: Instant,
     ) -> Result<ComparisonStored, Error> {
         if !uuid(operation) || !uuid(id) {
@@ -206,7 +239,7 @@ impl ConnectedDatabase {
         let mut committed = None;
         let work = async {
             let client = guard.connection.client.as_mut().ok_or(Error::Invalidated)?;
-            let transaction = if inputs.is_some() {
+            let transaction = if identity.is_some() || inputs.is_some() {
                 begin(client).await?
             } else {
                 client
@@ -223,12 +256,24 @@ impl ConnectedDatabase {
                     deadline.saturating_duration_since(Instant::now()),
                 )
                 .await?;
+                if let Some(identity) = identity {
+                    crate::human_authorization::authorize(
+                        &transaction,
+                        identity,
+                        [&scope.ids[0], &scope.ids[1], &scope.ids[2]],
+                        inputs.is_some(),
+                    )
+                    .await?;
+                }
                 let stored = prepare(&transaction, scope, operation, id, inputs, deadline).await?;
                 if stored.status == ComparisonStatus::Stored {
                     transaction
                         .query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                         .await
                         .map_err(database_error)?;
+                }
+                if let Some(identity) = identity {
+                    crate::human_authorization::check_expiry(&transaction, identity).await?;
                 }
                 check_deadline(deadline)?;
                 Ok::<_, Error>(stored)
@@ -425,4 +470,17 @@ async fn prepare(
         created_micros: row.try_get(9).map_err(|_| Error::Corrupt)?,
         result,
     })
+}
+
+impl From<crate::human_authorization::HumanAuthorizationError> for Error {
+    fn from(value: crate::human_authorization::HumanAuthorizationError) -> Self {
+        use crate::human_authorization::HumanAuthorizationError as H;
+        match value {
+            H::Forbidden => Self::Forbidden,
+            H::Corrupt => Self::Corrupt,
+            H::Database => Self::Database,
+            H::Deadline => Self::Deadline,
+            H::Invalidated => Self::Invalidated,
+        }
+    }
 }

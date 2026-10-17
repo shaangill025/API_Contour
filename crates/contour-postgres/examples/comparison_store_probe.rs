@@ -27,6 +27,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let read = args[12].contains("read");
     let cancel = args[12].starts_with("cancel");
     let budget = Duration::from_millis(args[14].parse()?);
+    let identity = if let Ok(path) = env::var("CONTOUR_FIXTURE_ID_TOKEN") {
+        let verifier = contour_auth::IdTokenVerifier::new(
+            "https://idp.example.test/realms/demo",
+            "apicontour",
+            include_bytes!("../../contour-auth/tests/fixtures/public-jwks.json"),
+        )?;
+        Some(
+            verifier.verify(
+                &fs::read_to_string(path)?,
+                "server-generated-one-use-nonce",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            )?,
+        )
+    } else {
+        None
+    };
     let settings = DatabaseSettings::new(
         "localhost",
         args[0].parse()?,
@@ -53,7 +71,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let mut connection=settings.connect(&trust).await?;
         let deadline=tokio::time::Instant::now()+budget;
-        let mut future:std::pin::Pin<Box<dyn Future<Output=_>>>=if read {
+        let mut future:std::pin::Pin<Box<dyn Future<Output=_>>>=if let Some(identity)=identity.as_ref() {
+            if read { Box::pin(connection.read_comparison_as_human_until(identity,&scope,&args[6],&args[7],deadline)) }
+            else { Box::pin(connection.store_comparison_as_human_until(identity,&scope,&request,deadline)) }
+        } else if read {
             Box::pin(connection.read_comparison_until(&scope,&args[6],&args[7],deadline))
         } else { Box::pin(connection.store_comparison_until(&scope,&request,deadline)) };
         let result=if cancel {

@@ -677,3 +677,16 @@ async fn load_import(
         members,
     })
 }
+
+impl From<crate::human_authorization::HumanAuthorizationError> for ServiceImportError {
+    fn from(value: crate::human_authorization::HumanAuthorizationError) -> Self {
+        use crate::human_authorization::HumanAuthorizationError as H;
+        match value {
+            H::Forbidden => Self::Forbidden,
+            H::Corrupt => Self::Corrupt,
+            H::Database => Self::Database,
+            H::Deadline => Self::Deadline,
+            H::Invalidated => Self::Invalidated,
+        }
+    }
+}

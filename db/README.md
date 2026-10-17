@@ -693,3 +693,19 @@ updates the head and records the terminal decision atomically. Exact terminal
 retries return the original receipt even after later head advancement. A review
 revision is 1 pending and 2 terminal; it is neither a contract revision nor an event
 UUID. Retry uncertain commit acknowledgement with unchanged decision identities.
+
+Human comparison and review methods take `VerifiedIdentity` and acquire the same
+current metadata locks as human imports, before reads or historical retries.
+Owner access is required for creation/decisions; owner or viewer access permits
+reads. Dedicated runtime logins combine human lookup with their existing business
+reader/writer groups and never provisioning privileges. Expiry after business work
+rolls back new comparisons, reviews and approval events.
+
+`HumanReviewRequest` and `HumanReviewDecisionRequest` have no caller-supplied actor.
+The transaction derives both creator and decision-maker from the exact locked
+identity mapping. Different authorized humans can create and decide; retries must
+match the actual recorded actor. The human TLS fixture verifies two-actor
+attribution, denial, revocation ordering, expiry rollback and direct review COMMIT
+and cancellation faults. These methods still use internal version/event identities;
+durable whole-import public comparison associations and HTTP projection remain
+necessary before exposing the complete local review workflow.
