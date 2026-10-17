@@ -504,3 +504,31 @@ support exact retry reconciliation. Public `Decision.expected_revision` remains
 The actor field is trusted metadata here, not proof of end-user authorization.
 `db/tests/approval.sql` exercises restricted logins, scoped references, immutable
 history, server timestamps and transaction rollback through `scripts/test-postgres.sh`.
+
+## Internal immutable comparison storage
+
+Provision `db/provision_comparison.sql` and apply migration 0007 after 0006 with
+owner membership. Separate comparison writer/reader groups inherit no other role.
+They have forced tenant RLS, immutable comparison rows and scoped input metadata
+access; they cannot read declared graph bytes, approval actors, mutable heads or
+capture data. Only the writer can insert, excluding the server timestamp.
+
+Each comparison retains its ordered left/right kind and exact declared version.
+An approved side additionally binds an immutable approval event to that same
+version and full operation/project/service/environment scope. Moving the current
+approval head cannot change the recorded input. Declared sides cannot carry an
+event; approved sides require one. Observed inputs are not supported by this
+storage slice: a variant alone cannot freeze sampled or changing observation
+coverage. A future observed representation must pin exact evidence references.
+
+SQL bounds opaque result bytes to 1–1,048,576 and fixes evaluator/codec versions to 1.
+It does not parse or certify comparator results. The future checked adapter must
+compute, validate, encode/reload and bind those bytes to the exact ordered input
+graphs; operation identity carries request/response direction. This internal result
+is not the public per-difference assessment/reason projection. Public comparison
+APIs, review persistence and decision authorization remain separate work.
+
+The SQL fixture covers real restricted sessions, original approval-event reload
+after head advancement, ordered inputs, exact control/Unicode bytes, bounds, scoped
+references and immutable privileges. Migration failure rolls back constraints,
+policies, grants, tables and ledger. Transaction rollback removes inserted results.

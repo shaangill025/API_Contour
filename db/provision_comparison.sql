@@ -1,0 +1,7 @@
+-- Provisioning administrator only; no inherited capture, declared or approval roles.
+BEGIN;
+CREATE ROLE contour_comparison_writer NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+CREATE ROLE contour_comparison_reader NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS
+    NOCREATEROLE NOCREATEDB NOREPLICATION;
+COMMIT;

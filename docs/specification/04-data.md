@@ -327,3 +327,18 @@ the immutable event. Public review persistence, decision authorization and
 `Review.revision` checks remain separate requirements. Internal event UUIDs are
 neither public contract revisions nor public review revisions. SQL tests verify
 storage constraints and rollback only; they do not establish AT-P02-04 completion.
+
+### Internal immutable comparison storage
+
+Migration 0007 stores ordered declared/approved input references and bounded opaque
+result bytes. Every side references an exact immutable declared version in the
+comparison's complete operation/workload scope. Approved sides also reference an
+exact event bound to that same version; current approval heads are never used for
+historical reload. Separate restricted roles force tenant RLS and cannot mutate
+history or supply creation timestamps.
+
+Result codec/evaluator versions are explicit. SQL bounds bytes but does not check
+semantic results; the checked adapter remains required. Observed comparisons need
+a frozen evidence selection identity before persistence, because a variant UUID
+alone does not identify observation coverage. Public result mapping, review
+revision checks and authenticated decisions remain outside this storage slice.
