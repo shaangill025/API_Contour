@@ -18,6 +18,11 @@ pub use declared_store::{DeclaredScope, DeclaredStatus, DeclaredStoreError, Decl
 pub use service_import_store::{
     ServiceImportError, ServiceImportScope, StoredImportMember, StoredServiceImport,
 };
+mod review_store;
+pub use review_store::{
+    ReviewDecisionRequest, ReviewRequest, ReviewStatus, ReviewStoreError, ReviewStoreStatus,
+    ReviewStored,
+};
 mod refresh;
 mod submit;
 mod transaction;

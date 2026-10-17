@@ -93,6 +93,12 @@ jobs:
           RUSTUP_TOOLCHAIN: 1.88.0
           AWS_LC_SYS_USE_SYSTEM: '0'
         run: python3 -u scripts/test-postgres-tls.py --human-import
+      - name: Test atomic review decisions through TLS and PostgreSQL
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 -u scripts/test-postgres-tls.py --review-store
       - name: Test operator-mapped HTTPS durable ingestion
         if: runner.os == 'Linux'
         timeout-minutes: 4
