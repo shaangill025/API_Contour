@@ -100,12 +100,18 @@ def run_cases(execute, setup, server, directory, environment, probe):
     def short_lease(policy):
         expiry[0]=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=3)
         policy['expires_at']=expiry[0].isoformat(timespec='microseconds').replace('+00:00','Z')
-    body,_,_=setup('owner_retained_history',current=1,history=(1,2),change=short_lease)
+    body,_,_=setup('owner_retained_history',current=1,history=(1,3))
     with server(body) as port, owner(body,port) as call:
-        good(call('refresh')); charged=good(call('admit')); good(call('freeze'))
+        # Start the unchanged three-second lease after process/TLS setup. A
+        # local command proves the owner is ready without warming its authority.
+        assert good(call('expire'))['records']==0
+        install(body,2,short_lease)
         change(body,'UPDATE contour.collector_authorization SET active_revision=2 WHERE '+scope(body))
+        good(call('refresh')); charged=good(call('admit',revision=2)); good(call('freeze'))
+        change(body,'UPDATE contour.collector_authorization SET active_revision=3 WHERE '+scope(body))
         assert good(call('refresh'))['bytes']==charged['bytes']
         time.sleep(max(0,(expiry[0]-datetime.datetime.now(datetime.timezone.utc)).total_seconds())+0.02)
+        assert datetime.datetime.now(datetime.timezone.utc)>expiry[0], 'retained policy has not expired'
         result=good(call('send')); assert result['bytes']==0 and result['acknowledged']==1
         assert execute('SELECT receipt_id FROM contour.ingestion_batches WHERE '+scope(body))==result['result']['receipt_id']
 
