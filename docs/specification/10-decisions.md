@@ -11,8 +11,20 @@ Rust backend/native core, PostgreSQL, React/TypeScript, passive collection, loca
 | D01 | Production hosting | Customer-hosted, one enterprise per installation. Supports private networks and limits service-operation scope. | Add vendor-hosted R1. Requires an additional operational and customer-isolation specification. | PENDING_OWNER |
 | D02 | Real integration resources | Customer-approved isolated test accounts and devices, supplied through existing secret management. Tests real behavior without production collection. | Dedicated new paid resources. Requires budget and account authorization. | REQUIRED_BEFORE_LIVE_TESTS |
 | D03 | Production release target | Named customer-controlled test/staging target first, followed by separately authorized production rollout. | No deployment; deliver verified packages only. | REQUIRED_BEFORE_DEPLOYMENT |
+| D04 | Public contract revision unit | One whole imported service specification per revision; operation-level graphs and comparisons reference that immutable revision. | Independent operation request/response revision streams. | APPROVED_OWNER |
+| D05 | Import environment | Resolve the configured default environment for the selected service, show the resolved environment, and reject imports when no default is configured. | Require an explicit environment in every import request. | APPROVED_OWNER |
+| D06 | MVP delivery order | Finish and verify the authenticated local Docker workflow first; defer real pilot identity-provider and deployment configuration. | Configure the real pilot before completing local verification. | APPROVED_OWNER |
 
 D01 is pending. Customer-hosted diagrams are a proposed baseline, not an accepted hosting decision. Shared extraction, schemas and local test design do not depend on this choice. SaaS-specific operations must not be silently added or declared complete.
+
+D04–D06 were approved for the MVP. A whole-specification revision groups the
+sanitized operation graphs produced by an import; raw uploaded documents and
+example values remain subject to the existing non-persistence rules. The import
+must not silently choose the first operation, response status or media type.
+The resolved environment is captured with each revision so changing a service's
+default cannot move historical versions. These decisions define implementation
+requirements; they do not claim the public mapping or Docker workflow is shipped.
+D06 does not choose production hosting or authorize external account access.
 
 ## Engineering choices
 

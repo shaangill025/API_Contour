@@ -605,3 +605,20 @@ access. No BYPASSRLS or security-definer function is introduced. Future authoriz
 must check every enabled flag and exact resource scope per request and hold relevant
 locks through business commit; this migration does not implement that adapter,
 login/session handling, automatic enrollment, email identity or endpoint permissions.
+
+Migration 0010 groups exact checked declared versions into immutable whole-service
+import revisions. An import records its resolved environment, server creation time,
+closed warning codes and expected member count. Deferred completeness checks seal
+the member set at transaction completion, preventing partial imports or later
+append. More than one graph may belong to one operation; no response status or
+media type is silently selected. Raw documents and arbitrary source selectors are
+not stored. Existing declared reader/writer roles provide tenant-scoped access.
+
+Privileged provisioning administrators configure `service_import_defaults` for
+each exact tenant/project/service. Application roles cannot configure or change
+defaults; the writer's tenant-column privilege permits row locks while a trigger
+rejects every scope update. Missing configuration is not an implicit environment.
+Changing a default cannot change an existing revision's environment. A future
+adapter must lock the default, allocate increasing service revisions, store checked
+graphs and seal membership in one transaction. SQL uniqueness is not an allocator,
+nor does this migration implement whole-document enumeration or public endpoints.
