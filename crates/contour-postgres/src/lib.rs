@@ -8,11 +8,15 @@ mod catalog;
 mod catalog_reader;
 mod comparison_store;
 mod declared_store;
+mod service_import_store;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};
 pub use comparison_store::{
     ComparisonInput, ComparisonRequest, ComparisonStatus, ComparisonStoreError, ComparisonStored,
 };
 pub use declared_store::{DeclaredScope, DeclaredStatus, DeclaredStoreError, DeclaredStored};
+pub use service_import_store::{
+    ServiceImportError, ServiceImportScope, StoredImportMember, StoredServiceImport,
+};
 mod refresh;
 mod submit;
 mod transaction;

@@ -447,3 +447,23 @@ SQL
 docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
     -h /var/run/postgresql -U contour_declared_writer_test -d contour_fixture < "$root/db/tests/public_contracts.sql"
 echo 'PostgreSQL immutable whole-service contract membership fixture passed'
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0011_import_selectors.sql" | admin_sql; then
+    echo 'Injected selector migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM information_schema.columns
+    WHERE table_schema='contour' AND column_name IN ('projection_version','body_selector','media_type'))
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=11)
+    AND position('projection_version' IN pg_get_functiondef('contour.check_public_contract_members()'::regprocedure))=0,
+    'selector migration restores columns constraints grants function and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0011_import_selectors.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9,10,11]::integer[], 'eleven migration ledger entries');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_declared_writer_test -d contour_fixture < "$root/db/tests/import_selectors.sql"
+echo 'PostgreSQL versioned whole-service import selectors fixture passed'

@@ -618,7 +618,34 @@ Privileged provisioning administrators configure `service_import_defaults` for
 each exact tenant/project/service. Application roles cannot configure or change
 defaults; the writer's tenant-column privilege permits row locks while a trigger
 rejects every scope update. Missing configuration is not an implicit environment.
-Changing a default cannot change an existing revision's environment. A future
-adapter must lock the default, allocate increasing service revisions, store checked
-graphs and seal membership in one transaction. SQL uniqueness is not an allocator,
-nor does this migration implement whole-document enumeration or public endpoints.
+Changing a default cannot change an existing revision's environment. The internal
+service import adapter locks the default, allocates increasing service revisions,
+stores checked graphs and seals membership in one transaction. SQL uniqueness alone
+is not an allocator; neither the migration nor adapter provides public endpoints.
+
+Migration 0011 adds versioned body/status/media associations. Existing manifests
+remain projection 1 with no invented selectors. Projection 2 requires a closed
+request or response selector and a bounded media label for every member; deferred
+validation forbids mixing legacy and selector-complete members. Distinct internal
+versions retain identical graphs at different selectors, while duplicate selectors
+for the same operation are rejected. Existing immutable scope and tenant protections
+remain in force. Trusted application code must independently approve media labels,
+verify selector direction against each checked graph and reject unsupported legacy
+projections when loading a selector-complete bundle.
+
+`ServiceImportScope` identifies an independently authorized tenant/project/service.
+`resolve_import_default_until` returns the scope used to build a checked import
+policy. `store_service_import_until` rechecks that environment under the default
+row lock; a changed or missing default fails without partial writes. Every member
+gets a distinct internal version UUID. A stable caller-owned contract UUID is the
+retry identity: exact historical retries return the stored result even after the
+default changes or disappears, while changed sanitized content conflicts.
+
+`read_service_import_until` supports a separate declared-reader login. It checks the
+projection, selector direction, supported protocol/method, canonical graph identity,
+membership and aggregate bounds before returning results. Payload lengths are
+checked before graph retrieval. Cancellation invalidates the connection; uncertain
+COMMIT replies return `OutcomeUnknown`, requiring the same ID and bundle on retry.
+A confirmed commit remains successful if subsequent connection cleanup fails.
+These are internal operator-scoped APIs; live human authorization and public HTTP
+integration are still required before exposing them to users.
