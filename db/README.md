@@ -563,3 +563,17 @@ The SQL fixture covers real restricted sessions, original approval-event reload
 after head advancement, ordered inputs, exact control/Unicode bytes, bounds, scoped
 references and immutable privileges. Migration failure rolls back constraints,
 policies, grants, tables and ledger. Transaction rollback removes inserted results.
+
+The internal checked comparison adapter requires dedicated service logins that
+combine `contour_comparison_writer` with `contour_declared_reader`, or
+`contour_comparison_reader` with `contour_declared_reader`. This explicit role
+composition permits checked source-graph reload without granting declared writes,
+approval writes, mutable heads or capture access. The comparison groups themselves
+retain their metadata-only source grants.
+
+Callers supply a trusted scope, operation, stable comparison UUID and ordered
+version/event identities. The adapter resolves approved inputs through immutable
+events, recomputes the result and verifies canonical bytes on reload and retry.
+Retry an uncertain commit with all original identities. Missing or invalid supplied
+inputs are resolved before comparison-ID conflict checks. The public review and
+contract revision model is separate from these internal UUIDs.
