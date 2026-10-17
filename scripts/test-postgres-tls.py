@@ -122,7 +122,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     for tool in ["docker", "openssl", "cargo"]:
         if not shutil.which(tool):
@@ -134,7 +134,7 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
-    elif "--service-import-store" in sys.argv:
+    elif "--service-import-store" in sys.argv or "--human-import" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "service_import_probe", "--example", "declared_store_probe", "--locked", "--offline"], timeout=180)
     elif "--comparison-store" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "declared_store_probe", "--example", "approval_probe", "--example", "comparison_store_probe", "--locked", "--offline"], timeout=180)
@@ -219,7 +219,7 @@ def main():
                 time.sleep(min(0.2,max(0,deadline-time.monotonic())))
             sql = ["docker", "exec", "-i", container, "psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "contour_fixture"]
             run(sql, "CREATE ROLE contour_tls LOGIN PASSWORD '"+password+"';")
-            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls,contour_approval_writer_tls,contour_comparison_writer_tls,contour_comparison_reader_tls all scram-sha-256\nhostssl all all all reject\n"
+            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_human_reader_tls,contour_human_writer_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls,contour_approval_writer_tls,contour_comparison_writer_tls,contour_comparison_reader_tls all scram-sha-256\nhostssl all all all reject\n"
             run(["docker", "exec", "-i", container, "sh", "-c", "cat > /var/lib/postgresql/data/pg_hba.conf"], hba)
             run(sql, "SELECT pg_reload_conf();")
             bindings = json.loads(run(["docker", "inspect", container]))[0]["NetworkSettings"]["Ports"]["5432/tcp"]
@@ -271,6 +271,8 @@ def main():
             if "--https-only" in sys.argv or "--delivery-only" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,https_only=True,delivery_only="--delivery-only" in sys.argv)
+            elif "--human-import" in sys.argv:
+                runpy.run_path(str(ROOT/"scripts/test-human-import.py"))["run_cases"](container,sql,port,directory,environment)
             elif "--service-import-store" in sys.argv:
                 runpy.run_path(str(ROOT/"scripts/test-service-import-store.py"))["run_cases"](container,sql,port,directory,environment)
             elif "--comparison-store" in sys.argv:

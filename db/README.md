@@ -649,3 +649,35 @@ COMMIT replies return `OutcomeUnknown`, requiring the same ID and bundle on retr
 A confirmed commit remains successful if subsequent connection cleanup fails.
 These are internal operator-scoped APIs; live human authorization and public HTTP
 integration are still required before exposing them to users.
+# Human-authorized import adapter
+
+`resolve_import_default_as_human_until`, `store_service_import_as_human_until`
+and `read_service_import_as_human_until` accept `contour_auth::VerifiedIdentity`
+from the configured verifier. The requested tenant/project/service is a candidate
+scope; no token role, email or request actor ID grants authority. Exact issuer and
+subject map to an enabled actor, tenant membership, project membership and service
+role. Import/default resolution requires `service_owner`; import reads accept
+`service_owner` or `viewer`. Other roles confer no implicit contract permission.
+All failures of current authorization return `Forbidden`, including historical
+import retries after revocation.
+
+Provision dedicated application logins with `contour_human_lookup` plus the
+specific `contour_declared_reader` or `contour_declared_writer` group. Do not grant
+lookup to shared business groups or provisioning privileges to application logins.
+Human reads use ordinary transactions so they can lock metadata, but their login
+has no business INSERT privileges. The existing operator APIs remain trusted
+application APIs: these credentials must never be distributed to human clients.
+
+Authorization takes `FOR SHARE` locks in identity, actor, tenant, project and
+service-role order, within the business transaction. Those locks conflict with
+provisioning updates to `enabled` and survive until commit/rollback. An operation
+that wins the locks may finish before revocation commits; operations following
+committed revocation fail. Expiry is checked against database time before and
+after authorization and again after business work, rolling back expired writes.
+Cancellation and ambiguous/confirmed COMMIT behavior retain the existing adapter
+semantics. The TLS fixture `--human-import` checks these properties with restricted
+logins, observed revocation races and transport faults.
+
+This is a database authorization boundary, not browser OIDC login, session, CSRF,
+logout, or authenticated HTTP routing. Those layers must verify retained identity
+credentials with current verifier configuration before using these APIs.

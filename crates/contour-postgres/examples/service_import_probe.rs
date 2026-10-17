@@ -27,11 +27,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &["application/json", "text/plain"],
     )?;
     let bundle = import_service_declared("openapi_json", &fs::read(&args[2])?, &policy)?;
+    // Optional synthetic ID token enables the human path in the owned TLS fixture.
+    let identity = if let Ok(path) = env::var("CONTOUR_FIXTURE_ID_TOKEN") {
+        let verifier = contour_auth::IdTokenVerifier::new(
+            "https://idp.example.test/realms/demo",
+            "apicontour",
+            include_bytes!("../../contour-auth/tests/fixtures/public-jwks.json"),
+        )?;
+        Some(
+            verifier.verify(
+                &fs::read_to_string(path)?,
+                "server-generated-one-use-nonce",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            )?,
+        )
+    } else {
+        None
+    };
     let settings = DatabaseSettings::new(
         "localhost",
         args[0].parse()?,
         "contour_fixture",
-        if args[8].contains("read") {
+        if identity.is_some() && args[8].contains("read") {
+            "contour_human_reader_tls"
+        } else if identity.is_some() {
+            "contour_human_writer_tls"
+        } else if args[8].contains("read") {
             "contour_declared_reader_tls"
         } else {
             "contour_declared_writer_tls"
@@ -43,11 +66,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut connection=settings.connect(&trust).await?;
         let deadline=tokio::time::Instant::now()+Duration::from_millis(args[9].parse()?);
         let (outcome,value)=if args[8]=="resolve" {
-            match connection.resolve_import_default_until(&scope,deadline).await {
+            match if let Some(identity)=identity.as_ref() {connection.resolve_import_default_as_human_until(identity,&scope,deadline).await} else {connection.resolve_import_default_until(&scope,deadline).await} {
                 Ok(scope)=>("Resolved".to_owned(),json!(scope)),Err(e)=>(e.to_string(),json!(null))
             }
         } else {
-            let mut future:std::pin::Pin<Box<dyn std::future::Future<Output=_>>>=if args[8].contains("read") {
+            let mut future:std::pin::Pin<Box<dyn std::future::Future<Output=_>>>=if let Some(identity)=identity.as_ref() {
+                if args[8].contains("read") {
+                    Box::pin(connection.read_service_import_as_human_until(identity,&scope,&args[7],deadline))
+                } else {Box::pin(connection.store_service_import_as_human_until(identity,&scope,&args[7],&bundle,deadline))}
+            } else if args[8].contains("read") {
                 Box::pin(connection.read_service_import_until(&scope,&args[7],deadline))
             } else {Box::pin(connection.store_service_import_until(&scope,&args[7],&bundle,deadline))};
             let result=if args[8].starts_with("cancel") {

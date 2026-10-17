@@ -86,6 +86,13 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -u scripts/test-postgres-tls.py --service-import-store
+      - name: Test human import authorization and revocation through TLS
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+          AWS_LC_SYS_USE_SYSTEM: '0'
+        run: python3 -u scripts/test-postgres-tls.py --human-import
       - name: Test operator-mapped HTTPS durable ingestion
         if: runner.os == 'Linux'
         timeout-minutes: 4

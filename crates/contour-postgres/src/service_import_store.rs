@@ -1,4 +1,4 @@
-//! Operator-scoped whole-service persistence; callers must authorize the human.
+//! Whole-service persistence with explicit operator and authenticated human APIs.
 use crate::{
     AuthorityError, CatalogError, ConnectedDatabase, DeclaredScope, DeclaredStatus,
     DeclaredStoreError, DeclaredStored,
@@ -19,6 +19,7 @@ use tokio_postgres::Transaction;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceImportError {
     Scope,
+    Forbidden,
     NotFound,
     MissingDefault,
     DefaultChanged,
@@ -66,7 +67,8 @@ impl From<DeclaredStoreError> for ServiceImportError {
         }
     }
 }
-/// Independently trusted tenant, project and service. Environment is resolved separately.
+/// Parsed tenant, project and service. Operator callers must trust this scope;
+/// human APIs check it against current memberships. Environment resolves separately.
 pub struct ServiceImportScope {
     ids: [String; 3],
 }
@@ -155,7 +157,7 @@ impl ConnectedDatabase {
         deadline: Instant,
     ) -> Result<[String; 4], ServiceImportError> {
         match self
-            .import_transaction(scope, Request::Resolve, deadline)
+            .import_transaction(scope, Request::Resolve, None, deadline)
             .await?
         {
             Value::Scope(scope) => Ok(scope),
@@ -174,7 +176,7 @@ impl ConnectedDatabase {
             return Err(ServiceImportError::Scope);
         }
         match self
-            .import_transaction(scope, Request::Store(contract_id, bundle), deadline)
+            .import_transaction(scope, Request::Store(contract_id, bundle), None, deadline)
             .await?
         {
             Value::Stored(stored) => Ok(stored),
@@ -188,7 +190,65 @@ impl ConnectedDatabase {
         deadline: Instant,
     ) -> Result<StoredServiceImport, ServiceImportError> {
         match self
-            .import_transaction(scope, Request::Read(contract_id), deadline)
+            .import_transaction(scope, Request::Read(contract_id), None, deadline)
+            .await?
+        {
+            Value::Stored(stored) => Ok(stored),
+            _ => Err(ServiceImportError::Corrupt),
+        }
+    }
+    /// Requires current service-owner membership; locks authorization until rollback.
+    pub async fn resolve_import_default_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &ServiceImportScope,
+        deadline: Instant,
+    ) -> Result<[String; 4], ServiceImportError> {
+        match self
+            .import_transaction(scope, Request::Resolve, Some(identity), deadline)
+            .await?
+        {
+            Value::Scope(scope) => Ok(scope),
+            _ => Err(ServiceImportError::Corrupt),
+        }
+    }
+    /// Requires current service-owner membership, including for historical retries.
+    /// Reuse the same contract ID and checked bundle after OutcomeUnknown.
+    pub async fn store_service_import_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &ServiceImportScope,
+        contract_id: &str,
+        bundle: &DeclaredImportBundle,
+        deadline: Instant,
+    ) -> Result<StoredServiceImport, ServiceImportError> {
+        if bundle.scope()[..3] != scope.ids.each_ref().map(String::as_str) {
+            return Err(ServiceImportError::Scope);
+        }
+        match self
+            .import_transaction(
+                scope,
+                Request::Store(contract_id, bundle),
+                Some(identity),
+                deadline,
+            )
+            .await?
+        {
+            Value::Stored(stored) => Ok(stored),
+            _ => Err(ServiceImportError::Corrupt),
+        }
+    }
+    /// Requires current viewer or service-owner membership. Use a dedicated login
+    /// with human lookup and business reader privileges, not provisioning rights.
+    pub async fn read_service_import_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &ServiceImportScope,
+        contract_id: &str,
+        deadline: Instant,
+    ) -> Result<StoredServiceImport, ServiceImportError> {
+        match self
+            .import_transaction(scope, Request::Read(contract_id), Some(identity), deadline)
             .await?
         {
             Value::Stored(stored) => Ok(stored),
@@ -199,6 +259,7 @@ impl ConnectedDatabase {
         &mut self,
         scope: &ServiceImportScope,
         request: Request<'_>,
+        identity: Option<&contour_auth::VerifiedIdentity>,
         deadline: Instant,
     ) -> Result<Value, ServiceImportError> {
         if let Request::Read(id) | Request::Store(id, _) = request {
@@ -220,7 +281,7 @@ impl ConnectedDatabase {
                 .client
                 .as_mut()
                 .ok_or(ServiceImportError::Invalidated)?;
-            let tx = if matches!(request, Request::Store(..)) {
+            let tx = if identity.is_some() || matches!(request, Request::Store(..)) {
                 begin(client).await?
             } else {
                 client
@@ -237,6 +298,15 @@ impl ConnectedDatabase {
                     deadline.saturating_duration_since(Instant::now()),
                 )
                 .await?;
+                if let Some(identity) = identity {
+                    crate::human_authorization::authorize(
+                        &tx,
+                        identity,
+                        scope.ids.each_ref().map(String::as_str),
+                        !matches!(request, Request::Read(..)),
+                    )
+                    .await?;
+                }
                 let value = match request {
                     Request::Resolve => Value::Scope(default_scope(&tx, scope, false).await?),
                     Request::Read(id) => {
@@ -253,6 +323,9 @@ impl ConnectedDatabase {
                     tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                         .await
                         .map_err(database_error)?;
+                }
+                if let Some(identity) = identity {
+                    crate::human_authorization::check_expiry(&tx, identity).await?;
                 }
                 check_deadline(deadline)?;
                 Ok::<_, ServiceImportError>(value)
