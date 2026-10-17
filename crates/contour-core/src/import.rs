@@ -38,6 +38,11 @@ pub fn import_declared(
     if bytes.len() > MAX_IMPORT_BYTES {
         return Err(ImportError::Size);
     }
+    validate_names(approved_names)?;
+    let input = crate::import_json::parse(bytes)?;
+    crate::import_openapi::convert(&input, operation, selection, approved_names)
+}
+pub(crate) fn validate_names(approved_names: &[&str]) -> Result<(), ImportError> {
     if approved_names.len() > 256
         || approved_names
             .iter()
@@ -45,6 +50,5 @@ pub fn import_declared(
     {
         return Err(ImportError::Name);
     }
-    let input = crate::import_json::parse(bytes)?;
-    crate::import_openapi::convert(&input, operation, selection, approved_names)
+    Ok(())
 }

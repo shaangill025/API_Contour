@@ -33,9 +33,15 @@ pub use declared_comparison::{
 };
 
 mod import;
+mod import_bundle;
 mod import_json;
 mod import_openapi;
 pub use import::{ImportError, ImportSelection, MAX_IMPORT_BYTES, import_declared};
+pub use import_bundle::{
+    DeclaredImportBundle, DeclaredImportMember, ImportBodySelector, ImportBundleWarning,
+    MAX_IMPORT_GRAPH_BYTES, MAX_IMPORT_GRAPH_NODES, MAX_IMPORT_GRAPH_VISITS, MAX_IMPORT_MEMBERS,
+    ResponseSelector, ServiceImportPolicy, import_service_declared,
+};
 mod extract;
 mod operation;
 pub use operation::{MAX_OPERATION_BYTES, OperationKey, OperationObservation};

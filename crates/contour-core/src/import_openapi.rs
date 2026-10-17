@@ -18,6 +18,15 @@ pub(crate) fn convert(
     selection: ImportSelection<'_>,
     names: &[&str],
 ) -> Result<DeclaredContract, ImportError> {
+    convert_budget(input, operation, selection, names, &mut 32768)
+}
+pub(crate) fn convert_budget(
+    input: &Value,
+    operation: OperationKey<'_>,
+    selection: ImportSelection<'_>,
+    names: &[&str],
+    remaining: &mut usize,
+) -> Result<DeclaredContract, ImportError> {
     if field(input, "openapi")?.as_str() != Some("3.0.3") {
         return Err(ImportError::UnsupportedFormat);
     }
@@ -51,6 +60,7 @@ pub(crate) fn convert(
         pending: Vec::new(),
         edges: 1,
         visits: 0,
+        remaining,
     };
     let root = builder.schema(schema, 0)?;
     let mut definitions = Vec::new();
@@ -83,7 +93,7 @@ pub(crate) fn convert(
     let bytes = model.to_wire_json().map_err(|_| ImportError::Graph)?;
     DeclaredContract::from_wire_json(&bytes).map_err(|_| ImportError::Graph)
 }
-struct Builder<'a> {
+struct Builder<'a, 'b> {
     input: &'a Value,
     names: &'a [&'a str],
     response: bool,
@@ -92,8 +102,17 @@ struct Builder<'a> {
     pending: Vec<(String, String)>,
     edges: usize,
     visits: usize,
+    remaining: &'b mut usize,
 }
-impl<'a> Builder<'a> {
+impl<'a> Builder<'a, '_> {
+    fn visit(&mut self) -> Result<(), ImportError> {
+        if self.visits == 32768 || *self.remaining == 0 {
+            return Err(ImportError::Graph);
+        }
+        self.visits += 1;
+        *self.remaining -= 1;
+        Ok(())
+    }
     fn edge(&mut self, count: usize) -> Result<(), ImportError> {
         if count > MAX_DECLARED_EDGES.saturating_sub(self.edges) {
             return Err(ImportError::Graph);
@@ -139,10 +158,7 @@ impl<'a> Builder<'a> {
     fn flags(&mut self, mut value: &'a Value) -> Result<(bool, bool), ImportError> {
         let mut seen = BTreeSet::new();
         loop {
-            if self.visits == 32768 {
-                return Err(ImportError::Graph);
-            }
-            self.visits += 1;
+            self.visit()?;
             let o = object(value)?;
             let Some(reference) = o.get("$ref") else {
                 return Ok((flag(o, "readOnly")?, flag(o, "writeOnly")?));
@@ -158,10 +174,10 @@ impl<'a> Builder<'a> {
         }
     }
     fn schema(&mut self, value: &'a Value, depth: usize) -> Result<u32, ImportError> {
-        if depth > 64 || self.visits == 32768 {
+        if depth > 64 {
             return Err(ImportError::Graph);
         }
-        self.visits += 1;
+        self.visit()?;
         let o = object(value)?;
         if let Some(reference) = o.get("$ref") {
             let name = self.reference(reference)?;
