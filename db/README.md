@@ -577,3 +577,13 @@ events, recomputes the result and verifies canonical bytes on reload and retry.
 Retry an uncertain commit with all original identities. Missing or invalid supplied
 inputs are resolved before comparison-ID conflict checks. The public review and
 contract revision model is separate from these internal UUIDs.
+
+Migration 0008 adds immutable review requests and terminal decisions. A request
+starts at revision 1; its unique decision projects revision 2 and preserves the
+actor association. The candidate must be the comparison's right declared input;
+an expected approved baseline must be the left input's exact event. Approval
+associations also bind candidate, prior event and deciding actor. Rejection stores
+no approval event. New restricted roles use forced tenant RLS; the writer's narrow
+request-column UPDATE grant permits row locking while triggers forbid mutation.
+The application must still authorize the actor and atomically lock/check the
+review and approved head before inserting a decision and replacing the baseline.

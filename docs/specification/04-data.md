@@ -384,3 +384,13 @@ cleanup failures; uncertain acknowledgement requires the original comparison UUI
 and inputs on retry. Deadline/cancellation invalidates unfinished connections.
 Invalid input resolution may return its error before an existing-ID conflict.
 Public result projection, review revisions and authorization remain separate work.
+
+### Immutable review storage
+
+Migration 0008 retains a review request at revision 1 and an optional immutable
+terminal decision at revision 2. The request binds a scoped comparison, its right
+declared candidate and its left approved baseline event when present. A decision
+records actor and server time; approval references an event with that exact
+candidate, prior event and actor. Rejection has no approval association. These
+constraints preserve directional comparison meaning and actor history but do not
+replace the application's review/head concurrency transaction or authorization.
