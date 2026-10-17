@@ -57,3 +57,15 @@ test('catalog failure preserves fresh import availability and existing mutation 
   assert.equal(failureStale(true,'catalog'),true,'catalog reload must preserve existing mutation conflict');
   assert.equal(failureStale(false,'mutation'),true,'uncertain mutation must require explicit recovery');
 });
+
+test('review eligibility binds comparison left to exact expected approved baseline', () => {
+  const first = {...c,left_kind:'declared',right_kind:'declared'} as Comparison;
+  assert.equal(reviewMatches(r,first,null),true);
+  const approved = {...first,left_kind:'approved',left_id:'head'} as Comparison;
+  const withHead = {...r,expected_baseline_id:'head'};
+  assert.equal(reviewMatches(withHead,approved,'head'),true);
+  assert.equal(reviewMatches(withHead,{...approved,left_id:'other-head'},'head'),false);
+  assert.equal(reviewMatches(withHead,first,'head'),false);
+  assert.equal(reviewMatches(r,{...first,left_kind:'approved'},null),false);
+  assert.equal(reviewMatches(r,{...first,right_kind:'observed'},null),false);
+});

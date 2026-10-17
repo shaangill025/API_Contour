@@ -46,7 +46,7 @@ node --experimental-strip-types --test tests/domain.test.ts tests/api.test.ts
 These verify exact identity/revision invariants, safe failures, same-origin request
 shape, no conflict retry, and response guards. They are not rendered interaction,
 integration, browser compatibility, security audit or full mandatory-gate evidence.
-On Node 22.23.1, strict typecheck and production build passed, and all twelve
+On Node 22.23.1, strict typecheck and production build passed, and all thirteen
 focused tests passed. Lockfile audit reported zero advisories at review time; this
 is not a security audit. No rendered browser interactions or live authentication /
 API integration have been inspected.

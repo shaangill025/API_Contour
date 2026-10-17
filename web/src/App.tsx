@@ -1,6 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {api, ApiError} from './api.ts';
-import {comparisonMatches, reviewMatches, failureStale, uuidPattern, validUuid} from './domain.ts';
+import {comparisonMatches, reviewMatches, reviewEligibility, failureStale, uuidPattern, validUuid} from './domain.ts';
 import type {Comparison, Contract, ImportFormat, Kind, Operation, Review} from './domain.ts';
 
 export function App() {
@@ -76,7 +76,7 @@ export function App() {
     });
   }
   async function createReview() {
-    if (!comparison || !operation) return;
+    if (!comparison || !operation || reviewEligibility(comparison, operation.approved_contract_id) !== null) return;
     await run('Creating pending review…', async () => {
       const result = await api.createReview({operation_id: operation.id, comparison_id: comparison.id,
         candidate_contract_id: comparison.right_id, expected_baseline_id: operation.approved_contract_id});
@@ -111,6 +111,7 @@ export function App() {
       setReview(result); setStatus(`Review ${result.status}. Decision recorded by the authenticated server principal.`);
     });
   }
+  const reviewBlock = comparison && operation ? reviewEligibility(comparison, operation.approved_contract_id) : 'Select an operation and compare exact versions first.';
   const locked = !!busy;
   const canCompare = !!operation && validUuid(left) && validUuid(right) && left !== right;
   return <div className="shell">
@@ -147,7 +148,7 @@ export function App() {
         {comparison && <div className="result"><h3 ref={heading} tabIndex={-1}>Result: <span className={`badge ${comparison.result}`}>{comparison.result}</span></h3><p>Direction: <strong>{comparison.direction}</strong> · comparison <code>{comparison.id}</code></p><p><strong>{comparison.left_kind}</strong> <code>{comparison.left_id}</code> → <strong>{comparison.right_kind}</strong> <code>{comparison.right_id}</code></p>
           {comparison.result === 'inconclusive' && <p className="warning">Evidence is insufficient or includes unsupported constructs. This is not a compatibility pass.</p>}
           {comparison.differences.length === 0 ? <p className="empty">No differences returned. This does not establish observed coverage.</p> : <div className="table-scroll"><table><caption>Exact structural differences</caption><thead><tr><th scope="col">Path</th><th scope="col">Change</th><th scope="col">Assessment</th><th scope="col">Evidence reason</th></tr></thead><tbody>{comparison.differences.map((d, i) => <tr key={i}><td><code>{d.path}</code></td><td>{d.kind}</td><td>{d.assessment}</td><td>{d.reason}</td></tr>)}</tbody></table></div>}
-          {!review && <button disabled={locked || stale || comparison.right_kind !== 'declared'} onClick={() => void createReview()}>Create pending review</button>}
+          {!review && <><button aria-describedby={reviewBlock ? 'review-eligibility' : undefined} disabled={locked || stale || reviewBlock !== null} onClick={() => void createReview()}>Create pending review</button>{reviewBlock && <p id="review-eligibility" className="hint">{reviewBlock}</p>}</>}
         </div>}
       </section>
       <section className="panel" aria-labelledby="review-title"><p className="step">04 / RECORDED DECISION</p><h2 id="review-title">Review the exact candidate</h2>

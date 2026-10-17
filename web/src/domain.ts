@@ -35,9 +35,14 @@ export function comparisonMatches(c: Comparison, r: ComparisonRequest): boolean 
   return c.operation_id === r.operation_id && c.left_id === r.left_id && c.right_id === r.right_id &&
     c.left_kind === r.left_kind && c.right_kind === r.right_kind;
 }
+export function reviewEligibility(c: Comparison, baseline: string | null): string | null {
+  if (c.right_kind !== 'declared') return 'Review requires a declared candidate on the right.';
+  if (baseline === null) return c.left_kind === 'declared' ? null : 'First approval requires a declared baseline on the left.';
+  return c.left_kind === 'approved' && c.left_id === baseline ? null : 'Compare the exact current approved baseline on the left before creating a review.';
+}
 export function reviewMatches(r: Review, c: Comparison, baseline: string | null): boolean {
   return r.operation_id === c.operation_id && r.comparison_id === c.id &&
-    r.candidate_contract_id === c.right_id && r.expected_baseline_id === baseline;
+    r.candidate_contract_id === c.right_id && r.expected_baseline_id === baseline && reviewEligibility(c, baseline) === null;
 }
 export function decisionBody(review: Review, decision: 'approve' | 'reject') {
   if (review.status !== 'pending' || !Number.isSafeInteger(review.revision) || review.revision < 1) {
