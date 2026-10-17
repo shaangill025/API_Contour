@@ -48,6 +48,11 @@ pub use queue::{
     QueueLimits, QueueStats,
 };
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
+mod review_request;
+pub use review_request::{
+    ComparisonRequest, ComparisonVersionKind, ReviewDecision, ReviewDecisionKind, ReviewRequest,
+    ReviewRequestError, ReviewResourceId,
+};
 mod wire;
 pub use extract::{Completeness, ExtractionPolicy, Observation, ObservationReason, extract_json};
 
