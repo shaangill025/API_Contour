@@ -6,8 +6,12 @@ use tokio_postgres::{Config, config::SslMode};
 mod authority;
 mod catalog;
 mod catalog_reader;
+mod comparison_store;
 mod declared_store;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};
+pub use comparison_store::{
+    ComparisonInput, ComparisonRequest, ComparisonStatus, ComparisonStoreError, ComparisonStored,
+};
 pub use declared_store::{DeclaredScope, DeclaredStatus, DeclaredStoreError, DeclaredStored};
 mod review_store;
 pub use review_store::{
