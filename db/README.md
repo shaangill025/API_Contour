@@ -505,6 +505,37 @@ The actor field is trusted metadata here, not proof of end-user authorization.
 `db/tests/approval.sql` exercises restricted logins, scoped references, immutable
 history, server timestamps and transaction rollback through `scripts/test-postgres.sh`.
 
+## Internal approval transaction adapter
+
+`ConnectedDatabase::approve_declared` accepts a trusted `DeclaredScope` and an
+`ApprovalRequest` containing operation, event, candidate version, expected prior
+event and actor UUIDs. Use the restricted approval writer login. These identifiers
+are internal; the actor is supplied by an operator, not authenticated here. Public
+`Decision.expected_revision` must still be checked against persisted reviews by
+future public decision handling.
+
+The transaction verifies the candidate's full scope, creates a stable null head
+if necessary, then locks it in a separate READ COMMITTED statement. It checks the
+expected event after acquiring that lock. Only one caller against the same baseline
+can replace it. The new immutable event is also the exact actor audit association;
+it commits with the head update under `synchronous_commit=on`. A preparation error
+rolls back the head, event and audit together.
+
+A stable event UUID is the retry identity. Identical retries return `Duplicate`
+with the original server timestamp, even after later approvals move the head.
+Changed candidate, actor, scope or expected event conflicts. Event identity rather
+than version identity detects stale baselines after A→B→A version transitions.
+The connection's absolute deadline cannot be extended by the caller. Cancellation
+and uncertain transaction outcomes invalidate the connection. `OutcomeUnknown`
+requires retrying the exact request on a new connection; it does not imply rollback.
+A confirmed commit preserves `Approved` if subsequent cleanup fails.
+
+The catalog TLS integration hook runs `scripts/test-approval.py`: actual initial
+and replacement races, identical concurrent retries, old receipt reload, scoped
+conflicts, audit association, injected head-update rollback, real lock cancellation
+with socket EOF, and server COMMIT acknowledgement/cleanup faults. These are internal
+association tests, not completion of public two-reviewer decision acceptance.
+
 ## Internal immutable comparison storage
 
 Provision `db/provision_comparison.sql` and apply migration 0007 after 0006 with
