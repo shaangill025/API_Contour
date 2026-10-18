@@ -707,5 +707,20 @@ identity mapping. Different authorized humans can create and decide; retries mus
 match the actual recorded actor. The human TLS fixture verifies two-actor
 attribution, denial, revocation ordering, expiry rollback and direct review COMMIT
 and cancellation faults. These methods still use internal version/event identities;
-durable whole-import public comparison associations and HTTP projection remain
-necessary before exposing the complete local review workflow.
+the public adapter and HTTP projection remain necessary before exposing the
+complete local review workflow.
+
+Migration 0012 adds immutable `public_comparison_inputs`. Public projection 2
+requires exactly two scoped associations in the same transaction as the comparison;
+each must match its internal side's kind, version and approval event. Declared
+public IDs identify the selected whole import; approved public IDs identify an
+immutable approval event. Two imports may contain the same graph without losing
+which import was selected. Legacy projection 1 accepts no associations, so an old
+comparison cannot acquire guessed public identities later. Composite foreign keys,
+forced tenant RLS and immutable triggers preserve scope and seal committed pairs.
+
+These storage constraints do not establish historical approval-to-import provenance
+or the single-member selection policy. The public adapter must recover an approved
+input's source import through its review decision and original comparison, and must
+reject ambiguous operation members and mismatched body/media selectors. That adapter
+and its HTTP integration are still pending.
