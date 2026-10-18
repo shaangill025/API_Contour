@@ -223,6 +223,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "contour-platform"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "contour-auth",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "contour-postgres"
 version = "0.1.0"
 dependencies = [
