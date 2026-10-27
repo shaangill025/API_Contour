@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   native:
+    needs: [business, delivery]
+    if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -23,6 +25,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     steps:
+      - name: Require all prerequisite TLS jobs
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' }}
+        run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -94,6 +99,30 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -u scripts/test-postgres-tls.py --comparison-store
+
+  business:
+    name: Business TLS checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install pinned Rust tools
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+      - name: Fetch locked dependencies
+        run: cargo +1.88.0 fetch --locked
+      - name: Fetch pinned TLS database fixture
+        run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Build workspace and fixtures before TLS checks
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+          AWS_LC_SYS_USE_SYSTEM: '0'
+        run: cargo +1.88.0 build --workspace --all-targets --locked --offline
       - name: Test whole-service import persistence through TLS and PostgreSQL
         if: runner.os == 'Linux'
         timeout-minutes: 4
@@ -113,6 +142,30 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -u scripts/test-postgres-tls.py --review-store
+
+  delivery:
+    name: HTTPS delivery checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install pinned Rust tools
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+      - name: Fetch locked dependencies
+        run: cargo +1.88.0 fetch --locked
+      - name: Fetch pinned TLS database fixture
+        run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Build workspace and fixtures before TLS checks
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+          AWS_LC_SYS_USE_SYSTEM: '0'
+        run: cargo +1.88.0 build --workspace --all-targets --locked --offline
       - name: Test operator-mapped HTTPS durable ingestion
         if: runner.os == 'Linux'
         timeout-minutes: 4
