@@ -1,5 +1,6 @@
 //! Local-only HTTPS session boundary. OIDC identities are not business authorization.
 //! The business handler must check current database membership for every operation.
+pub mod business;
 mod state;
 mod wire;
 
@@ -94,6 +95,8 @@ pub struct Platform {
     memory: Mutex<Memory>,
     acceptor: TlsAcceptor,
     provider: TlsConnector,
+    application: Option<Arc<business::Business>>,
+    assets: Vec<(&'static str, &'static str, Vec<u8>)>,
 }
 impl std::fmt::Debug for Platform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -156,11 +159,52 @@ impl Platform {
         client.resumption = rustls::client::Resumption::disabled();
         Ok(Self {
             config,
+            application: None,
+            assets: Vec::new(),
             verifier,
             memory: Mutex::new(Memory::default()),
             acceptor: TlsAcceptor::from(Arc::new(server)),
             provider: TlsConnector::from(Arc::new(client)),
         })
+    }
+
+    /// Starts the local business host with a fixed, bounded static asset manifest.
+    /// Assets are loaded before binding; request paths can never select filesystem paths.
+    pub async fn serve_application(
+        mut self,
+        application: Arc<business::Business>,
+        dist: &Path,
+    ) -> Result<(), PlatformError> {
+        for (url, file, content_type, max) in [
+            ("/", "index.html", "text/html; charset=utf-8", 131072),
+            (
+                "/assets/main.js",
+                "assets/main.js",
+                "text/javascript; charset=utf-8",
+                2097152,
+            ),
+            (
+                "/assets/main.css",
+                "assets/main.css",
+                "text/css; charset=utf-8",
+                262144,
+            ),
+            (
+                "/assets/main.js.LEGAL.txt",
+                "assets/main.js.LEGAL.txt",
+                "text/plain; charset=utf-8",
+                1048576,
+            ),
+        ] {
+            self.assets
+                .push((url, content_type, read_file(&dist.join(file), max)?));
+        }
+        self.application = Some(application.clone());
+        self.serve_with(move |request, identity| {
+            let application = application.clone();
+            async move { application.handle(request, identity).await }
+        })
+        .await
     }
 
     /// Starts the login host only. Business readiness is deliberately false.
@@ -227,6 +271,29 @@ impl Platform {
             Ok(request) => request,
             Err(error) => return error_response(error),
         };
+        if request.method() == hyper::Method::GET {
+            if let Some((_, content_type, bytes)) = self
+                .assets
+                .iter()
+                .find(|(path, _, _)| *path == request.uri().path())
+            {
+                return response(200, content_type, bytes.clone());
+            }
+            if request.uri().path() == "/readyz" {
+                if let Some(application) = &self.application {
+                    let ready = application.ready().await;
+                    return response(
+                        if ready { 200 } else { 503 },
+                        "application/json",
+                        if ready {
+                            r#"{"ready":true}"#
+                        } else {
+                            r#"{"ready":false}"#
+                        },
+                    );
+                }
+            }
+        }
         let result = match (request.method().as_str(), request.uri().path()) {
             ("GET", "/livez") => Ok(response(200, "application/json", r#"{"live":true}"#)),
             ("GET", "/readyz") => Ok(response(
@@ -550,7 +617,7 @@ pub fn response(
         "x-content-type-options",
         hyper::header::HeaderValue::from_static("nosniff"),
     );
-    headers.insert("content-security-policy", hyper::header::HeaderValue::from_static("default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"));
+    headers.insert("content-security-policy", hyper::header::HeaderValue::from_static("default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"));
     response
 }
 fn error_response(error: PlatformError) -> PlatformResponse {

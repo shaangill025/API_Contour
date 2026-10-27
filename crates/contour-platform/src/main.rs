@@ -7,7 +7,7 @@ fn main() {
 
 fn run() -> Result<(), contour_platform::PlatformError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 1 {
+    if args.len() != 1 && args.len() != 3 {
         return Err(contour_platform::PlatformError::Configuration);
     }
     let platform = contour_platform::Platform::from_file(std::path::Path::new(&args[0]))?;
@@ -15,5 +15,12 @@ fn run() -> Result<(), contour_platform::PlatformError> {
         .enable_all()
         .build()
         .map_err(|_| contour_platform::PlatformError::Unavailable)?;
-    runtime.block_on(platform.serve())
+    if args.len() == 3 {
+        let business = std::sync::Arc::new(contour_platform::business::Business::from_file(
+            std::path::Path::new(&args[1]),
+        )?);
+        runtime.block_on(platform.serve_application(business, std::path::Path::new(&args[2])))
+    } else {
+        runtime.block_on(platform.serve())
+    }
 }

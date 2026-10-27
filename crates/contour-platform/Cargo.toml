@@ -19,3 +19,6 @@ serde_json = { version = "=1.0.145", features = ["raw_value"] }
 ring = "=0.17.14"
 sha2 = "=0.10.9"
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+contour-core = { path = "../contour-core" }
+contour-postgres = { path = "../contour-postgres" }
+time = { version = "=0.3.47", default-features = false, features = ["std", "formatting"] }

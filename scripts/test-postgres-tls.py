@@ -135,7 +135,7 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
     elif "--service-import-store" in sys.argv or "--human-import" in sys.argv:
-        run(["cargo", "build", "-p", "contour-postgres", "--example", "service_import_probe", "--example", "declared_store_probe", "--example", "review_store_probe", "--example", "comparison_store_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-postgres", "--example", "service_import_probe", "--example", "declared_store_probe", "--example", "review_store_probe", "--example", "comparison_store_probe", "--example", "public_review_probe", "--example", "human_catalog_probe", "--locked", "--offline"], timeout=180)
     elif "--review-store" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "declared_store_probe", "--example", "approval_probe", "--example", "review_store_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-core", "--example", "import_probe", "--locked", "--offline"], timeout=180)

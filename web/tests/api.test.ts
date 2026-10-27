@@ -58,3 +58,49 @@ test('initial catalog 503 followed by empty 200 does not lock a fresh import dra
     assert.equal(failureStale(true,'catalog'),true,'catalog recovery cannot clear a review conflict');
   } finally {globalThis.fetch=previous;}
 });
+
+test('lost response keeps the same create key for explicit retry; confirmed success releases it', async () => {
+  const previous=globalThis.fetch; const keys: string[]=[]; let calls=0;
+  globalThis.fetch=async (_url, init)=>{
+    keys.push((init?.headers as Record<string,string>)['Idempotency-Key']);
+    calls++;
+    if (calls===1) throw new Error('response lost after commit');
+    return Response.json({ok:true});
+  };
+  try {
+    const body={content:'private artifact',format:'openapi_json'};
+    await assert.rejects(request('contracts/import',body), (e:unknown)=>e instanceof ApiError && e.status===0);
+    assert.equal(calls,1,'no automatic retry');
+    await request('contracts/import',body);
+    assert.equal(keys[0],keys[1]);
+    await request('contracts/import',body);
+    assert.notEqual(keys[1],keys[2]);
+    assert.match(keys[0],/^[0-9a-f-]{36}$/);
+  } finally {globalThis.fetch=previous;}
+});
+
+test('uncertain creates retain keys, while a definite conflict releases them', async () => {
+  const previous=globalThis.fetch; const keys:string[]=[]; let calls=0;
+  globalThis.fetch=async (_url,init)=>{
+    keys.push((init?.headers as Record<string,string>)['Idempotency-Key']);
+    return new Response('{}',{status:++calls===1 ? 503 : 409});
+  };
+  try {
+    for (let i=0;i<3;i++) await assert.rejects(request('comparisons',{operation_id:'same'}));
+    assert.equal(keys[0],keys[1]); assert.notEqual(keys[1],keys[2]);
+  } finally {globalThis.fetch=previous;}
+});
+
+test('invalid successful create response preserves the pending key', async () => {
+  const previous=globalThis.fetch; const keys:string[]=[];
+  globalThis.fetch=async (_url,init)=>{
+    keys.push((init?.headers as Record<string,string>)['Idempotency-Key']);
+    return Response.json({bad:true});
+  };
+  try {
+    const body={project_id:'scope',service_id:'scope',format:'openapi_json',content:'private'} as const;
+    await assert.rejects(api.import(body));
+    await assert.rejects(api.import(body));
+    assert.equal(keys[0],keys[1]);
+  } finally {globalThis.fetch=previous;}
+});

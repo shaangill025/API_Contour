@@ -15,6 +15,15 @@ def main():
     tls = STATE / 'tls'
     realm = STATE / 'realm'
     tls.mkdir(); realm.mkdir()
+    postgres = STATE / 'postgres'
+    postgres.mkdir()
+    (postgres / 'admin-password').write_text(secrets.token_urlsafe(32))
+    app_password = secrets.token_urlsafe(32)
+    (STATE / 'database-password').write_text(app_password)
+    (postgres / 'pgpass').write_text('localhost:5432:contour_local:contour_app:' + app_password + '\n')
+    (postgres / 'pg_hba.conf').write_text('local all all trust\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::0/0 scram-sha-256\n')
+    postgres.chmod(0o755)
+    (postgres / 'pg_hba.conf').chmod(0o644)
     request = STATE / 'request.cnf'
     request.write_text('[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n')
     def openssl(*args):
@@ -27,7 +36,7 @@ def main():
     openssl('req', '-new', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-config', request,
             '-subj', '/CN=localhost', '-keyout', tls / 'server.key', '-out', STATE / 'server.csr')
     extensions = STATE / 'extensions.cnf'
-    extensions.write_text('subjectAltName=DNS:localhost,DNS:keycloak,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n')
+    extensions.write_text('subjectAltName=DNS:localhost,DNS:keycloak,DNS:postgres,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n')
     openssl('x509', '-req', '-in', STATE / 'server.csr', '-CA', STATE / 'ca.crt',
             '-CAkey', STATE / 'ca.key', '-CAcreateserial', '-days', '30', '-sha256',
             '-extfile', extensions, '-out', tls / 'server.crt')

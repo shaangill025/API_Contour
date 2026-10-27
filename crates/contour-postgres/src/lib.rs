@@ -9,6 +9,10 @@ mod catalog_reader;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
+mod human_catalog;
+pub use human_catalog::{
+    HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource,
+};
 mod service_import_store;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};
 pub use comparison_store::{

@@ -1,56 +1,64 @@
-# Local MVP identity provider
+# Local MVP infrastructure
 
-This starts the local login provider and verifies the application login/session
-boundary. Business HTTP handlers and UI integration are still in progress;
-this is not the complete runnable MVP.
+This setup runs the pinned Keycloak and PostgreSQL images locally. It provisions
+synthetic users and one synthetic service; it is not a production deployment or
+a fully containerized application. Docker Compose, Python 3.13, OpenSSL, the
+already available pinned images, and the repository's locked Rust dependencies
+are required. Docker is used only by the setup process; neither container receives
+its socket.
 
-Prerequisites: Docker Compose, Python 3.13, OpenSSL and the repository's locked
-Rust dependencies. From the repository root:
+From the repository root, run:
 
 ```sh
-python3.13 deploy/local/init.py
-docker compose -f deploy/local/compose.yaml up -d
-python3.13 deploy/local/check_oidc.py
-python3.13 deploy/local/check_platform.py
+python3.13 deploy/local/up.py
 ```
 
-Initialization refuses to overwrite `.local-mvp`. It generates a private local CA,
-HTTPS certificate and random passwords for synthetic `owner` and `viewer` accounts.
-Keycloak generates its own issuer signing keys; committed test signing keys are
-never used. Runtime files are ignored by Git. No system/browser trust is installed.
-The provider publishes only `https://localhost:8444`; its issuer is
-`https://localhost:8444/realms/apicontour-local`. Account passwords are in the private
-`.local-mvp/accounts.json` file. Never use these accounts for a real installation.
+On a fresh checkout this initializes `.local-mvp`, starts the two containers
+without pulling images, verifies real owner and viewer OIDC logins, applies the
+existing database bootstrap, role provisioning, and migrations, then provisions
+the two verified subjects. On restart it checks the migration ledger, fixed
+identities and runtime privileges and verifies a TLS login. If configuration or
+identity has drifted, or state is incomplete, startup fails for inspection. It
+never resets a volume, replaces an existing credential, or repairs partial role
+provisioning. Existing `.local-mvp` directories created before this database setup
+lack its credential files and must be handled explicitly; startup will not generate
+replacement files over existing state.
 
-The pinned image uses a local file database in an owned Docker volume. Keys and
-users survive provider restart; reimport does not update an existing realm.
-Keep `.local-mvp` with that volume. The generated certificates expire after 30 days;
-this setup is for local development, not production. The container is limited to
-1 GiB and two CPUs and receives no host Docker socket or elevated capabilities.
+The private ignored state contains account credentials, a local CA, the database
+password, `platform.json` and `business.json`. Keep it with the named Keycloak and
+PostgreSQL volumes. Certificates expire after 30 days. No system trust is installed.
+The provider listens on `https://localhost:8444` and PostgreSQL on
+`localhost:5544`, both loopback only. PostgreSQL requires TLS for network logins;
+the application checks the local CA and hostname. The runtime database login has
+only the declared, comparison, review, approval, catalog reader and human lookup
+groups. The provisioning administrator is used only from the startup script.
 
-The check builds the current Rust verifier, uses HTTPS trust from the generated CA,
-performs independent owner/viewer authorization-code logins with S256 PKCE, verifies
-the resulting ID tokens and rejects nonce mismatch, code replay, wrong PKCE and
-direct password grants. It never follows redirects or prints credentials/tokens.
-It writes the approved RS256 public keys and verified account subjects to private
-configuration files for application provisioning. Provider token roles do not grant
-database authority. This check does not prove application sessions or browser CSRF.
+The host platform can be launched with its identity configuration:
 
-`check_platform.py` builds the current HTTPS application host, starts its own
-loopback listener at port 9443, and stops that process after verification. It
-performs real owner/viewer callbacks and checks browser binding, opaque cookie
-attributes, session use, callback replay/issuer rejection, exact-Origin mutation
-protection and server-side logout invalidation. It writes operator configuration
-to `.local-mvp/platform.json` without exposing credentials. Business endpoints and
-readiness currently return 503. This HTTP-client check does not establish rendered
-browser behavior, business authorization integration or full MVP readiness.
+```sh
+cargo run -p contour-platform --locked --offline -- .local-mvp/platform.json .local-mvp/business.json web/dist
+```
+
+Build the UI with its pinned Node toolchain before starting the host. This command
+serves the UI and authenticated business API on https://localhost:9443. The local
+CA is not installed in browser trust automatically. The approved synthetic import
+route maps `/source` to `/orders`; example OpenAPI documents are
+[baseline](sample-baseline.json) and [candidate](sample-candidate.json).
+The initial MVP profile accepts OpenAPI JSON, one configured service/environment,
+and catalog limit/cursor pagination; the broader protocol and optional catalog
+filter surface remains pending. Unsupported formats and filters are rejected.
+`Idempotency-Key` optionally supplies a lowercase UUID for create requests; reuse
+it only for the identical request after an uncertain response. The UI retains
+pending keys only in the current tab memory and never automatically retries.
+
+Account passwords are in `.local-mvp/accounts.json`; these users are local-only.
+
+Stop and restart without deleting data:
 
 ```sh
 docker compose -f deploy/local/compose.yaml stop
-docker compose -f deploy/local/compose.yaml start
-python3.13 deploy/local/check_oidc.py
+python3.13 deploy/local/up.py
 ```
 
-Stopping preserves the provider's data. Do not delete its volume or replace local
-credentials as an implicit reset. The approved initial application profile will
-retain full imports and reject ambiguous multi-member operation comparisons.
+The setup's static configuration still requires a real startup, restart, migration,
+authorization and browser workflow verification before it is considered complete.

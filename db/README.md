@@ -724,3 +724,12 @@ or the single-member selection policy. The public adapter must recover an approv
 input's source import through its review decision and original comparison, and must
 reject ambiguous operation members and mismatched body/media selectors. That adapter
 and its HTTP integration are still pending.
+
+Public comparison operations use `store_public_comparison_as_human_until` and
+`read_public_comparison_as_human_until`. Declared input IDs identify whole-service
+imports; approved input IDs identify approval events. The connection requires the
+comparison and declared roles plus `contour_review_reader` to resolve approval
+provenance. Both operations authorize the current human within their transaction.
+The adapter rejects imports with multiple members for the operation, differing
+body selectors or media types, and comparisons without public projection 2.
+Retries must retain the same public input IDs, even when imported graphs match.

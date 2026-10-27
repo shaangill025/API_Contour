@@ -116,7 +116,7 @@ export function App() {
   const canCompare = !!operation && validUuid(left) && validUuid(right) && left !== right;
   return <div className="shell">
     <a className="skip" href="#workspace">Skip to review workspace</a>
-    <header><a href="/" className="brand" aria-label="APIContour home"><span className="mark" aria-hidden="true">◈</span> APIContour</a><span className="connection">Same-origin authenticated workspace</span></header>
+    <header><a href="/" className="brand" aria-label="APIContour home"><span className="mark" aria-hidden="true">◈</span> APIContour</a><nav aria-label="Session"><a href="/auth/login">Sign in</a> <button type="button" disabled={locked} onClick={() => run('Signing out…', async () => { const result = await fetch('/auth/logout', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: '{}'}); if (!result.ok) throw new ApiError(result.status); window.location.assign('/'); })}>Sign out</button></nav></header>
     <main id="workspace">
       <div className="intro"><p className="eyebrow">CONTRACT GOVERNANCE / REVIEW WORKSPACE</p><h1>Make the change explicit.</h1><p>Compare immutable versions, inspect the evidence, and record an exact decision.</p></div>
       <div className="notice"><strong>Declared structure is not observed coverage.</strong> Compatibility does not imply approval. Inconclusive results require investigation; no collector health is inferred here.</div>

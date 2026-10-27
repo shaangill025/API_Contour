@@ -138,6 +138,7 @@ pub struct ReviewStored {
     request: ReviewRequest,
     created: i64,
     decision: Option<(ReviewDecisionRequest, i64)>,
+    public_candidate: Option<String>,
 }
 impl ReviewStored {
     pub fn status(&self) -> ReviewStoreStatus {
@@ -154,6 +155,10 @@ impl ReviewStored {
     }
     pub fn candidate_version_id(&self) -> &str {
         &self.request.candidate
+    }
+    /// Public declared contract selected as the comparison right input, when read through the public API.
+    pub fn public_candidate_id(&self) -> Option<&str> {
+        self.public_candidate.as_deref()
     }
     pub fn expected_event_id(&self) -> Option<&str> {
         self.request.expected.as_deref()
@@ -196,6 +201,9 @@ enum Action<'a> {
     Decide(&'a ReviewDecisionRequest),
     HumanCreate(&'a HumanReviewRequest),
     HumanDecide(&'a HumanReviewDecisionRequest),
+    PublicCreate(&'a HumanReviewRequest),
+    PublicRead,
+    PublicDecide(&'a HumanReviewDecisionRequest),
 }
 /// Human request: actor attribution comes only from locked identity metadata.
 pub struct HumanReviewRequest {
@@ -256,6 +264,58 @@ impl HumanReviewDecisionRequest {
     }
 }
 impl ConnectedDatabase {
+    pub async fn store_public_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &HumanReviewRequest,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Action::PublicCreate(request),
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
+    pub async fn read_public_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(
+            scope,
+            operation,
+            id,
+            Action::PublicRead,
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
+    pub async fn decide_public_review_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &HumanReviewDecisionRequest,
+        deadline: Instant,
+    ) -> Result<ReviewStored, Error> {
+        self.review_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Action::PublicDecide(request),
+            Some(identity),
+            deadline,
+        )
+        .await
+    }
     pub async fn store_review_as_human_until(
         &mut self,
         identity: &contour_auth::VerifiedIdentity,
@@ -413,7 +473,7 @@ impl ConnectedDatabase {
                             &tx,
                             identity,
                             [&scope.ids[0], &scope.ids[1], &scope.ids[2]],
-                            !matches!(action, Action::Read),
+                            !matches!(action, Action::Read | Action::PublicRead),
                         )
                         .await?,
                     )
@@ -434,6 +494,38 @@ impl ConnectedDatabase {
                             actor.as_deref().ok_or(Error::Forbidden)?,
                         )?;
                         create(&tx, scope, &request).await
+                    }
+                    Action::PublicCreate(r) => {
+                        let (candidate, version) =
+                            public_input(&tx, scope, &r.operation, &r.comparison).await?;
+                        if candidate != r.candidate {
+                            return Err(Error::Conflict);
+                        }
+                        let request = ReviewRequest::new(
+                            &r.operation,
+                            &r.id,
+                            &r.comparison,
+                            &version,
+                            r.expected.as_deref(),
+                            actor.as_deref().ok_or(Error::Forbidden)?,
+                        )?;
+                        let mut stored = create(&tx, scope, &request).await?;
+                        stored.public_candidate = Some(candidate);
+                        Ok(stored)
+                    }
+                    Action::PublicRead => public_load(&tx, scope, operation, id).await,
+                    Action::PublicDecide(r) => {
+                        let public = public_load(&tx, scope, operation, id).await?;
+                        let request = ReviewDecisionRequest::new(
+                            &r.operation,
+                            &r.id,
+                            r.revision,
+                            actor.as_deref().ok_or(Error::Forbidden)?,
+                            r.event.as_deref(),
+                        )?;
+                        let mut stored = decide(&tx, scope, &request).await?;
+                        stored.public_candidate = public.public_candidate;
+                        Ok(stored)
                     }
                     Action::HumanDecide(r) => {
                         let request = ReviewDecisionRequest::new(
@@ -561,7 +653,37 @@ async fn load(
         request,
         created: row.try_get(5).map_err(|_| Error::Corrupt)?,
         decision,
+        public_candidate: None,
     })
+}
+// Public provenance is derived only from the immutable right input of a v2 comparison.
+async fn public_input(
+    tx: &Transaction<'_>,
+    scope: &DeclaredScope,
+    operation: &str,
+    comparison: &str,
+) -> Result<(String, String), Error> {
+    let ids = &scope.ids;
+    let row = tx.query_opt("SELECT i.public_input_id::text,i.version_id::text FROM contour.comparisons c JOIN contour.public_comparison_inputs i ON i.tenant_id=c.tenant_id AND i.comparison_id=c.comparison_id AND i.operation_id=c.operation_id AND i.project_id=c.project_id AND i.service_id=c.service_id AND i.environment_id=c.environment_id WHERE c.tenant_id=$1::text::uuid AND c.comparison_id=$2::text::uuid AND c.operation_id=$3::text::uuid AND c.project_id=$4::text::uuid AND c.service_id=$5::text::uuid AND c.environment_id=$6::text::uuid AND c.public_projection=2 AND c.right_kind='declared' AND i.side='right' AND i.input_kind='declared' AND i.public_input_id=i.declared_contract_id AND i.version_id=c.right_version_id", &[&ids[0], &comparison, &operation, &ids[1], &ids[2], &ids[3]]).await.map_err(database_error)?.ok_or(Error::NotFound)?;
+    Ok((
+        row.try_get(0).map_err(|_| Error::Corrupt)?,
+        row.try_get(1).map_err(|_| Error::Corrupt)?,
+    ))
+}
+async fn public_load(
+    tx: &Transaction<'_>,
+    scope: &DeclaredScope,
+    operation: &str,
+    id: &str,
+) -> Result<ReviewStored, Error> {
+    let mut stored = load(tx, scope, operation, id, false).await?;
+    let (candidate, version) =
+        public_input(tx, scope, operation, &stored.request.comparison).await?;
+    if version != stored.request.candidate {
+        return Err(Error::Corrupt);
+    }
+    stored.public_candidate = Some(candidate);
+    Ok(stored)
 }
 async fn create(
     tx: &Transaction<'_>,

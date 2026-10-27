@@ -38,7 +38,20 @@
             }
           }
         }
-      }
+      },
+      "parameters": [
+        {
+          "name": "Idempotency-Key",
+          "in": "header",
+          "required": false,
+          "description": "Optional lowercase UUID resource identity for an exact create retry. Reuse with the identical scoped request after an uncertain outcome; differing content conflicts. No automatic retries are performed.",
+          "schema": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      ]
     }
   },
   "/v1/reviews": {
@@ -80,7 +93,20 @@
             }
           }
         }
-      }
+      },
+      "parameters": [
+        {
+          "name": "Idempotency-Key",
+          "in": "header",
+          "required": false,
+          "description": "Optional lowercase UUID resource identity for an exact create retry. Reuse with the identical scoped request after an uncertain outcome; differing content conflicts. No automatic retries are performed.",
+          "schema": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      ]
     },
     "get": {
       "operationId": "listReviews",

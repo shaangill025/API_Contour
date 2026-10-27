@@ -215,4 +215,30 @@ def run_cases(container, sql, port, directory, environment):
         if fault == 'cleanup': assert result['value'] == retry
     wait_for("SELECT count(*) FROM pg_stat_activity WHERE usename IN ('contour_human_reader_tls','contour_human_writer_tls')", '0')
     runpy.run_path(str(ROOT / 'scripts/test-human-review.py'))['run_cases'](execute, port, directory, environment, normal, token, holder, wait_for)
+    # Public comparisons preserve whole-import identity even for equal graphs.
+    for role in ['reader', 'writer']:
+        execute('GRANT contour_review_reader TO contour_comparison_' + role + '_tls')
+    operation = execute("SELECT operation_id FROM contour.public_declared_members WHERE contract_id='%s'" % ('00000000-0000-0000-0000-%012x' % 500))
+    comparison_probe = Path(target) / 'debug/examples/comparison_store_probe'
+    def public_compare(wanted, left=500, right=510, number=700, mode='public'):
+        ident = lambda n: '00000000-0000-0000-0000-%012x' % n
+        result = subprocess.run([str(comparison_probe), str(port), str(directory / 'ca.crt'), *([ITEM] * 4),
+                                 operation, ident(number), 'declared', ident(left), 'declared', ident(right),
+                                 mode, wanted, '10000', '0'], input='\n', text=True, capture_output=True,
+                                timeout=15, env=dict(environment, CONTOUR_FIXTURE_ID_TOKEN=str(normal)))
+        assert result.returncode == 0 and result.stdout.startswith('{') and not result.stderr, 'public comparison: ' + result.stdout.strip()
+        return json.loads(result.stdout)['value']
+    public = public_compare('Stored')
+    assert public['public_inputs'] == [['declared', '00000000-0000-0000-0000-%012x' % 500], ['declared', '00000000-0000-0000-0000-%012x' % 510]]
+    assert public_compare('Duplicate') == public
+    assert public_compare('Read', mode='public-read') == public
+    public_compare('Conflict', right=511)
+    public_compare('NotFound', number=600, mode='public-read')
+    execute('SET ROLE contour_human_provisioner; UPDATE contour.human_actors SET enabled=false')
+    public_compare('Forbidden'); public_compare('Forbidden', mode='public-read')
+    execute('SET ROLE contour_human_provisioner; UPDATE contour.human_actors SET enabled=true')
+    runpy.run_path(str(ROOT / 'scripts/test-public-comparison.py'))['run_cases'](execute, port, directory, environment, normal, token, holder, wait_for, check, source, target, operation)
+    runpy.run_path(str(ROOT / 'scripts/test-public-review.py'))['run_cases'](execute, port, directory, environment, normal, operation)
+    unknown, _ = token(subject='unmapped-catalog')
+    runpy.run_path(str(ROOT / 'scripts/test-human-catalog.py'))['run_cases'](execute, port, directory, environment, normal, unknown, token, holder, wait_for, check, source, operation)
     print('Human exact identity/scope, all enabled flags, owner/viewer permissions, restricted readers, historical retry denial, concurrent reads, all revocation locks, reverse revocation, expiry after wait, cancellation EOF and COMMIT faults passed')
