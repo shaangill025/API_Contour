@@ -29,7 +29,7 @@ export interface Page<T> { items: T[]; next_cursor: string | null }
 export type ImportFormat = 'openapi_json' | 'asyncapi_json' | 'graphql_sdl' | 'protobuf_descriptor';
 export interface ImportRequest { project_id: string; service_id: string; format: ImportFormat; content: string }
 
-export const uuidPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+export const uuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 export function validUuid(value: string): boolean { return new RegExp(`^${uuidPattern}$`).test(value); }
 export function comparisonMatches(c: Comparison, r: ComparisonRequest): boolean {
   return c.operation_id === r.operation_id && c.left_id === r.left_id && c.right_id === r.right_id &&

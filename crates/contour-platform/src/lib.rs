@@ -758,10 +758,20 @@ mod tests {
     }
     #[test]
     fn pkce_rfc7636_vector_and_unpredictable_identifiers() {
-        assert_eq!(
-            challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-        );
+        // Public octet vectors from RFC 7636 Appendix B, not credentials:
+        // https://www.rfc-editor.org/rfc/rfc7636#appendix-B
+        let verifier_octets = [
+            116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212,
+            37, 77, 105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121,
+        ];
+        let expected_digest = [
+            19, 211, 30, 150, 26, 26, 216, 236, 47, 22, 177, 12, 76, 152, 46, 8, 118, 168, 120,
+            173, 109, 241, 68, 86, 110, 225, 137, 74, 203, 112, 249, 195,
+        ];
+        let verifier = URL_SAFE_NO_PAD.encode(verifier_octets);
+        let encoded = challenge(&verifier);
+        assert!(wire::opaque(&encoded));
+        assert_eq!(URL_SAFE_NO_PAD.decode(encoded).unwrap(), expected_digest);
         let values = (0..100)
             .map(|_| random().unwrap())
             .collect::<std::collections::HashSet<_>>();

@@ -49,7 +49,7 @@ and catalog limit/cursor pagination; the broader protocol and optional catalog
 filter surface remains pending. Unsupported formats and filters are rejected.
 `Idempotency-Key` optionally supplies a lowercase UUID for create requests; reuse
 it only for the identical request after an uncertain response. The UI retains
-pending keys only in the current tab memory and never automatically retries.
+pending request hashes and keys only in tab-scoped session storage and never automatically retries.
 
 Account passwords are in `.local-mvp/accounts.json`; these users are local-only.
 

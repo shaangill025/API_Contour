@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {api, ApiError} from './api.ts';
+import {api, ApiError, pendingRecovery, acknowledgeRecovery} from './api.ts';
 import {comparisonMatches, reviewMatches, reviewEligibility, failureStale, uuidPattern, validUuid} from './domain.ts';
 import type {Comparison, Contract, ImportFormat, Kind, Operation, Review} from './domain.ts';
 
@@ -19,11 +19,15 @@ export function App() {
   const [service, setService] = useState('');
   const [format, setFormat] = useState<ImportFormat>('openapi_json');
   const [file, setFile] = useState<File | null>(null);
+  const [retryCreate, setRetryCreate] = useState<{label: string; action: () => Promise<void>} | null>(null);
+  const [retryImport, setRetryImport] = useState<{file: File; project: string; service: string; format: ImportFormat} | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState('');
   const [status, setStatus] = useState('Choose an operation to begin, or reload an existing review.');
   const [error, setError] = useState('');
   const [stale, setStale] = useState(false);
+  const [pending, setPending] = useState<ReturnType<typeof pendingRecovery>>([]);
+  function refreshPending() { try { setPending(pendingRecovery()); } catch { setError('Pending recovery storage is unavailable. Creates are disabled.'); } }
   const heading = useRef<HTMLHeadingElement>(null);
 
   async function run(label: string, action: () => Promise<void>, scope: 'catalog' | 'mutation' = 'mutation') {
@@ -32,7 +36,15 @@ export function App() {
     catch (e) {
       setError(e instanceof ApiError ? e.message : 'The response could not be verified. Reload explicitly before continuing.');
       setStale(current => failureStale(current, scope)); setStatus('Action stopped. No automatic retry was made.');
-    } finally { setBusy(''); }
+    } finally { refreshPending(); setBusy(''); }
+  }
+  async function runCreate(label: string, action: () => Promise<void>) {
+    const exact = {label, action};
+    setRetryCreate(exact);
+    await run(label, async () => {
+      await action();
+      setRetryCreate(null); setStale(false);
+    });
   }
   async function loadCatalog(more = false) {
     await run('Loading authorized operations…', async () => {
@@ -43,7 +55,7 @@ export function App() {
       setStatus('Authorized operations loaded. Select the exact operation and direction.');
     }, 'catalog');
   }
-  useEffect(() => { void loadCatalog(); }, []);
+  useEffect(() => { refreshPending(); void loadCatalog(); }, []);
   useEffect(() => { if (comparison) heading.current?.focus(); }, [comparison?.id]);
   function resetComparison() { setComparison(null); setReview(null); setStale(false); }
   function selectOperation(id: string) {
@@ -55,51 +67,68 @@ export function App() {
   async function importContract(event: React.FormEvent) {
     event.preventDefault();
     if (!file) return;
+    const exact = {file, project, service, format};
+    setRetryImport(exact);
+    await executeImport(exact);
+  }
+  async function executeImport(exact: {file: File; project: string; service: string; format: ImportFormat}) {
     await run('Importing and sanitizing contract…', async () => {
-      if (file.size > 5 * 1024 * 1024) throw new ApiError(413);
-      const content = await file.text();
-      const result = await api.import({project_id: project, service_id: service, format, content});
-      if (!validUuid(result.id) || result.project_id !== project || result.service_id !== service || result.kind !== 'declared') throw new Error('Invalid import');
-      setImported(result); setFile(null);
+      if (exact.file.size > 5 * 1024 * 1024) throw new ApiError(413);
+      const content = await exact.file.text();
+      const result = await api.import({project_id: exact.project, service_id: exact.service, format: exact.format, content});
+      if (!validUuid(result.id) || result.project_id !== exact.project || result.service_id !== exact.service || result.kind !== 'declared') throw new Error('Invalid import');
+      setImported(result); setFile(null); setRetryImport(null);
       if (fileInput.current) fileInput.current.value = '';
       setStatus('Declared contract imported. Choose explicitly how to use its exact ID below.');
     });
   }
   async function compare(event: React.FormEvent) {
     event.preventDefault(); if (!operation) return;
-    await run('Comparing exact versions…', async () => {
+    await runCreate('Comparing exact versions…', async () => {
       const body = {operation_id: operation.id, left_id: left, left_kind: leftKind, right_id: right, right_kind: 'declared' as const};
       const result = await api.compare(body);
       if (!comparisonMatches(result, body) || !validUuid(result.id) || !Array.isArray(result.differences)) throw new Error('Mismatched comparison');
-      setComparison(result); setReview(null); setStale(false);
+      setOperation(operation); setComparison(result); setReview(null); setStale(false);
       setStatus(`Comparison is ${result.result}. Review the differences before creating a review.`);
     });
   }
   async function createReview() {
     if (!comparison || !operation || reviewEligibility(comparison, operation.approved_contract_id) !== null) return;
-    await run('Creating pending review…', async () => {
+    await runCreate('Creating pending review…', async () => {
       const result = await api.createReview({operation_id: operation.id, comparison_id: comparison.id,
         candidate_contract_id: comparison.right_id, expected_baseline_id: operation.approved_contract_id});
       if (!reviewMatches(result, comparison, operation.approved_contract_id) || result.status !== 'pending') throw new Error('Mismatched review');
-      setReview(result); setReloadId(result.id);
+      setOperation(operation); setComparison(comparison); setReview(result); setReloadId(result.id);
       setStatus('Pending review created. Approval is a separate, explicit decision.');
     });
   }
-  async function reloadReview(event?: React.FormEvent) {
+  async function reloadReview(event?: React.FormEvent, recoveryId?: string) {
     event?.preventDefault();
-    const id = review?.id ?? reloadId;
+    const id = recoveryId ?? review?.id ?? reloadId;
     if (!validUuid(id)) return;
     await run('Reloading exact review and current baseline…', async () => {
       const fresh = await api.review(id);
       const exact = await api.comparison(fresh.comparison_id);
       const selected = await api.operation(fresh.operation_id);
       if (fresh.id !== id || selected.id !== fresh.operation_id || !reviewMatches(fresh, exact, fresh.expected_baseline_id)) throw new Error('Mismatched review');
+      acknowledgeRecovery(id); setRetryCreate(null);
       setReview(fresh); setComparison(exact); setOperation(selected);
       setLeft(exact.left_id); setRight(exact.right_id); setLeftKind(exact.left_kind); setReloadId(id);
       const changed = fresh.status === 'pending' && selected.approved_contract_id !== fresh.expected_baseline_id;
       setStale(changed);
       const newObservation = operation?.id === selected.id && operation.last_seen !== selected.last_seen;
       setStatus(changed ? 'The approved baseline changed. This review cannot replace it. Start a new comparison.' : newObservation ? 'New observations arrived. This review still refers to its exact immutable versions; inspect the updated last observation before deciding.' : 'Exact review reloaded. Check the current revision before deciding.');
+    });
+  }
+  async function recoverComparison(id: string) {
+    await run('Reloading exact comparison…', async () => {
+      const exact = await api.comparison(id);
+      const selected = await api.operation(exact.operation_id);
+      if (exact.id !== id || selected.id !== exact.operation_id) throw new Error('Mismatched comparison');
+      acknowledgeRecovery(id); setRetryCreate(null);
+      setComparison(exact); setOperation(selected); setReview(null);
+      setLeft(exact.left_id); setRight(exact.right_id); setLeftKind(exact.left_kind); setStale(false);
+      setStatus('Exact comparison reloaded. Check the current approved baseline before creating a review.');
     });
   }
   async function decide(decision: 'approve' | 'reject') {
@@ -122,7 +151,9 @@ export function App() {
       <div className="notice"><strong>Declared structure is not observed coverage.</strong> Compatibility does not imply approval. Inconclusive results require investigation; no collector health is inferred here.</div>
       <div className="status" role="status" aria-live="polite" aria-atomic="true">{status}</div>
       {error && <div className="error" role="alert">{error}</div>}
+      {stale && retryCreate && <div className="warning"><p>The previous create may still have completed. Retry its exact original inputs with the same request identity, even if loading the record returned no result.</p><button disabled={locked} onClick={() => void runCreate(retryCreate.label, retryCreate.action)}>Retry exact previous create</button></div>}
       {stale && <div className="warning"><strong>Context needs review.</strong> Previous results remain visible. Reload this review, or explicitly start a new comparison. Mutations are paused.</div>}
+      {pending.length > 0 && <section className="panel" aria-labelledby="recovery-title"><h2 id="recovery-title">Pending recovery</h2><p>A response was not confirmed. Load the exact item to check it; no request is retried automatically.</p><ul>{pending.map(item => <li key={item.id}><strong>{item.type}</strong> <code>{item.id}</code> {item.type === 'review' ? <button className="secondary" disabled={locked} onClick={() => void reloadReview(undefined, item.id)}>Load exact review</button> : item.type === 'comparison' ? <button className="secondary" disabled={locked} onClick={() => void recoverComparison(item.id)}>Load exact comparison</button> : <span>Reselect the same file and scope to retry the exact import.</span>}</li>)}</ul></section>}
       <div className="grid">
         <section className="panel" aria-labelledby="scope-title"><p className="step">01 / SCOPE</p><h2 id="scope-title">Select an operation</h2><p>Choose the operation and direction explicitly. IDs are assigned by the server.</p>
           <label htmlFor="operation">Authorized operation</label>
@@ -140,6 +171,7 @@ export function App() {
             <label htmlFor="format">Declared format</label><select id="format" value={format} onChange={e => setFormat(e.target.value as ImportFormat)}><option value="openapi_json">OpenAPI JSON</option><option value="asyncapi_json">AsyncAPI JSON</option><option value="graphql_sdl">GraphQL SDL</option><option value="protobuf_descriptor">Protobuf descriptor</option></select>
             <label htmlFor="artifact">Artifact · maximum 5 MiB</label><input ref={fileInput} id="artifact" type="file" required onChange={e => {setFile(e.target.files?.[0] ?? null); setImported(null);}} />
             <button type="submit" disabled={!file || stale}>Import declared contract</button></fieldset></form>
+          {stale && retryImport && <button className="secondary" disabled={locked} onClick={() => void executeImport(retryImport)}>Retry the exact selected import</button>}
           {imported && <div className="import-result"><p><strong>Declared contract</strong> · revision {imported.revision}</p><code>{imported.id}</code><p>Warnings: {imported.warnings.length ? imported.warnings.join(', ') : 'None reported'}</p><div className="actions"><button className="secondary" disabled={locked || !!review} onClick={() => {setLeft(imported.id); setLeftKind('declared'); resetComparison();}}>Use as left baseline</button><button className="secondary" disabled={locked || !!review} onClick={() => {setRight(imported.id); resetComparison();}}>Use as right candidate</button></div></div>}
         </section>
       </div>

@@ -30,6 +30,7 @@ test('conflict requires explicit reload; inaccessible errors do not echo input',
 });
 test('UUID syntax validation never maps names or generates IDs', () => {
   assert.equal(validUuid('00000000-0000-4000-8000-000000000001'),true);
+  assert.equal(validUuid('00000000-0000-4000-8000-00000000000A'),false);
   assert.equal(validUuid('baseline'),false);
   assert.equal(validUuid('../reviews'),false);
 });
