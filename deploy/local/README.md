@@ -2,13 +2,18 @@
 
 This setup runs the application, pinned Keycloak and PostgreSQL images locally.
 It provisions synthetic users and one synthetic service; it is not a production
-deployment. Docker Compose, Python 3.13, OpenSSL, the pinned infrastructure images,
+deployment. Docker Compose, Python 3.13, OpenSSL, Rust 1.88.0 with locked dependencies
+fetched for the startup identity verifier, the pinned infrastructure images,
 and network access for the pinned build images and locked Rust and Node dependencies
 are required. Containers do not receive the Docker socket.
 
 From the repository root, run:
 
 ```sh
+export RUSTUP_TOOLCHAIN=1.88.0
+cargo +1.88.0 fetch --locked
+docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+docker pull quay.io/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
 python3.13 deploy/local/up.py
 ```
 
@@ -58,6 +63,7 @@ Account passwords are in `.local-mvp/accounts.json`; these users are local-only.
 Stop and restart without deleting data:
 
 ```sh
+export RUSTUP_TOOLCHAIN=1.88.0
 docker compose -f deploy/local/compose.yaml stop
 python3.13 deploy/local/up.py
 ```
@@ -69,6 +75,7 @@ the named data volumes and existing credentials.
 After startup, verify the HTTPS owner/viewer workflow and durable restart:
 
 ```sh
+export RUSTUP_TOOLCHAIN=1.88.0
 python3.13 -m venv /tmp/apicontour-spec-validation
 /tmp/apicontour-spec-validation/bin/python -m pip install -r docs/specification/validation-requirements.txt
 /tmp/apicontour-spec-validation/bin/python deploy/local/check_business.py --external --validate-schema

@@ -8,18 +8,42 @@ It is designed to observe authorized traffic, remove values locally, and send
 only approved structural information to a central catalog. Teams will compare
 observed structures with declared and approved contracts, then review changes.
 
-**Status: under development.** This repository currently contains the Rust core
-and four PostgreSQL migrations for identity, policy, inbox, and immutable catalog
-storage. The Rust database adapter validates authority, stores batches, and returns
-durable receipts. A separate catalog worker processes accepted history atomically.
-An internal reader returns bounded pages under explicit operator scope. Public
-catalog HTTP queries and end-user authorization remain pending.
-The core also provides checked record construction and bounded in-memory retention.
-Operator-configured mTLS HTTPS libraries provide ingestion and online authority
-refresh. A caller-driven collector owner integrates refresh, admission, bounded
-freezing and checked delivery through an actual synthetic HTTPS/PostgreSQL fixture. A deployable platform, released collector
-and web UI remain pending. The architecture and packages below describe the
-intended release.
+**Status: local lifecycle MVP available; broader discovery platform under development.**
+The local Docker Compose stack serves a React review workspace and authenticated
+HTTPS APIs backed by PostgreSQL and a local Keycloak provider. Owners can import
+OpenAPI JSON, select an authorized operation, compare exact immutable versions,
+request review and record an explicit decision. Viewers can read the scoped catalog
+and review evidence. Imported-only operations show **Not observed**.
+
+The initial profile uses synthetic accounts and one configured service/environment.
+It supports catalog limit/cursor pagination. Broader import formats, optional
+filters, released capture integrations and a production deployment remain pending.
+The Rust core also implements bounded structural extraction, retention, policy
+verification and operator-configured mTLS ingestion/delivery libraries. The
+architecture and package coverage below include future work.
+
+## Run the local MVP
+
+Install Docker Compose, Python 3.13, OpenSSL and Rust 1.88.0 for the startup identity
+verifier. Fetch locked Rust dependencies and the pinned infrastructure images once:
+
+```sh
+export RUSTUP_TOOLCHAIN=1.88.0
+cargo +1.88.0 fetch --locked
+docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+docker pull quay.io/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
+python3.13 deploy/local/up.py
+```
+
+Open **https://localhost:9443**. Generated owner/viewer passwords are stored in the
+ignored `.local-mvp/accounts.json`. Startup builds the app and UI from locked
+dependencies using pinned official images; network access is needed for the first
+build. The local CA is not installed in browser trust automatically.
+
+See [local startup, sample contracts and acceptance checks](deploy/local/README.md).
+Keep `.local-mvp` and the named volumes together: startup retains data and
+credentials and stops on drift rather than resetting state. This local synthetic
+setup is not a production deployment.
 
 ## Enterprise workflows
 
@@ -52,7 +76,7 @@ flowchart LR
 ```
 
 Rust supplies the backend and shared structural core. PostgreSQL is the central
-system of record. React and TypeScript will supply the web UI.
+system of record. React and TypeScript supply the local review UI.
 
 Collectors will send bounded batches to the ingestion API; they will not connect
 to PostgreSQL directly. Embedded collectors will use bounded memory by default.
@@ -94,6 +118,11 @@ and production target are still pending. No production deployment is included ye
 
 ## Implemented today
 
+- Local containerized HTTPS platform and React review workspace with OIDC
+  authorization code flow, PKCE, bounded sessions and transaction-local human
+  authorization. Whole-service OpenAPI JSON imports, public scoped catalog reads,
+  immutable comparisons, review requests and atomic approval decisions are wired
+  through the UI and public API. Local startup and restart preserve durable state.
 - Operator-configured mTLS HTTP/1 ingestion with certificate fingerprint scope
   binding, bounded requests, and accepted/duplicate durable receipt responses.
   Enrollment and deployment integration remain pending.
@@ -121,9 +150,9 @@ and production target are still pending. No production deployment is included ye
   retries verify stored content and return the original receipt.
 - Immutable catalog operations, collector-scoped variants and original source
   evidence, with atomic batch processing and restricted worker/reader roles.
-- Internal operator-scoped catalog reads with checked canonical bytes, bounded
-  UUID keyset pages and exact source counts, names and timestamp text. This does
-  not implement public HTTP pagination or end-user authorization.
+- Operator-scoped catalog reads with checked canonical bytes, bounded UUID keyset
+  pages and exact source counts, names and timestamp text. The local human API
+  additionally applies current user authorization and public limit/cursor pagination.
 - Real PostgreSQL process-crash recovery and lost COMMIT reply tests. A confirmed
   commit retains its receipt even if connection cleanup then fails.
 - Authenticated collector authority refresh with fresh challenges, scoped source
@@ -138,8 +167,8 @@ and production target are still pending. No production deployment is included ye
 Pure admission validates a supplied snapshot. HTTP authentication and checked
 receipts are implemented with explicit operator configuration. Capture-side
 revocation scheduling, authenticated enrollment, persistent revision high-water
-storage, durable queues, the full delivery scheduler, general post413 splitting, released
-collectors, contract comparison, and the UI remain pending.
+storage, durable queues, the full delivery scheduler, general post413 splitting and
+released collectors remain pending.
 Full platform, device, cloud, backup/restore, and performance acceptance is pending.
 
 ## Build and test the current code
