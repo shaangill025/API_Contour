@@ -31,9 +31,10 @@ def main():
     context = ssl.create_default_context(cafile=STATE / 'ca.crt')
     accounts = json.loads((STATE / 'accounts.json').read_text())
     config = json.loads((STATE / 'business.json').read_text())
-    build = subprocess.run(['cargo', 'build', '-p', 'contour-platform', '--locked', '--offline'], cwd=ROOT,
+    external = '--external' in sys.argv
+    build = None if external else subprocess.run(['cargo', 'build', '-p', 'contour-platform', '--locked', '--offline'], cwd=ROOT,
                            env=dict(os.environ, AWS_LC_SYS_USE_SYSTEM='0'), capture_output=True, timeout=180)
-    assert build.returncode == 0, 'current platform build failed'
+    assert build is None or build.returncode == 0, 'current platform build failed'
     target = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version', '1', '--no-deps', '--offline'], cwd=ROOT, text=True, timeout=15))['target_directory']
 
     def browser():
@@ -83,26 +84,45 @@ def main():
         assert request(opener, APP + '/auth/session')[0] == 200, 'session unavailable'
         return opener
 
+    def validate_response(path, value):
+        if '--validate-schema' not in sys.argv: return
+        from jsonschema import Draft202012Validator, FormatChecker
+        from referencing import Registry, Resource
+        from referencing.jsonschema import DRAFT202012
+        base = ROOT / 'docs/specification/contracts/schemas'
+        registry = Registry().with_resources((p.as_uri(), Resource.from_contents(json.loads(p.read_text()), default_specification=DRAFT202012)) for p in base.glob('*.json'))
+        if path.startswith('/v1/operations'):
+            file, kind = 'catalog.json', ('OperationList' if path.split('?')[0] == '/v1/operations' else 'Operation')
+        elif path.startswith('/v1/contracts/import'): file, kind = 'catalog.json', 'Contract'
+        elif path.startswith('/v1/comparisons'): file, kind = 'review.json', 'Comparison'
+        elif path.startswith('/v1/reviews'): file, kind = 'review.json', 'Review'
+        else: return
+        Draft202012Validator({'$ref': (base / file).as_uri() + '#/' + kind}, registry=registry, format_checker=FormatChecker()).validate(value)
+
     def get(opener, path, wanted=200):
         status, _, body = request(opener, APP + path)
         assert status == wanted, 'GET %s expected %d got %d' % (path.split('?')[0].split('/')[2], wanted, status)
-        return json.loads(body) if status == 200 else None
+        value = json.loads(body) if status == 200 else None
+        if status == 200: validate_response(path, value)
+        return value
 
     def post(opener, path, value, wanted=200, key=None, origin=APP):
         headers = {'Origin': origin, 'Content-Type': 'application/json'}
         if key is not None: headers['Idempotency-Key'] = key
         status, _, body = request(opener, APP + path, value, headers)
         assert status == wanted, 'POST %s expected %d got %d' % (path.split('/')[2], wanted, status)
-        return json.loads(body) if status == 200 else None
+        value = json.loads(body) if status == 200 else None
+        if status == 200: validate_response(path, value)
+        return value
 
-    process = subprocess.Popen([str(Path(target) / 'debug/contour-platform'), str(STATE / 'platform.json'),
+    process = None if external else subprocess.Popen([str(Path(target) / 'debug/contour-platform'), str(STATE / 'platform.json'),
                                 str(STATE / 'business.json'), str(ROOT / 'web/dist')], cwd=ROOT,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         anonymous = browser()
         until = time.monotonic() + 15
         while True:
-            assert process.poll() is None, 'owned platform failed to start (port may be occupied)'
+            assert process is None or process.poll() is None, 'owned platform failed to start (port may be occupied)'
             try:
                 if request(anonymous, APP + '/readyz')[0] == 200: break
             except (urllib.error.URLError, ConnectionError, TimeoutError): pass
@@ -185,11 +205,11 @@ def main():
             get(opener, '/v1/operations', 401)
         print('Local HTTPS owner/viewer business workflow, import retry, comparison, review, approval CAS, access denial and logout passed.')
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
-        process.stdout.close(); process.stderr.close()
+        if process is not None: process.stdout.close(); process.stderr.close()
 
 
 if __name__ == '__main__':

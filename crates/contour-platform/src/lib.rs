@@ -59,10 +59,37 @@ impl std::fmt::Display for PlatformError {
 }
 impl std::error::Error for PlatformError {}
 
+/// Fixed local transport topology; neither profile permits caller-selected destinations.
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportProfile {
+    #[default]
+    Host,
+    Docker,
+}
+
+impl TransportProfile {
+    fn listen_address(self) -> &'static str {
+        match self {
+            Self::Host => "127.0.0.1:9443",
+            Self::Docker => "0.0.0.0:9443",
+        }
+    }
+
+    fn provider_address(self) -> &'static str {
+        match self {
+            Self::Host => "127.0.0.1:8444",
+            Self::Docker => "keycloak:8443",
+        }
+    }
+}
+
 /// Operator-owned local configuration; request data cannot select trust or destinations.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub transport: TransportProfile,
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -228,7 +255,7 @@ impl Platform {
         H: Fn(BusinessRequest, VerifiedIdentity) -> F + Send + Sync + 'static,
         F: Future<Output = PlatformResponse> + Send + 'static,
     {
-        let listener = TcpListener::bind("127.0.0.1:9443")
+        let listener = TcpListener::bind(self.config.transport.listen_address())
             .await
             .map_err(|_| PlatformError::Unavailable)?;
         let platform = Arc::new(self);
@@ -468,7 +495,7 @@ impl Platform {
 
     async fn exchange(&self, code: &str, verifier: &str) -> Result<String, PlatformError> {
         tokio::time::timeout(Duration::from_secs(10), async {
-            let socket = TcpStream::connect("127.0.0.1:8444").await.map_err(|_| PlatformError::Unavailable)?;
+            let socket = TcpStream::connect(self.config.transport.provider_address()).await.map_err(|_| PlatformError::Unavailable)?;
             let tls = self.provider.connect(ServerName::try_from("localhost").map_err(|_| PlatformError::Configuration)?, socket).await.map_err(|_| PlatformError::Unavailable)?;
             let (mut sender, connection) = hyper::client::conn::http1::Builder::new().max_headers(32).max_header_size(16384).max_buf_size(16384)
                 .handshake(TokioIo::new(tls)).await.map_err(|_| PlatformError::Unavailable)?;
@@ -636,6 +663,22 @@ const SCRIPT: &str = r#"async function check(){const r=await fetch('/auth/sessio
 mod tests {
     use super::*;
     #[test]
+    fn fixed_transport_profiles() {
+        assert_eq!(
+            TransportProfile::default().listen_address(),
+            "127.0.0.1:9443"
+        );
+        assert_eq!(
+            TransportProfile::default().provider_address(),
+            "127.0.0.1:8444"
+        );
+        let docker: TransportProfile = serde_json::from_str("\"docker\"").unwrap();
+        assert_eq!(docker.listen_address(), "0.0.0.0:9443");
+        assert_eq!(docker.provider_address(), "keycloak:8443");
+        assert!(serde_json::from_str::<TransportProfile>("\"remote\"").is_err());
+    }
+
+    #[test]
     fn cancelling_host_drops_pending_request_and_socket_while_runtime_lives() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -738,6 +781,7 @@ mod tests {
     #[test]
     fn operator_urls_cannot_expand_local_trust() {
         let mut config = Config {
+            transport: TransportProfile::Host,
             issuer: format!("{PROVIDER}/realms/apicontour-local"),
             authorization_endpoint: format!(
                 "{PROVIDER}/realms/apicontour-local/protocol/openid-connect/auth"

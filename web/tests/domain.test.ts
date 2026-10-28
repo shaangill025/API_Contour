@@ -70,3 +70,10 @@ test('review eligibility binds comparison left to exact expected approved baseli
   assert.equal(reviewMatches(r,{...first,left_kind:'approved'},null),false);
   assert.equal(reviewMatches(r,{...first,right_kind:'observed'},null),false);
 });
+
+test('imported-only operations have explicit absent observation evidence', () => {
+  const op = {id, project_id:id, service_id:id, environment_id:id, protocol:'http', operation:'POST', route_template:'/orders', approved_contract_id:null, direction:'response', last_seen:null, visibility:null, completeness:null};
+  assert.deepEqual(catalog({items:[op],next_cursor:null}).items,[op]);
+  assert.throws(() => catalog({items:[{...op,last_seen:'2026-10-27T00:00:00Z'}],next_cursor:null}));
+  assert.throws(() => catalog({items:[{...op,visibility:'structure'}],next_cursor:null}));
+});

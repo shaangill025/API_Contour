@@ -45,23 +45,35 @@
         ]
       },
       "last_seen": {
-        "type": "string",
-        "format": "date-time"
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time",
+        "description": "Observation time, or null with visibility and completeness when the operation is known only from declared imports."
       },
       "visibility": {
-        "type": "string",
+        "type": [
+          "string",
+          "null"
+        ],
         "enum": [
           "structure",
           "operation",
-          "connection"
+          "connection",
+          null
         ]
       },
       "completeness": {
-        "type": "string",
+        "type": [
+          "string",
+          "null"
+        ],
         "enum": [
           "complete",
           "partial",
-          "unavailable"
+          "unavailable",
+          null
         ]
       },
       "direction": {
@@ -90,7 +102,35 @@
       "completeness",
       "direction"
     ],
-    "additionalProperties": false
+    "additionalProperties": false,
+    "anyOf": [
+      {
+        "properties": {
+          "last_seen": {
+            "type": "null"
+          },
+          "visibility": {
+            "type": "null"
+          },
+          "completeness": {
+            "type": "null"
+          }
+        }
+      },
+      {
+        "properties": {
+          "last_seen": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          },
+          "completeness": {
+            "type": "string"
+          }
+        }
+      }
+    ]
   },
   "Variant": {
     "type": "object",

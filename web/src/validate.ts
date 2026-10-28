@@ -26,9 +26,15 @@ const kinds = ['declared','approved','observed'];
 const assessments = ['compatible','incompatible','inconclusive'];
 export function operation(value: unknown): Operation {
   const o = object(value); ids(o,['id','project_id','service_id','environment_id']);
-  strings(o,['protocol','operation','route_template','last_seen']); nullableId(o.approved_contract_id);
-  member(o.direction,directions); member(o.visibility,['structure','operation','connection']);
-  member(o.completeness,['complete','partial','unavailable']); return value as Operation;
+  strings(o,['protocol','operation','route_template']); nullableId(o.approved_contract_id);
+  member(o.direction,directions);
+  const unobserved = o.last_seen === null && o.visibility === null && o.completeness === null;
+  if (!unobserved) {
+    strings(o,['last_seen']);
+    member(o.visibility,['structure','operation','connection']);
+    member(o.completeness,['complete','partial','unavailable']);
+  }
+  return value as Operation;
 }
 export function catalog(value: unknown): Page<Operation> {
   const o = object(value);

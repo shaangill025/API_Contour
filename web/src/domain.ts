@@ -3,8 +3,8 @@ export type Assessment = 'compatible' | 'incompatible' | 'inconclusive';
 export interface Operation {
   id: string; project_id: string; service_id: string; environment_id: string;
   protocol: string; operation: string; route_template: string;
-  approved_contract_id: string | null; last_seen: string;
-  visibility: string; completeness: string; direction: string;
+  approved_contract_id: string | null; last_seen: string | null;
+  visibility: string | null; completeness: string | null; direction: string;
 }
 export interface Contract {
   id: string; project_id: string; service_id: string; kind: 'declared' | 'approved';

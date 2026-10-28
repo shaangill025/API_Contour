@@ -1,5 +1,31 @@
 name: apicontour-local
 services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/local/Dockerfile
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    ports:
+      - "127.0.0.1:9443:9443"
+    volumes:
+      - ../../.local-mvp/container-platform.json:/run/config/platform.json:ro
+      - ../../.local-mvp/container-business.json:/run/config/business.json:ro
+      - ../../.local-mvp/ca.crt:/run/config/ca.crt:ro
+      - ../../.local-mvp/tls/server.crt:/run/config/server.crt:ro
+      - ../../.local-mvp/tls/server.key:/run/config/server.key:ro
+      - ../../.local-mvp/approved-jwks.json:/run/config/jwks.json:ro
+      - ../../.local-mvp/database-password:/run/config/database-password:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1
+    restart: "no"
   postgres:
     image: postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
     entrypoint: ["sh", "-c"]

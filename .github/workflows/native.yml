@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   native:
-    needs: [business, delivery]
+    needs: [business, delivery, local-mvp]
     if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     steps:
       - name: Require all prerequisite TLS jobs
-        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' }}
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' }}
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -178,6 +178,40 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -u scripts/test-postgres-tls.py --delivery-only
+
+  local-mvp:
+    name: Container MVP lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install pinned Rust tools
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Fetch locked dependencies
+        run: cargo +1.88.0 fetch --locked
+      - name: Install pinned response validators
+        run: |
+          python3 -m venv /tmp/apicontour-spec-validation
+          /tmp/apicontour-spec-validation/bin/python -m pip install -r docs/specification/validation-requirements.txt
+      - name: Fetch pinned infrastructure images
+        run: |
+          docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+          docker pull quay.io/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
+      - name: Build and start the complete local stack
+        timeout-minutes: 10
+        run: python3 deploy/local/up.py
+      - name: Verify owner and viewer business workflows against public schemas
+        timeout-minutes: 4
+        run: /tmp/apicontour-spec-validation/bin/python deploy/local/check_business.py --external --validate-schema
+      - name: Verify failed startup and durable restart
+        timeout-minutes: 4
+        run: python3 deploy/local/check_stack.py
 
   postgres:
     name: PostgreSQL 16 identity

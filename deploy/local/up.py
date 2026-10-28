@@ -20,6 +20,9 @@ def run(command, timeout=180):
 
 def main():
     os.umask(0o077)
+    os.environ['LOCAL_UID'] = str(os.getuid())
+    os.environ['LOCAL_GID'] = str(os.getgid())
+    if os.getuid() == 0: raise RuntimeError('local application must run as a non-root user')
     if not STATE.exists(): run([sys.executable, str(ROOT / 'deploy/local/init.py')], 60)
     # Missing initialization files may indicate lost credentials; never regenerate them.
     for file in ['accounts.json','ca.crt','tls/server.crt','tls/server.key',
@@ -52,7 +55,39 @@ def main():
     path = STATE / 'platform.json'
     if path.exists() and json.loads(path.read_text()) != config: raise RuntimeError('platform configuration drift')
     if not path.exists(): path.write_text(json.dumps(config, indent=2) + '\n')
-    print('Local identity provider and PostgreSQL are ready; host platform configuration is in .local-mvp.')
+    container_config = dict(config, transport='docker', tls_certificate='/run/config/server.crt',
+                            tls_private_key='/run/config/server.key', provider_ca='/run/config/ca.crt',
+                            jwks='/run/config/jwks.json')
+    business = json.loads((STATE / 'business.json').read_text())
+    container_business = dict(business, database_host='postgres', database_port=5432,
+                              database_password_file='/run/config/database-password',
+                              database_ca_file='/run/config/ca.crt')
+    for name, value in [('container-platform.json', container_config), ('container-business.json', container_business)]:
+        target = STATE / name
+        if target.exists() and json.loads(target.read_text()) != value: raise RuntimeError('container configuration drift')
+        if not target.exists(): target.write_text(json.dumps(value, indent=2) + '\n')
+    run(COMPOSE + ['build', 'app'], 1800)
+    run(COMPOSE + ['up', '-d', '--no-build', 'app'], 90)
+    # A detached start can succeed even when the application immediately exits.
+    # Check its state before and after the verified HTTPS response.
+    def app_running():
+        result = subprocess.run(COMPOSE + ['ps', '--status', 'running', '--quiet', 'app'],
+                                cwd=ROOT, capture_output=True, timeout=5)
+        if result.returncode: raise RuntimeError('application status unavailable')
+        return bool(result.stdout.strip())
+    until = time.monotonic() + 60
+    while True:
+        if not app_running(): raise RuntimeError('application exited during startup')
+        try:
+            with opener.open('https://localhost:9443/readyz', timeout=3) as response:
+                if (response.url == 'https://localhost:9443/readyz' and response.status == 200
+                        and response.read(1025) == b'{"ready":true}'):
+                    if not app_running(): raise RuntimeError('application exited during startup')
+                    break
+        except (urllib.error.URLError, TimeoutError, OSError): pass
+        if time.monotonic() >= until: raise RuntimeError('application readiness deadline')
+        time.sleep(.5)
+    print('Local application ready at https://localhost:9443; existing state was retained.')
 
 if __name__ == '__main__':
     try: main()

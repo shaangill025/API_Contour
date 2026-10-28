@@ -1,0 +1,25 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!web/
+!web/package.json
+!web/package-lock.json
+!web/build.mjs
+!web/index.html
+!web/src/
+!web/src/**
+!deploy/
+!deploy/local/
+!deploy/local/Dockerfile
+
+# Exclude generated host artifacts even beneath included source directories.
+**/node_modules
+**/dist
+**/target
+**/__pycache__
+**/.DS_Store
+.local-mvp
+.git
+.agentic
