@@ -14,6 +14,7 @@ use tokio_postgres::Transaction;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComparisonStoreError {
     Scope,
+    Forbidden,
     NotFound,
     Conflict,
     Corrupt,
@@ -114,6 +115,7 @@ pub struct ComparisonStored {
     versions: [String; 2],
     created_micros: i64,
     result: DeclaredVersionComparison,
+    public_inputs: Option<[ComparisonInput; 2]>,
 }
 impl ComparisonStored {
     pub fn status(&self) -> ComparisonStatus {
@@ -131,6 +133,9 @@ impl ComparisonStored {
     pub fn created_micros(&self) -> i64 {
         self.created_micros
     }
+    pub fn public_inputs(&self) -> Option<&[ComparisonInput; 2]> {
+        self.public_inputs.as_ref()
+    }
     pub fn result(&self) -> &DeclaredVersionComparison {
         &self.result
     }
@@ -139,6 +144,11 @@ impl fmt::Debug for ComparisonStored {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ComparisonStored")
     }
+}
+enum Access<'a> {
+    Operator,
+    Human(&'a contour_auth::VerifiedIdentity),
+    Public(&'a contour_auth::VerifiedIdentity),
 }
 impl ConnectedDatabase {
     /// Requires comparison-writer plus declared-reader roles. Retry unchanged identities.
@@ -161,6 +171,7 @@ impl ConnectedDatabase {
             &request.operation,
             &request.id,
             Some(&request.inputs),
+            Access::Operator,
             deadline,
         )
         .await
@@ -182,8 +193,80 @@ impl ConnectedDatabase {
         id: &str,
         deadline: Instant,
     ) -> Result<ComparisonStored, Error> {
-        self.comparison_transaction(scope, operation, id, None, deadline)
+        self.comparison_transaction(scope, operation, id, None, Access::Operator, deadline)
             .await
+    }
+    /// Requires current service-owner access in the same transaction as evaluation and persistence.
+    pub async fn store_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &ComparisonRequest,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Some(&request.inputs),
+            Access::Human(identity),
+            deadline,
+        )
+        .await
+    }
+    /// Requires current viewer or service-owner access, including historical retries.
+    pub async fn read_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(
+            scope,
+            operation,
+            id,
+            None,
+            Access::Human(identity),
+            deadline,
+        )
+        .await
+    }
+    pub async fn store_public_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        request: &ComparisonRequest,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(
+            scope,
+            &request.operation,
+            &request.id,
+            Some(&request.inputs),
+            Access::Public(identity),
+            deadline,
+        )
+        .await
+    }
+    pub async fn read_public_comparison_as_human_until(
+        &mut self,
+        identity: &contour_auth::VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<ComparisonStored, Error> {
+        self.comparison_transaction(
+            scope,
+            operation,
+            id,
+            None,
+            Access::Public(identity),
+            deadline,
+        )
+        .await
     }
     async fn comparison_transaction(
         &mut self,
@@ -191,8 +274,14 @@ impl ConnectedDatabase {
         operation: &str,
         id: &str,
         inputs: Option<&[ComparisonInput; 2]>,
+        access: Access<'_>,
         deadline: Instant,
     ) -> Result<ComparisonStored, Error> {
+        let (identity, public) = match access {
+            Access::Operator => (None, false),
+            Access::Human(identity) => (Some(identity), false),
+            Access::Public(identity) => (Some(identity), true),
+        };
         if !uuid(operation) || !uuid(id) {
             return Err(Error::Scope);
         }
@@ -206,7 +295,7 @@ impl ConnectedDatabase {
         let mut committed = None;
         let work = async {
             let client = guard.connection.client.as_mut().ok_or(Error::Invalidated)?;
-            let transaction = if inputs.is_some() {
+            let transaction = if identity.is_some() || inputs.is_some() {
                 begin(client).await?
             } else {
                 client
@@ -223,12 +312,26 @@ impl ConnectedDatabase {
                     deadline.saturating_duration_since(Instant::now()),
                 )
                 .await?;
-                let stored = prepare(&transaction, scope, operation, id, inputs, deadline).await?;
+                if let Some(identity) = identity {
+                    crate::human_authorization::authorize(
+                        &transaction,
+                        identity,
+                        [&scope.ids[0], &scope.ids[1], &scope.ids[2]],
+                        inputs.is_some(),
+                    )
+                    .await?;
+                }
+                let stored =
+                    prepare_public(&transaction, scope, operation, id, inputs, public, deadline)
+                        .await?;
                 if stored.status == ComparisonStatus::Stored {
                     transaction
                         .query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                         .await
                         .map_err(database_error)?;
+                }
+                if let Some(identity) = identity {
+                    crate::human_authorization::check_expiry(&transaction, identity).await?;
                 }
                 check_deadline(deadline)?;
                 Ok::<_, Error>(stored)
@@ -310,6 +413,145 @@ async fn evaluate(
     check_deadline(deadline)?;
     Ok(result)
 }
+// Public identity is a contract for declared inputs and an approval event for approved inputs.
+// Resolve provenance before invoking the shared comparison persistence path.
+type PublicMember = (String, String, String, String, ComparisonInput);
+async fn resolve_public(
+    tx: &Transaction<'_>,
+    scope: &DeclaredScope,
+    operation: &str,
+    inputs: &[ComparisonInput; 2],
+) -> Result<Vec<PublicMember>, Error> {
+    let ids = &scope.ids;
+    let mut members = Vec::new();
+    for input in inputs {
+        let contract: String = if input.kind == "declared" {
+            input.id.clone()
+        } else {
+            let rows = tx.query("SELECT p.declared_contract_id::text FROM contour.review_decisions d JOIN contour.review_requests r ON r.tenant_id=d.tenant_id AND r.review_id=d.review_id JOIN contour.comparisons c ON c.tenant_id=r.tenant_id AND c.comparison_id=r.comparison_id JOIN contour.public_comparison_inputs p ON p.tenant_id=c.tenant_id AND p.comparison_id=c.comparison_id AND p.side='right' WHERE d.tenant_id=$1::text::uuid AND d.approval_event_id=$2::text::uuid AND d.decision='approve' AND r.operation_id=$3::text::uuid AND r.project_id=$4::text::uuid AND r.service_id=$5::text::uuid AND r.environment_id=$6::text::uuid AND c.public_projection=2 AND p.input_kind='declared' AND p.version_id=r.candidate_version_id", &[&ids[0], &input.id, &operation, &ids[1], &ids[2], &ids[3]]).await.map_err(database_error)?;
+            if rows.len() != 1 {
+                return Err(Error::NotFound);
+            }
+            rows[0].try_get(0).map_err(|_| Error::Corrupt)?
+        };
+        let rows = tx.query("SELECT version_id::text,body_selector,media_type FROM contour.public_declared_members WHERE tenant_id=$1::text::uuid AND contract_id=$2::text::uuid AND operation_id=$3::text::uuid AND project_id=$4::text::uuid AND service_id=$5::text::uuid AND environment_id=$6::text::uuid LIMIT 2", &[&ids[0], &contract, &operation, &ids[1], &ids[2], &ids[3]]).await.map_err(database_error)?;
+        if rows.is_empty() {
+            return Err(Error::NotFound);
+        }
+        if rows.len() != 1 {
+            return Err(Error::Conflict);
+        }
+        let version: String = rows[0].try_get(0).map_err(|_| Error::Corrupt)?;
+        let selector: Option<String> = rows[0].try_get(1).map_err(|_| Error::Corrupt)?;
+        let media: Option<String> = rows[0].try_get(2).map_err(|_| Error::Corrupt)?;
+        let (selector, media) = (
+            selector.ok_or(Error::Corrupt)?,
+            media.ok_or(Error::Corrupt)?,
+        );
+        let internal = if input.kind == "declared" {
+            ComparisonInput::declared(&version)?
+        } else {
+            ComparisonInput::approved(&input.id)?
+        };
+        if resolve(tx, scope, operation, &internal).await? != version {
+            return Err(Error::Corrupt);
+        }
+        members.push((contract, version, selector, media, internal));
+    }
+    if members[0].2 != members[1].2 || members[0].3 != members[1].3 {
+        return Err(Error::Conflict);
+    }
+    Ok(members)
+}
+
+async fn prepare_public(
+    tx: &Transaction<'_>,
+    scope: &DeclaredScope,
+    operation: &str,
+    id: &str,
+    inputs: Option<&[ComparisonInput; 2]>,
+    public: bool,
+    deadline: Instant,
+) -> Result<ComparisonStored, Error> {
+    if !public {
+        return prepare(tx, scope, operation, id, inputs, deadline, false).await;
+    }
+    let ids = &scope.ids;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 6] =
+        [&ids[0], &id, &operation, &ids[1], &ids[2], &ids[3]];
+    let resolved = if let Some(inputs) = inputs {
+        Some(resolve_public(tx, scope, operation, inputs).await?)
+    } else {
+        None
+    };
+    let internal = resolved.as_ref().map(|m| [m[0].4.clone(), m[1].4.clone()]);
+    let mut stored = prepare(tx, scope, operation, id, internal.as_ref(), deadline, true).await?;
+    if stored.status == ComparisonStatus::Stored {
+        let members = resolved.as_ref().ok_or(Error::Corrupt)?;
+        let requested = inputs.ok_or(Error::Corrupt)?;
+        for (i, side) in ["left", "right"].iter().enumerate() {
+            let event = if requested[i].kind == "approved" {
+                Some(requested[i].id.as_str())
+            } else {
+                None
+            };
+            tx.execute("INSERT INTO contour.public_comparison_inputs(tenant_id,comparison_id,side,operation_id,project_id,service_id,environment_id,input_kind,public_input_id,declared_contract_id,version_id,approval_event_id) VALUES($1::text::uuid,$2::text::uuid,$3,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8,$9::text::uuid,$10::text::uuid,$11::text::uuid,$12::text::uuid)", &[&ids[0], &id, side, &operation, &ids[1], &ids[2], &ids[3], &requested[i].kind, &requested[i].id, &members[i].0, &members[i].1, &event]).await.map_err(database_error)?;
+        }
+    }
+    let projection: i16 = tx.query_one("SELECT public_projection FROM contour.comparisons WHERE tenant_id=$1::text::uuid AND comparison_id=$2::text::uuid AND operation_id=$3::text::uuid AND project_id=$4::text::uuid AND service_id=$5::text::uuid AND environment_id=$6::text::uuid", &params).await.map_err(database_error)?.try_get(0).map_err(|_| Error::Corrupt)?;
+    if projection != 2 {
+        return Err(if inputs.is_some() {
+            Error::Conflict
+        } else {
+            Error::NotFound
+        });
+    }
+    let rows=tx.query("SELECT side,input_kind,public_input_id::text,declared_contract_id::text,version_id::text FROM contour.public_comparison_inputs WHERE tenant_id=$1::text::uuid AND comparison_id=$2::text::uuid ORDER BY side", &[&ids[0], &id]).await.map_err(database_error)?;
+    if rows.len() != 2 {
+        return Err(Error::Corrupt);
+    }
+    let mut actual = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let side: &str = row.try_get(0).map_err(|_| Error::Corrupt)?;
+        let kind: &str = row.try_get(1).map_err(|_| Error::Corrupt)?;
+        let public_id: &str = row.try_get(2).map_err(|_| Error::Corrupt)?;
+        let contract: &str = row.try_get(3).map_err(|_| Error::Corrupt)?;
+        let version: &str = row.try_get(4).map_err(|_| Error::Corrupt)?;
+        if side != ["left", "right"][i] || version != stored.versions[i] {
+            return Err(Error::Corrupt);
+        }
+        let input = match kind {
+            "declared" => ComparisonInput::declared(public_id),
+            "approved" => ComparisonInput::approved(public_id),
+            _ => return Err(Error::Corrupt),
+        }
+        .map_err(|_| Error::Corrupt)?;
+        if let Some(members) = resolved.as_ref() {
+            if contract != members[i].0 || input != inputs.ok_or(Error::Corrupt)?[i] {
+                return Err(Error::Conflict);
+            }
+        }
+        actual.push(input);
+    }
+    let actual = [actual.remove(0), actual.remove(0)];
+    if inputs.is_none() {
+        let members = resolve_public(tx, scope, operation, &actual)
+            .await
+            .map_err(|e| match e {
+                Error::NotFound | Error::Conflict | Error::Scope => Error::Corrupt,
+                other => other,
+            })?;
+        for (i, row) in rows.iter().enumerate() {
+            let contract: &str = row.try_get(3).map_err(|_| Error::Corrupt)?;
+            if contract != members[i].0 || members[i].4 != stored.inputs[i] {
+                return Err(Error::Corrupt);
+            }
+        }
+    }
+    stored.public_inputs = Some(actual);
+    Ok(stored)
+}
+
 async fn prepare(
     tx: &Transaction<'_>,
     scope: &DeclaredScope,
@@ -317,6 +559,7 @@ async fn prepare(
     id: &str,
     inputs: Option<&[ComparisonInput; 2]>,
     deadline: Instant,
+    public: bool,
 ) -> Result<ComparisonStored, Error> {
     let ids = &scope.ids;
     let mut inserted = false;
@@ -337,7 +580,31 @@ async fn prepare(
                 None
             }
         });
-        inserted=tx.execute("INSERT INTO contour.comparisons(tenant_id,comparison_id,operation_id,project_id,service_id,environment_id,left_kind,left_version_id,left_event_id,right_kind,right_version_id,right_event_id,evaluator_version,result_codec_version,result_wire) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7,$8::text::uuid,$9::text::uuid,$10,$11::text::uuid,$12::text::uuid,1,1,$13) ON CONFLICT DO NOTHING",&[&ids[0],&id,&operation,&ids[1],&ids[2],&ids[3],&inputs[0].kind,&versions[0],&events[0],&inputs[1].kind,&versions[1],&events[1],&wire]).await.map_err(database_error)? != 0;
+        let query = if public {
+            "INSERT INTO contour.comparisons(tenant_id,comparison_id,operation_id,project_id,service_id,environment_id,left_kind,left_version_id,left_event_id,right_kind,right_version_id,right_event_id,evaluator_version,result_codec_version,result_wire,public_projection) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7,$8::text::uuid,$9::text::uuid,$10,$11::text::uuid,$12::text::uuid,1,1,$13,$14) ON CONFLICT DO NOTHING"
+        } else {
+            "INSERT INTO contour.comparisons(tenant_id,comparison_id,operation_id,project_id,service_id,environment_id,left_kind,left_version_id,left_event_id,right_kind,right_version_id,right_event_id,evaluator_version,result_codec_version,result_wire) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7,$8::text::uuid,$9::text::uuid,$10,$11::text::uuid,$12::text::uuid,1,1,$13) ON CONFLICT DO NOTHING"
+        };
+        let projection = 2_i16;
+        let mut values: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
+            &ids[0],
+            &id,
+            &operation,
+            &ids[1],
+            &ids[2],
+            &ids[3],
+            &inputs[0].kind,
+            &versions[0],
+            &events[0],
+            &inputs[1].kind,
+            &versions[1],
+            &events[1],
+            &wire,
+        ];
+        if public {
+            values.push(&projection);
+        }
+        inserted = tx.execute(query, &values).await.map_err(database_error)? != 0;
         Some((versions, wire))
     } else {
         None
@@ -424,5 +691,19 @@ async fn prepare(
         versions,
         created_micros: row.try_get(9).map_err(|_| Error::Corrupt)?,
         result,
+        public_inputs: None,
     })
+}
+
+impl From<crate::human_authorization::HumanAuthorizationError> for Error {
+    fn from(value: crate::human_authorization::HumanAuthorizationError) -> Self {
+        use crate::human_authorization::HumanAuthorizationError as H;
+        match value {
+            H::Forbidden => Self::Forbidden,
+            H::Corrupt => Self::Corrupt,
+            H::Database => Self::Database,
+            H::Deadline => Self::Deadline,
+            H::Invalidated => Self::Invalidated,
+        }
+    }
 }

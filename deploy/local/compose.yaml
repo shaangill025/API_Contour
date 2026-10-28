@@ -1,0 +1,82 @@
+name: apicontour-local
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/local/Dockerfile
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    ports:
+      - "127.0.0.1:9443:9443"
+    volumes:
+      - ../../.local-mvp/container-platform.json:/run/config/platform.json:ro
+      - ../../.local-mvp/container-business.json:/run/config/business.json:ro
+      - ../../.local-mvp/ca.crt:/run/config/ca.crt:ro
+      - ../../.local-mvp/tls/server.crt:/run/config/server.crt:ro
+      - ../../.local-mvp/tls/server.key:/run/config/server.key:ro
+      - ../../.local-mvp/approved-jwks.json:/run/config/jwks.json:ro
+      - ../../.local-mvp/database-password:/run/config/database-password:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1
+    restart: "no"
+  postgres:
+    image: postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        cp /run/local/server.key /tmp/server.key && cp /run/local/server.crt /tmp/server.crt &&
+        chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key &&
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt
+        -c ssl_key_file=/tmp/server.key -c hba_file=/run/config/pg_hba.conf
+    environment:
+      POSTGRES_DB: contour_local
+      POSTGRES_PASSWORD_FILE: /run/secrets/admin-password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    ports:
+      - "127.0.0.1:5544:5432"
+    volumes:
+      - ../../.local-mvp/tls:/run/local:ro
+      - ../../.local-mvp/postgres:/run/config:ro
+      - ../../.local-mvp/ca.crt:/run/local-ca.crt:ro
+      - ../../.local-mvp/postgres/admin-password:/run/secrets/admin-password:ro
+      - postgres-data:/var/lib/postgresql/data
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+  keycloak:
+    image: quay.io/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
+    command:
+      - start
+      - --db=dev-file
+      - --hostname=https://localhost:8444
+      - --http-enabled=false
+      - --https-certificate-file=/run/local/server.crt
+      - --https-certificate-key-file=/run/local/server.key
+      - --import-realm
+    ports:
+      - "127.0.0.1:8444:8443"
+    volumes:
+      - ../../.local-mvp/tls:/run/local:ro
+      - ../../.local-mvp/realm:/opt/keycloak/data/import:ro
+      - keycloak-data:/opt/keycloak/data
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+volumes:
+  postgres-data:
+  keycloak-data:

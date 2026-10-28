@@ -25,8 +25,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let trust = TrustedCa::from_pem(&fs::read(&args[1])?)?;
     let scope = DeclaredScope::new([&args[2], &args[3], &args[4], &args[5]])?;
     let read = args[12].contains("read");
+    let public = args[12].contains("public");
     let cancel = args[12].starts_with("cancel");
     let budget = Duration::from_millis(args[14].parse()?);
+    let identity = if let Ok(path) = env::var("CONTOUR_FIXTURE_ID_TOKEN") {
+        let verifier = contour_auth::IdTokenVerifier::new(
+            "https://idp.example.test/realms/demo",
+            "apicontour",
+            include_bytes!("../../contour-auth/tests/fixtures/public-jwks.json"),
+        )?;
+        Some(
+            verifier.verify(
+                &fs::read_to_string(path)?,
+                "server-generated-one-use-nonce",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            )?,
+        )
+    } else {
+        None
+    };
     let settings = DatabaseSettings::new(
         "localhost",
         args[0].parse()?,
@@ -53,7 +72,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let mut connection=settings.connect(&trust).await?;
         let deadline=tokio::time::Instant::now()+budget;
-        let mut future:std::pin::Pin<Box<dyn Future<Output=_>>>=if read {
+        let mut future:std::pin::Pin<Box<dyn Future<Output=_>>>=if let Some(identity)=identity.as_ref() {
+            if public && read { Box::pin(connection.read_public_comparison_as_human_until(identity,&scope,&args[6],&args[7],deadline)) }
+            else if public { Box::pin(connection.store_public_comparison_as_human_until(identity,&scope,&request,deadline)) }
+            else if read { Box::pin(connection.read_comparison_as_human_until(identity,&scope,&args[6],&args[7],deadline)) }
+            else { Box::pin(connection.store_comparison_as_human_until(identity,&scope,&request,deadline)) }
+        } else if read {
             Box::pin(connection.read_comparison_until(&scope,&args[6],&args[7],deadline))
         } else { Box::pin(connection.store_comparison_until(&scope,&request,deadline)) };
         let result=if cancel {
@@ -73,7 +97,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Err(ComparisonStoreError::Invalidated)
         } else { future.await };
         let (outcome,value)=match result {
-            Ok(stored)=>(format!("{:?}",stored.status()),json!({"id":stored.comparison_id(),"created":stored.created_micros(),"inputs":stored.inputs().each_ref().map(|i|[i.kind(),i.id()]),"versions":stored.versions(),"result":serde_json::from_slice::<serde_json::Value>(&stored.result().to_wire_json()?)?})),
+            Ok(stored)=>(format!("{:?}",stored.status()),json!({"id":stored.comparison_id(),"created":stored.created_micros(),"inputs":stored.inputs().each_ref().map(|i|[i.kind(),i.id()]),"public_inputs":stored.public_inputs().map(|a|a.each_ref().map(|i|[i.kind(),i.id()])),"versions":stored.versions(),"result":serde_json::from_slice::<serde_json::Value>(&stored.result().to_wire_json()?)?})),
             Err(error)=>(error.to_string(),json!(null)),
         };
         if outcome!=args[13] && !(args[13]=="Either" && matches!(outcome.as_str(),"Stored"|"Duplicate"|"Conflict")) { println!("{outcome}");io::stdout().flush()?;return Err("outcome mismatch".into()); }

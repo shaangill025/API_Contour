@@ -1,0 +1,1 @@
+{"openapi":"3.0.3","paths":{"/source":{"post":{"responses":{"200":{"description":"Synthetic response","content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}}}}}}}

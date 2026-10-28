@@ -587,3 +587,149 @@ no approval event. New restricted roles use forced tenant RLS; the writer's narr
 request-column UPDATE grant permits row locking while triggers forbid mutation.
 The application must still authorize the actor and atomically lock/check the
 review and approved head before inserting a decision and replacing the baseline.
+
+Migration 0009 stores operator-provisioned human actors, exact case-sensitive
+issuer/subject identities and explicit tenant/project/service memberships. Service
+roles are closed, additive records scoped to one service and its project. All new
+records default disabled; provisioning can insert records and toggle enabled flags,
+while identity and scope keys remain fixed. Disable records instead of deleting or
+reassigning them; foreign keys do not cascade into actor history.
+
+`contour_human_lookup` is a trusted pretenant authentication metadata role, not a
+tenant-user role. Its explicit forced-RLS policies allow reading all five metadata
+tables, including disabled rows, before tenant selection. Its narrow actor-column
+UPDATE grant permits row locks; triggers reject even no-op actor updates. It cannot
+change enabled flags. `contour_human_provisioner` alone can provision and toggle
+metadata. Neither role inherits collector/business roles or receives business data
+access. No BYPASSRLS or security-definer function is introduced. Future authorization
+must check every enabled flag and exact resource scope per request and hold relevant
+locks through business commit; this migration does not implement that adapter,
+login/session handling, automatic enrollment, email identity or endpoint permissions.
+
+Migration 0010 groups exact checked declared versions into immutable whole-service
+import revisions. An import records its resolved environment, server creation time,
+closed warning codes and expected member count. Deferred completeness checks seal
+the member set at transaction completion, preventing partial imports or later
+append. More than one graph may belong to one operation; no response status or
+media type is silently selected. Raw documents and arbitrary source selectors are
+not stored. Existing declared reader/writer roles provide tenant-scoped access.
+
+Privileged provisioning administrators configure `service_import_defaults` for
+each exact tenant/project/service. Application roles cannot configure or change
+defaults; the writer's tenant-column privilege permits row locks while a trigger
+rejects every scope update. Missing configuration is not an implicit environment.
+Changing a default cannot change an existing revision's environment. The internal
+service import adapter locks the default, allocates increasing service revisions,
+stores checked graphs and seals membership in one transaction. SQL uniqueness alone
+is not an allocator; neither the migration nor adapter provides public endpoints.
+
+Migration 0011 adds versioned body/status/media associations. Existing manifests
+remain projection 1 with no invented selectors. Projection 2 requires a closed
+request or response selector and a bounded media label for every member; deferred
+validation forbids mixing legacy and selector-complete members. Distinct internal
+versions retain identical graphs at different selectors, while duplicate selectors
+for the same operation are rejected. Existing immutable scope and tenant protections
+remain in force. Trusted application code must independently approve media labels,
+verify selector direction against each checked graph and reject unsupported legacy
+projections when loading a selector-complete bundle.
+
+`ServiceImportScope` identifies an independently authorized tenant/project/service.
+`resolve_import_default_until` returns the scope used to build a checked import
+policy. `store_service_import_until` rechecks that environment under the default
+row lock; a changed or missing default fails without partial writes. Every member
+gets a distinct internal version UUID. A stable caller-owned contract UUID is the
+retry identity: exact historical retries return the stored result even after the
+default changes or disappears, while changed sanitized content conflicts.
+
+`read_service_import_until` supports a separate declared-reader login. It checks the
+projection, selector direction, supported protocol/method, canonical graph identity,
+membership and aggregate bounds before returning results. Payload lengths are
+checked before graph retrieval. Cancellation invalidates the connection; uncertain
+COMMIT replies return `OutcomeUnknown`, requiring the same ID and bundle on retry.
+A confirmed commit remains successful if subsequent connection cleanup fails.
+These are internal operator-scoped APIs; live human authorization and public HTTP
+integration are still required before exposing them to users.
+# Human-authorized import adapter
+
+`resolve_import_default_as_human_until`, `store_service_import_as_human_until`
+and `read_service_import_as_human_until` accept `contour_auth::VerifiedIdentity`
+from the configured verifier. The requested tenant/project/service is a candidate
+scope; no token role, email or request actor ID grants authority. Exact issuer and
+subject map to an enabled actor, tenant membership, project membership and service
+role. Import/default resolution requires `service_owner`; import reads accept
+`service_owner` or `viewer`. Other roles confer no implicit contract permission.
+All failures of current authorization return `Forbidden`, including historical
+import retries after revocation.
+
+Provision dedicated application logins with `contour_human_lookup` plus the
+specific `contour_declared_reader` or `contour_declared_writer` group. Do not grant
+lookup to shared business groups or provisioning privileges to application logins.
+Human reads use ordinary transactions so they can lock metadata, but their login
+has no business INSERT privileges. The existing operator APIs remain trusted
+application APIs: these credentials must never be distributed to human clients.
+
+Authorization takes `FOR SHARE` locks in identity, actor, tenant, project and
+service-role order, within the business transaction. Those locks conflict with
+provisioning updates to `enabled` and survive until commit/rollback. An operation
+that wins the locks may finish before revocation commits; operations following
+committed revocation fail. Expiry is checked against database time before and
+after authorization and again after business work, rolling back expired writes.
+Cancellation and ambiguous/confirmed COMMIT behavior retain the existing adapter
+semantics. The TLS fixture `--human-import` checks these properties with restricted
+logins, observed revocation races and transport faults.
+
+This is a database authorization boundary, not browser OIDC login, session, CSRF,
+logout, or authenticated HTTP routing. Those layers must verify retained identity
+credentials with current verifier configuration before using these APIs.
+
+The internal review adapter uses dedicated writer logins composed from
+`contour_review_writer` and `contour_approval_writer`; readers need only
+`contour_review_reader`. It checks scoped comparison metadata, without fetching or
+revalidating graph/result bytes. Trusted callers authorize actors separately.
+Create retries preserve every request identity and creator. Decision transactions
+lock the request before its stable approval head and compare both the review
+revision and expected head, including rejection. Approval creates a fresh event,
+updates the head and records the terminal decision atomically. Exact terminal
+retries return the original receipt even after later head advancement. A review
+revision is 1 pending and 2 terminal; it is neither a contract revision nor an event
+UUID. Retry uncertain commit acknowledgement with unchanged decision identities.
+
+Human comparison and review methods take `VerifiedIdentity` and acquire the same
+current metadata locks as human imports, before reads or historical retries.
+Owner access is required for creation/decisions; owner or viewer access permits
+reads. Dedicated runtime logins combine human lookup with their existing business
+reader/writer groups and never provisioning privileges. Expiry after business work
+rolls back new comparisons, reviews and approval events.
+
+`HumanReviewRequest` and `HumanReviewDecisionRequest` have no caller-supplied actor.
+The transaction derives both creator and decision-maker from the exact locked
+identity mapping. Different authorized humans can create and decide; retries must
+match the actual recorded actor. The human TLS fixture verifies two-actor
+attribution, denial, revocation ordering, expiry rollback and direct review COMMIT
+and cancellation faults. These methods still use internal version/event identities;
+the public adapter and HTTP projection remain necessary before exposing the
+complete local review workflow.
+
+Migration 0012 adds immutable `public_comparison_inputs`. Public projection 2
+requires exactly two scoped associations in the same transaction as the comparison;
+each must match its internal side's kind, version and approval event. Declared
+public IDs identify the selected whole import; approved public IDs identify an
+immutable approval event. Two imports may contain the same graph without losing
+which import was selected. Legacy projection 1 accepts no associations, so an old
+comparison cannot acquire guessed public identities later. Composite foreign keys,
+forced tenant RLS and immutable triggers preserve scope and seal committed pairs.
+
+These storage constraints do not establish historical approval-to-import provenance
+or the single-member selection policy. The public adapter must recover an approved
+input's source import through its review decision and original comparison, and must
+reject ambiguous operation members and mismatched body/media selectors. That adapter
+and its HTTP integration are still pending.
+
+Public comparison operations use `store_public_comparison_as_human_until` and
+`read_public_comparison_as_human_until`. Declared input IDs identify whole-service
+imports; approved input IDs identify approval events. The connection requires the
+comparison and declared roles plus `contour_review_reader` to resolve approval
+provenance. Both operations authorize the current human within their transaction.
+The adapter rejects imports with multiple members for the operation, differing
+body selectors or media types, and comparisons without public projection 2.
+Retries must retain the same public input IDs, even when imported graphs match.

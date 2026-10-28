@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+contour-auth = { path = "../contour-auth" }
 contour-core = { path = "../contour-core" }
 time = { version = "=0.3.47", default-features = false, features = ["std"] }
 tokio-postgres = "=0.7.18"
