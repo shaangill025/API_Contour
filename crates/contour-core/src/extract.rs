@@ -82,10 +82,58 @@ impl ExtractionPolicy {
     }
 }
 
+/// Trusted adapter clock providing monotonic ticks in a consistent time domain.
+/// Missing or backwards ticks stop inspection with a limit result.
+pub trait InspectionClock {
+    fn now(&mut self) -> Option<Duration>;
+}
+
+pub(crate) struct NativeClock(Instant);
+impl NativeClock {
+    pub(crate) fn new() -> Self {
+        Self(Instant::now())
+    }
+}
+impl InspectionClock for NativeClock {
+    fn now(&mut self) -> Option<Duration> {
+        Some(self.0.elapsed())
+    }
+}
+
 /// Local extraction only: authorization, persistence and transport are caller concerns.
 pub fn extract_json(bytes: &[u8], policy: &ExtractionPolicy) -> Observation {
-    let start = Instant::now();
-    run(bytes, policy, &mut || start.elapsed())
+    extract_json_with_clock(bytes, policy, &mut NativeClock::new())
+}
+
+/// Extract using a trusted adapter-installed monotonic clock; this grants no authority.
+pub fn extract_json_with_clock(
+    bytes: &[u8],
+    policy: &ExtractionPolicy,
+    clock: &mut dyn InspectionClock,
+) -> Observation {
+    with_elapsed(clock, |elapsed| run(bytes, policy, elapsed))
+}
+
+fn with_elapsed<T>(
+    clock: &mut dyn InspectionClock,
+    operation: impl FnOnce(&mut dyn FnMut() -> Duration) -> T,
+) -> T {
+    let initial = clock.now();
+    let mut last = initial;
+    let mut elapsed = || {
+        let tick = clock.now();
+        match (initial, last, tick) {
+            (Some(start), Some(previous), Some(current)) if current >= previous => {
+                last = Some(current);
+                current - start
+            }
+            _ => {
+                last = None;
+                Duration::from_millis(2)
+            }
+        }
+    };
+    operation(&mut elapsed)
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +145,7 @@ struct Context<'a> {
     elapsed: &'a mut dyn FnMut() -> Duration,
     failure: Option<Failure>,
     permission: bool,
+    signed: Option<&'a crate::VerifiedPolicy>,
 }
 impl Context<'_> {
     fn checkpoint(&mut self) -> Result<(), Failure> {
@@ -121,11 +170,80 @@ fn run(
         elapsed,
         failure: None,
         permission: false,
+        signed: None,
     };
     let result = (|| {
         preflight(bytes, &mut context)?;
         let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| Failure::Malformed)?;
         let shape = inspect(raw, policy, 1, &mut context)?;
+        shape.to_wire_json().map_err(|_| Failure::Limit)?;
+        context.checkpoint()?;
+        Ok(shape)
+    })();
+    match result {
+        Ok(shape) => Observation {
+            shape,
+            completeness: if context.permission {
+                Completeness::Partial
+            } else {
+                Completeness::Complete
+            },
+            reasons: if context.permission {
+                vec![ObservationReason::Permission]
+            } else {
+                vec![]
+            },
+        },
+        Err(Failure::Limit) => Observation {
+            shape: Shape::unknown(UnknownReason::Limit),
+            completeness: Completeness::Partial,
+            reasons: vec![ObservationReason::Limit],
+        },
+        Err(Failure::Malformed) => Observation {
+            shape: Shape::unknown(UnknownReason::Malformed),
+            completeness: Completeness::Unavailable,
+            reasons: vec![ObservationReason::Malformed],
+        },
+    }
+}
+
+// The caller has already validated scope and lease. Limits are enforced before
+// parsing, and policy names are checked recursively without copying values.
+pub(crate) fn extract_signed_json_with_clock(
+    bytes: &[u8],
+    policy: &crate::VerifiedPolicy,
+    clock: &mut dyn InspectionClock,
+) -> Observation {
+    with_elapsed(clock, |elapsed| {
+        extract_signed_json_elapsed(bytes, policy, elapsed)
+    })
+}
+
+fn extract_signed_json_elapsed(
+    bytes: &[u8],
+    policy: &crate::VerifiedPolicy,
+    elapsed: &mut dyn FnMut() -> Duration,
+) -> Observation {
+    if bytes.len() > policy.inspection_bytes() {
+        return Observation {
+            shape: Shape::unknown(UnknownReason::Limit),
+            completeness: Completeness::Partial,
+            reasons: vec![ObservationReason::Limit],
+        };
+    }
+    let mut context = Context {
+        elapsed,
+        failure: None,
+        permission: false,
+        signed: Some(policy),
+    };
+    let result = (|| {
+        preflight(bytes, &mut context)?;
+        let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| Failure::Malformed)?;
+        let shape = inspect(raw, &ExtractionPolicy::default(), 1, &mut context)?;
+        if shape.depth() > policy.depth_limit() {
+            return Err(Failure::Limit);
+        }
         shape.to_wire_json().map_err(|_| Failure::Limit)?;
         context.checkpoint()?;
         Ok(shape)
@@ -213,7 +331,7 @@ fn inspect(
     context: &mut Context<'_>,
 ) -> Result<Shape, Failure> {
     context.checkpoint()?;
-    if depth > MAX_DEPTH {
+    if depth > context.signed.map_or(MAX_DEPTH, |p| p.depth_limit()) {
         return Err(Failure::Limit);
     }
     if policy.denied {
@@ -229,7 +347,13 @@ fn inspect(
             let (mut fields, mut additional) = (Vec::new(), Vec::new());
             for (name, child) in children {
                 context.checkpoint()?;
-                if let Some((approved, child_policy)) =
+                if let Some(signed) = context.signed {
+                    if signed.approves_name(&name) {
+                        fields.push((name, inspect(child, policy, depth + 1, context)?));
+                    } else {
+                        context.permission = true;
+                    }
+                } else if let Some((approved, child_policy)) =
                     policy.fields.iter().find(|(approved, _)| approved == &name)
                 {
                     if child_policy.denied {
@@ -267,6 +391,12 @@ fn inspect(
                 .map_err(|_| context.failure.take().unwrap_or(Failure::Malformed))?;
             if children.is_empty() {
                 Shape::empty_array()
+            } else if context.signed.is_some() {
+                let mut shapes = Vec::new();
+                for child in children {
+                    shapes.push(inspect(child, policy, depth + 1, context)?);
+                }
+                Shape::array(Shape::union(shapes).map_err(|_| Failure::Limit)?)
             } else if let Some(items) = policy.items.as_deref().filter(|policy| !policy.denied) {
                 let mut shapes = Vec::new();
                 for child in children {

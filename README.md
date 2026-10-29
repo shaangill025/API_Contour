@@ -8,7 +8,7 @@ It is designed to observe authorized traffic, remove values locally, and send
 only approved structural information to a central catalog. Teams will compare
 observed structures with declared and approved contracts, then review changes.
 
-**Status: local lifecycle MVP available; broader discovery platform under development.**
+**Status: local lifecycle foundation available; replacement discovery MVP under development.**
 The local Docker Compose stack serves a React review workspace and authenticated
 HTTPS APIs backed by PostgreSQL and a local Keycloak provider. Owners can import
 OpenAPI JSON, select an authorized operation, compare exact immutable versions,
@@ -22,7 +22,15 @@ The Rust core also implements bounded structural extraction, retention, policy
 verification and operator-configured mTLS ingestion/delivery libraries. The
 architecture and package coverage below include future work.
 
-## Run the local MVP
+The [replacement MVP requirements](docs/specification/13-discovery-mvp.md) include
+TLS-aware discovery, interchangeable integrations, originating-instance attribution,
+causal tracing, managed TLS termination and universal black-box coverage. They are
+not yet satisfied. Component fixtures exercise an owned HTTPS client through signed
+capture authority and sanitized PostgreSQL delivery, a [managed Envoy TLS transport](docs/discovery/managed-gateway.md),
+and an [instance registry](db/README.md). Registry rows alone do not prove origin;
+the transport fixture does not yet capture API structure.
+
+## Run the local lifecycle foundation
 
 Install Docker Compose, Python 3.13, OpenSSL and Rust 1.88.0 for the startup identity
 verifier. Fetch locked Rust dependencies and the pinned infrastructure images once:
@@ -85,15 +93,17 @@ Bounded retention, authenticated single-attempt delivery, and caller-driven retr
 decisions are implemented in shared libraries. The collector owner requires online
 authority after startup and preserves policy history for retained records. Exact
 pre-send chunking is implemented; general splitting after an uncertain HTTP413,
-enrollment, a full background scheduler, durable local storage and capture callback
-integration remain pending.
+enrollment, a full background scheduler, durable local storage and released capture
+adapters remain pending.
 
 Collection must not wait for a remote response on the application request path.
 If a collector reaches its limits, it must report loss or incomplete visibility.
 Encrypted traffic exposes only what the authorized capture point can see.
 APIContour will not bypass certificate pinning or collect TLS secrets.
-Collection is passive. It must not probe endpoints, replay production requests,
-change request routing, or join business consumer groups to obtain messages.
+Passive integrations preserve request routing and encryption behavior. An explicitly
+authorized managed gateway may route traffic and terminate TLS under reviewed
+configuration. Collection must not probe endpoints, replay production requests,
+or join business consumer groups to obtain messages.
 
 ## Planned packages and coverage
 

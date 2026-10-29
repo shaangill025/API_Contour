@@ -733,3 +733,12 @@ provenance. Both operations authorize the current human within their transaction
 The adapter rejects imports with multiple members for the operation, differing
 body selectors or media types, and comparisons without public projection 2.
 Retries must retain the same public input IDs, even when imported graphs match.
+
+Migration 13 adds an administrative instance registry. Existing sources remain
+permanently unbound; a provisioner creates an instance-mode source and binding
+atomically with `contour.register_instance_source` after acquiring the collector
+lock in a separate statement. Instance IDs must come from trusted provisioning.
+These relational bindings do not establish verified capture origin or lifecycle
+validity; admission, catalog and wire behavior are unchanged. Registry rows are
+immutable and tenant scoped. No lifecycle closure or cross-collector locking is
+provided.

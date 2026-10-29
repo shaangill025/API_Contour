@@ -489,3 +489,46 @@ SQL
 docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
     -h /var/run/postgresql -U contour_comparison_writer_test -d contour_fixture < "$root/db/tests/public_comparisons.sql"
 echo 'PostgreSQL immutable public comparison association fixture passed'
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0013_instance_registry.sql" | admin_sql; then
+    echo 'Injected instance registry migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.workload_instances') IS NULL
+    AND to_regclass('contour.source_instance_bindings') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='contour'
+        AND table_name='sources' AND column_name='binding_mode')
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=13), 'instance migration rollback');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0013_instance_registry.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9,10,11,12,13]::integer[], 'thirteen migration ledger entries');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_admin_test -d contour_fixture < "$root/db/tests/instance_registry.sql"
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.workload_instances SET instance_id=instance_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.source_instance_bindings','23514');
+SQL
+# A missing binding must fail at COMMIT under the actual restricted login.
+if missing_binding_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=verbose \
+    -h /var/run/postgresql -U contour_admin_test -d contour_fixture 2>&1 <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.lock_collector('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+INSERT INTO contour.sources VALUES ('aaaaaaaa-0000-0000-0000-000000000000',
+ '00000000-0000-0000-0000-000000000104','00000000-0000-0000-0000-000000000001',
+ '00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',
+ '00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',
+ '00000000-0000-0000-0000-000000000104','instance');
+COMMIT;
+SQL
+); then
+    echo 'Unbound instance source unexpectedly committed' >&2; exit 1
+fi
+if [[ "$missing_binding_output" != *"23514"* ]]; then
+    echo "$missing_binding_output" >&2; echo 'Missing binding failed for unexpected reason' >&2; exit 1
+fi
+echo 'PostgreSQL instance registry fixture passed'
