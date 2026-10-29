@@ -16,6 +16,7 @@ import time
 import uuid
 
 sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("gateway_config", ROOT / "deploy/gateway/config.py")
 gateway = importlib.util.module_from_spec(spec)
@@ -31,17 +32,19 @@ def certs(p):
     def openssl(*args):
         cmd("openssl", *args, cwd=p)
     for name in ("ca", "other"):
-        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", name + ".key", "-out", name + ".pem", "-days", "2", "-subj", "/CN=" + name)
+        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", name + ".key", "-out", name + ".pem", "-days", "2", "-subj", "/CN=" + name, "-addext", "basicConstraints=critical,CA:true", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash", "-addext", "authorityKeyIdentifier=keyid:always")
     for name, host in (("down", "gateway.test"), ("up", "upstream.test"), ("wrong", "wrong.test"), ("expired", "upstream.test")):
         openssl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", name + ".key", "-out", name + ".csr", "-subj", "/CN=" + host)
-        (p / (name + ".ext")).write_text("subjectAltName=DNS:" + host + "\nextendedKeyUsage=serverAuth\n")
+        (p / (name + ".ext")).write_text("basicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\nsubjectAltName=DNS:" + host + "\nextendedKeyUsage=serverAuth\n")
         if name == "expired":
             (p / "index.txt").write_text("")
             (p / "serial").write_text("01\n")
-            (p / "ca.cnf").write_text("[ca]\ndefault_ca=local\n[local]\ndatabase=index.txt\nserial=serial\nnew_certs_dir=.\ncertificate=ca.pem\nprivate_key=ca.key\ndefault_md=sha256\npolicy=policy\nx509_extensions=ext\n[policy]\ncommonName=supplied\n[ext]\nsubjectAltName=DNS:upstream.test\nextendedKeyUsage=serverAuth\n")
+            (p / "ca.cnf").write_text("[ca]\ndefault_ca=local\n[local]\ndatabase=index.txt\nserial=serial\nnew_certs_dir=.\ncertificate=ca.pem\nprivate_key=ca.key\ndefault_md=sha256\npolicy=policy\nx509_extensions=ext\n[policy]\ncommonName=supplied\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\nsubjectAltName=DNS:upstream.test\nextendedKeyUsage=serverAuth\n")
             openssl("ca", "-batch", "-config", "ca.cnf", "-in", name + ".csr", "-out", name + ".pem", "-startdate", "20200101000000Z", "-enddate", "20210101000000Z")
         else:
             openssl("x509", "-req", "-in", name + ".csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", name + ".pem", "-days", "1", "-extfile", name + ".ext")
+    for name in ("down", "up", "wrong", "expired"):
+        openssl("verify", "-x509_strict", "-purpose", "sslserver", "-no_check_time", "-CAfile", "ca.pem", name + ".pem")
     for f in p.iterdir():
         os.chmod(f, 0o600)
 
@@ -126,6 +129,7 @@ def stop(server):
 
 def request(port, ca):
     ctx = ssl.create_default_context(cafile=str(ca))
+    ctx.verify_flags |= ssl.VERIFY_X509_STRICT
     sock = socket.create_connection(("127.0.0.1", port), timeout=3)
     with ctx.wrap_socket(sock, server_hostname="gateway.test") as tls:
         tls.sendall(b"POST /probe?q=1 HTTP/1.1\r\nHost: gateway.test\r\nX-Test: synthetic\r\nConnection: close\r\nContent-Length: " + str(len(SENTINEL)).encode() + b"\r\n\r\n" + SENTINEL)
@@ -179,6 +183,7 @@ def main():
                         if sys.platform == "darwin" else listen_port)
                 assert cmd("docker", "inspect", "--format", "{{.State.Running}}", name).stdout.strip() == b"true"
                 deadline = time.monotonic() + 15
+                last_error = None
                 while True:
                     try:
                         status, header, body = request(port, p / "ca.pem")
@@ -190,10 +195,16 @@ def main():
                             assert hits == 0, "rejected upstream reached HTTP handler"
                             break
                         assert status == 503, (cert, ca, status)
-                    except (OSError, ssl.SSLError):
-                        pass
+                    except ssl.SSLCertVerificationError as error:
+                        raise AssertionError(("downstream certificate verification failed", error.verify_code)) from None
+                    except ssl.SSLError:
+                        last_error = ("tls", None)
+                    except OSError as error:
+                        last_error = ("socket", error.errno if isinstance(error.errno, int) else None)
                     if time.monotonic() >= deadline:
-                        raise AssertionError(("upstream TLS evidence missing", cert, ca, server.counts()))
+                        state = json.loads(cmd("docker", "inspect", "--format", '{{json .State}}', name).stdout)
+                        safe_state = (bool(state["Running"]), int(state["ExitCode"]), bool(state["OOMKilled"]))
+                        raise AssertionError(("upstream TLS evidence missing", cert, ca, server.counts(), safe_state, last_error))
                     time.sleep(.1)
                 if expected == 201:
                     assert header == "synthetic" and body == SENTINEL
