@@ -2,6 +2,10 @@
 
 This addendum extends the [product scope](01-product.md) and [collector support contract](07-collectors.md). It records required behavior, not an implementation or completion claim. The existing R1 collector families and protocol obligations remain in scope. Test profiles and inventories are evidence tools; they do not reduce the universal requirement.
 
+## Required deployment prerequisites
+
+A deployment must provide an authorized plaintext capture point, through APIContour-managed TLS termination or a qualified runtime integration, and trusted causal context through propagation or runtime hooks. Setup must verify those prerequisites and their permitted scope before qualifying the deployment. Missing access or context blocks qualification; it is not permission to infer success. These owner-approved setup requirements retain every requested MVP capability and the inherited family/protocol obligations. They do not authorize customer access, keys, routing or instrumentation without the appropriate deployment-specific permission.
+
 ## Discovery and attribution
 
 Discover policy-permitted API structure from actual requests and responses, including TLS-protected traffic where authorized plaintext is accessible. Capture integrations must be interchangeable through a versioned capability and observation interface. At least two independently exercised real integrations must feed the same semantics, including switching, detachment and overlap tests; that minimum does not exhaust universal coverage.
@@ -18,7 +22,7 @@ An explicitly authorized APIContour-managed gateway must provide routing configu
 
 ## Universal coverage and feasibility
 
-Universal black-box coverage remains a literal release requirement, including the inherited families and protocols. A finite positive matrix, metadata-only observation, visibility badge or proxy suggestion cannot establish universal coverage. Arbitrary inaccessible encrypted systems may not expose plaintext, and causality inside opaque concurrent systems may not be recoverable without suitable runtime access or trustworthy evidence. Such cases are **BLOCKED**, not passes or a reason to redefine the requirement. Maintain an inventory of access, runtime, protocol and trust boundaries with evidence, and obtain an owner decision for unresolved feasibility; an inventory does not narrow scope.
+Universal black-box coverage remains a release requirement for deployments satisfying the required access and causal-context prerequisites, including the inherited families and protocols. A finite positive matrix, metadata-only observation, visibility badge or proxy suggestion cannot establish that coverage. APIContour must require the necessary capture point and trusted context before qualification; inaccessible plaintext and opaque causal execution cannot be reported as captured traffic or proven links. Missing prerequisites leave a deployment **BLOCKED** until they are provided. Maintain an inventory of access, runtime, protocol and trust boundaries with actual evidence; an inventory does not narrow scope or defer a core capability.
 
 ## Cross-cutting and release evidence
 
