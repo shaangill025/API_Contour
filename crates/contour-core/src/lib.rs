@@ -2,7 +2,9 @@
 
 use std::fmt;
 mod admission;
-pub use admission::{AdmissionError, AdmissionInputs, SourceAssignment, validate_admission};
+pub use admission::{
+    AdmissionError, AdmissionInputs, CaptureScope, SourceAssignment, validate_admission,
+};
 mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod comparison;
@@ -41,6 +43,12 @@ pub use import_bundle::{
     DeclaredImportBundle, DeclaredImportMember, ImportBodySelector, ImportBundleWarning,
     MAX_IMPORT_GRAPH_BYTES, MAX_IMPORT_GRAPH_NODES, MAX_IMPORT_GRAPH_VISITS, MAX_IMPORT_MEMBERS,
     ResponseSelector, ServiceImportPolicy, import_service_declared,
+};
+mod discovery;
+pub use discovery::{
+    CapturePoint, CaptureProvenance, CausalClassificationClaim, CausalLink, CausalLinks,
+    CollectorIdentity, DestinationService, DiscoveryError, MAX_CAUSAL_LINKS, TlsLeg,
+    WorkloadIdentity,
 };
 mod extract;
 mod operation;

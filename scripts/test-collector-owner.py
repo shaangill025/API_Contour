@@ -65,9 +65,13 @@ def run_cases(execute, setup, server, directory, environment, probe):
 
     body,_,_=setup('owner_success',current=1,history=(1,))
     with server(body) as port, owner(body,port) as call:
+        assert denied(call('inspect'))['bytes']==0
         assert denied(call('admit'))['bytes']==0
         denied(call('freeze')); denied(call('send'))
         assert good(call('refresh'))['live']
+        inspection=good(call('inspect'))['result']
+        assert inspection=={'revision':1,'partial':True,'approved_nested':True,'denied_absent':True}
+        wrong=call('inspect',invalid_source=True); assert 'error' in wrong['result'] and wrong['live']
         charged=good(call('admit')); assert charged['bytes']>0 and charged['records']==1
         assert good(call('freeze'))['bytes']==charged['bytes']
         result=good(call('send')); assert result['bytes']==0 and result['records']==0 and result['acknowledged']==1
@@ -79,12 +83,66 @@ def run_cases(execute, setup, server, directory, environment, probe):
     # A fresh object never bootstraps from the prior success.
     with server(body) as port, owner(body,port) as call: denied(call('send'))
 
+    # An owned opt-in application client exchanges actual HTTP/1.1 over TLS.
+    # Its application buffers remain local; only sanitized observations reach
+    # the queue. This is not a generic runtime adapter or host capture test.
+    @contextlib.contextmanager
+    def source_server():
+        events=[]
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.connection.settimeout(3)
+                length=int(self.headers.get('Content-Length','0'))
+                if length<0 or length>65536: events.append(False); self.send_error(413); return
+                request=self.rfile.read(length)
+                if self.path!='/orders/1' or request!=b'{"id":{"quantity":1,"SYNTHETIC_DENIED":"SYNTHETIC_REQUEST"}}':
+                    events.append(False); self.send_error(400); return
+                events.append(True)
+                payload=b'{"id":{"quantity":true,"SYNTHETIC_DENIED":"SYNTHETIC_RESPONSE"}}'
+                self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.send_header('Connection','close'); self.end_headers(); self.wfile.write(payload)
+        service=http.server.HTTPServer(('127.0.0.1',0),Handler)
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(directory/'server.crt',directory/'server.key')
+        service.socket=context.wrap_socket(service.socket,server_side=True)
+        thread=threading.Thread(target=service.serve_forever,daemon=True); thread.start()
+        try: yield service.server_port,events
+        finally:
+            service.shutdown(); service.server_close(); thread.join(3)
+            assert not thread.is_alive()
+
+    body,_,_=setup('owner_runtime_https',current=1,history=(1,))
+    with server(body) as port, source_server() as (source_port,events), owner(body,port) as call:
+        paused=good(call('capture-https',source_port=source_port)); assert paused['result']=={'application_ok':True,'admitted':0,'sanitized':True} and not paused['live']
+        assert good(call('refresh'))['live']
+        for invalid in ['bad_root','bad_name']:
+            failure=call('capture-https',source_port=source_port,**{invalid:True}); assert 'error' in failure['result'] and failure['records']==0
+        captured=good(call('capture-https',source_port=source_port)); assert captured['result']=={'application_ok':True,'admitted':2,'sanitized':True} and captured['records']==2
+        assert events==[True,True]
+        assert good(call('freeze'))['result']=={'frozen':True}
+        delivered=good(call('send')); assert delivered['records']==0 and delivered['acknowledged']==2
+        persisted=execute("SELECT (record_count=2)::text FROM contour.ingestion_batches WHERE "+scope(body)+";")
+        assert persisted=='true'
+        payload=execute("SELECT convert_from(checked_batch,'UTF8') FROM contour.ingestion_payloads WHERE "+scope(body)+";")
+        assert 'SYNTHETIC_' not in payload
+        records=json.loads(payload)['records']
+        assert len(records)==2 and {r['direction'] for r in records}=={'request','response'}
+        for record in records:
+            request=record['direction']=='request'
+            assert record['status_code']==(None if request else 200)
+            assert record['structure']['fields']['id']['fields']['quantity']['kind']==('integer' if request else 'boolean')
+            assert set(record['structure']['fields'])=={'id'}
+            assert set(record['structure']['fields']['id']['fields'])=={'quantity'}
+
     body,_,_=setup('owner_narrow',current=1,history=(1,))
     install(body,2,lambda p:p.update(denied_templates=['/orders/{id}']))
     with server(body) as port, owner(body,port) as call:
-        good(call('refresh')); good(call('admit')); good(call('freeze'))
+        good(call('refresh')); assert good(call('inspect'))['result']['approved_nested']
+        good(call('admit')); good(call('freeze'))
         change(body,'UPDATE contour.collector_authorization SET active_revision=2 WHERE '+scope(body))
         result=good(call('refresh')); assert result['records']==0 and result['bytes']==0 and result['purged']==1
+        narrowed=call('inspect'); assert 'error' in narrowed['result'] and narrowed['live']
         assert good(call('send'))['result']=={'empty':True}
         assert execute('SELECT count(*) FROM contour.ingestion_batches WHERE '+scope(body))=='0'
 
@@ -92,7 +150,7 @@ def run_cases(execute, setup, server, directory, environment, probe):
     with server(body) as port, owner(body,port) as call:
         good(call('refresh')); charged=good(call('admit')); good(call('freeze'))
         change(body,'UPDATE contour.collector_authorization SET enabled=false WHERE '+scope(body))
-        denied(call('refresh')); assert denied(call('send'))['bytes']==charged['bytes']
+        denied(call('refresh')); denied(call('inspect')); assert denied(call('send'))['bytes']==charged['bytes']
         change(body,'UPDATE contour.collector_authorization SET enabled=true WHERE '+scope(body))
         good(call('refresh')); assert good(call('send'))['bytes']==0  # 403 was not permanent revoke
 
@@ -247,4 +305,4 @@ def run_cases(execute, setup, server, directory, environment, probe):
                     while evidence.get('eof_count',0)<attempt+1 and time.monotonic()<until: time.sleep(0.01)
                     assert evidence.get('eof_count')==attempt+1, 'refresh cancellation did not close observed partial response'
         assert execute('SELECT count(*) FROM contour.ingestion_batches WHERE '+scope(body))=='0'
-    print('Collector owner actual online mTLS/PG receipt, pause/renewal/narrowing/highwater and challenge/source/identity/late/cancel negatives passed',flush=True)
+    print('Owned fixture HTTP/1.1 TLS request and response capture, synthetic pre-inspection via online mTLS authority and Collector owner actual online mTLS/PG receipt, pause/renewal/narrowing/highwater and challenge/source/identity/late/cancel negatives passed',flush=True)

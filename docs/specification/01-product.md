@@ -4,6 +4,8 @@
 
 The platform must identify observed APIs, their structures, their source and their limits. It must compare observed behavior with declared and approved contracts. It must show changes by service, environment and deployment.
 
+The [replacement discovery MVP](13-discovery-mvp.md) adds TLS-aware discovery, interchangeable capture, instance attribution, causal tracing, managed TLS termination and universal black-box coverage. Its requirements extend the following R1 scope; declared support profiles and a finite test matrix do not replace universal coverage.
+
 R1 includes gateway/proxy, Linux eBPF, managed browsers, Android, iOS, AWS, GCP, Azure, messaging, runtime/serverless, Kubernetes, Docker and CI integration. It includes HTTP, JSON, XML, forms, GraphQL, gRPC and WebSocket structural handling within declared support profiles.
 
 The backend and shared native core use Rust. PostgreSQL is the system of record. The UI uses TypeScript and React. Rust/WASM and Rust FFI share extraction logic where practical. Platform adapters can use TypeScript, Kotlin, Swift or Java. They must not replace the Rust backend.
@@ -25,7 +27,7 @@ An unknown API means an observed API with no matched approved catalog entry. It 
 
 The product must not probe endpoints, replay production requests, bypass certificate pinning, harvest TLS keys or join business consumer groups to obtain messages. Synthetic test traffic is allowed only in an isolated authorized fixture. Cloud management reads and existing-log ingestion require separate scoped permission.
 
-The product must not change request routing, broker delivery semantics, application responses or encryption controls. It may export approved structural contracts. It must never promote observations to approved contracts without an authorized review.
+Passive capture adapters must not change request routing, broker delivery semantics, application responses or encryption controls. An explicitly authorized APIContour-managed gateway may change routing and terminate TLS within its approved deployment and trust boundaries, subject to the [managed TLS requirements](13-discovery-mvp.md). It may export approved structural contracts. It must never promote observations to approved contracts without an authorized review.
 
 The image's phased roadmap defines internal checkpoints only. It does not remove a family from R1. Database observation is limited to approved service metadata in R1; SQL values and general database query capture are outside this baseline.
 

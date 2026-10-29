@@ -6,7 +6,7 @@ Every traffic-capture family needs at least one real structural capture case plu
 
 | Family | Initial positive profile | Required limits |
 |---|---|---|
-| Gateway | Envoy integration after TLS termination; NGINX integration where supported | Passthrough TLS has no body visibility; do not alter routing |
+| Gateway | Envoy integration after TLS termination; NGINX integration where supported | Passthrough TLS has no body visibility; passive integration does not alter routing. Explicitly authorized managed termination follows [the replacement MVP](13-discovery-mvp.md) |
 | Linux eBPF | Supported dynamically linked TLS library boundary with HTTP plaintext | Unsupported/static/inlined libraries, kernel or ABI changes report limits; no key harvesting |
 | Browser | Managed Chromium extension plus explicit first-party page instrumentation | Host permission and API limits; no universal response-body claim |
 | Android | Opt-in OkHttp application instrumentation through a native library | Unsupported clients and app-level encryption report limits |
@@ -21,7 +21,7 @@ Every traffic-capture family needs at least one real structural capture case plu
 | Docker | Container deployment and identity association | Restart and ephemeral volume behavior remain visible |
 | CI | Contract comparison CLI with scoped identity | Cannot prove runtime behavior from an artifact alone |
 
-These concrete technologies reconstruct a minimum test matrix. A proven infeasible technique can be replaced within its family through a recorded design decision. Removing a family needs an owner scope decision; it cannot be achieved by changing a test status.
+These concrete technologies reconstruct a minimum test matrix, not a replacement for the universal black-box coverage required by the [replacement discovery MVP](13-discovery-mvp.md). A proven infeasible technique can be replaced within its family through a recorded design decision. Removing a family needs an owner scope decision; it cannot be achieved by changing a test status.
 
 Chrome webRequest is an event API with permission and request-type constraints. It is not a general response-body feed. Managed page instrumentation needs its own security and compatibility tests. See the [Chrome API reference](https://developer.chrome.com/docs/extensions/reference/api/webRequest).
 

@@ -107,6 +107,7 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
 
     if delivery_only:
         runpy.run_path(str(Path(__file__).with_name('test-collector-delivery.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('delivery_probe')))
+        runpy.run_path(str(Path(__file__).with_name('test-collector-owner.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('owner_probe')))
         return
 
     def request(port, body, wanted=200, client='http-client', headers=None, method='POST', target='/v1/batches'):

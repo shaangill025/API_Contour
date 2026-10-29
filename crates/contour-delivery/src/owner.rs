@@ -4,7 +4,8 @@ use crate::{
     *,
 };
 use contour_core::{
-    AdmissionInputs, MemoryQueue, PolicyKeys, QueueLimits, QueueStats, RecordDraft, VerifiedPolicy,
+    AdmissionInputs, CaptureScope, MemoryQueue, Observation, PolicyKeys, QueueLimits, QueueStats,
+    RecordDraft, VerifiedPolicy,
 };
 use std::collections::BTreeSet;
 
@@ -201,6 +202,41 @@ impl CollectorOwner {
         self.live = Some(fresh.live);
         self.guard()
     }
+    /// Inspect only under the current live authority. The owner cannot refresh or
+    /// revoke concurrently while borrowed; expiry during extraction discards it.
+    /// The returned revision is selected by the owner, never by the adapter.
+    pub fn inspect_json(
+        &mut self,
+        scope: &CaptureScope<'_>,
+        bytes: &[u8],
+    ) -> Result<(u64, Observation), OwnerError> {
+        self.inspect_json_inner(scope, bytes, || {})
+    }
+    // Private hook permits deterministic testing of expiry at the boundary. It
+    // cannot be supplied by an adapter and never receives the body or authority.
+    fn inspect_json_inner(
+        &mut self,
+        scope: &CaptureScope<'_>,
+        bytes: &[u8],
+        after_inspection: impl FnOnce(),
+    ) -> Result<(u64, Observation), OwnerError> {
+        self.guard()?;
+        let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
+        let refs = self.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+        let inputs = AdmissionInputs::new(
+            self.client.identity.each_ref().map(String::as_str),
+            refs.last().ok_or(OwnerError::Paused)?,
+            &refs,
+            &live.sources,
+        )
+        .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
+        let result = inputs
+            .inspect_json(scope, bytes, OffsetDateTime::now_utc())
+            .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
+        after_inspection();
+        self.guard()?;
+        Ok(result)
+    }
     pub fn admit(&mut self, draft: RecordDraft) -> Result<(), OwnerError> {
         self.guard()?;
         let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
@@ -335,5 +371,122 @@ impl CollectorOwner {
         }
         self.expire_retained()?;
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use contour_core::SourceAssignment;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use serde_json::json;
+
+    const ID: &str = "00000000-0000-4000-8000-000000000001";
+    fn base64url(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = (u32::from(chunk[0]) << 16)
+                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*chunk.get(2).unwrap_or(&0));
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(TABLE[(n & 63) as usize] as char);
+            }
+        }
+        out
+    }
+    fn stamp(t: OffsetDateTime) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            t.year(),
+            u8::from(t.month()),
+            t.day(),
+            t.hour(),
+            t.minute(),
+            t.second()
+        )
+    }
+    fn make_owner() -> CollectorOwner {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let keys = PolicyKeys::new(&[("test", public)]).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let payload = serde_json::to_vec(&json!({"tenant_id":ID,"collector_id":ID,"revision":1,"issued_at":stamp(now - time::Duration::minutes(1)),"expires_at":stamp(now + time::Duration::minutes(1)),"enabled":true,"service_ids":[ID],"techniques":["runtime"],"approved_names":["GET","id"],"denied_templates":[],"inspection_bytes":65536,"depth_limit":32,"queue_bytes":10000,"queue_ttl_seconds":60,"durable_queue_enabled":false,"approved_route_segments":["orders"],"parser_profiles":["http_json_v1"]})).unwrap();
+        let signature = key.sign(&[b"apicontour/policy/1\n".as_slice(), &payload].concat());
+        let envelope = serde_json::to_vec(&json!({"payload_base64url":base64url(&payload),"signature_base64url":base64url(signature.as_ref()),"key_id":"test","signature_profile":"ed25519-v1"})).unwrap();
+        let policy = VerifiedPolicy::from_signed_json(&envelope, &keys, ID, ID, now).unwrap();
+        let config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_root_certificates(RootCertStore::empty())
+                .with_no_client_auth();
+        let client = DeliveryClient {
+            host: "localhost".into(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            identity: [ID.into(), ID.into()],
+            tls: TlsConnector::from(Arc::new(config)),
+            deadline: Duration::from_secs(1),
+        };
+        let mut owner =
+            CollectorOwner::new(client, keys, &[ID], QueueLimits::new(1, 10000).unwrap()).unwrap();
+        owner.policies.push(PolicyEntry {
+            policy,
+            bytes: envelope.len(),
+        });
+        owner.live = Some(LiveAuthority {
+            sources: vec![
+                SourceAssignment::new(ID, [ID; 6], "runtime", &["http_json_v1"]).unwrap(),
+            ],
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+        owner
+    }
+    fn scope() -> CaptureScope<'static> {
+        CaptureScope {
+            source_id: ID,
+            workload: [ID; 4],
+            parser_profile: "http_json_v1",
+            operation: "GET",
+            route_template: "/orders",
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        }
+    }
+    #[test]
+    fn paused_and_expired_owner_reject_before_inspection() {
+        let mut owner = make_owner();
+        owner.live = None;
+        assert!(matches!(
+            owner.inspect_json(&scope(), b"0"),
+            Err(OwnerError::Paused)
+        ));
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now();
+        assert!(matches!(
+            owner.inspect_json(&scope(), b"0"),
+            Err(OwnerError::Paused)
+        ));
+        assert!(!owner.is_live());
+    }
+    #[test]
+    fn expiry_after_extraction_discards_observation_and_pauses() {
+        let mut owner = make_owner();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        owner.live.as_mut().unwrap().deadline = deadline;
+        let result = owner.inspect_json_inner(&scope(), b"0", || {
+            while Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        });
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(!owner.is_live());
     }
 }

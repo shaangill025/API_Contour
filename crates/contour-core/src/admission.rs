@@ -144,6 +144,98 @@ impl<'a> AdmissionInputs<'a> {
     }
 }
 
+/// Value-free capture dimensions. These are checked against the authenticated
+/// assignment and current signed policy before the body is inspected.
+pub struct CaptureScope<'a> {
+    pub source_id: &'a str,
+    pub workload: [&'a str; 4],
+    pub parser_profile: &'a str,
+    pub operation: &'a str,
+    pub route_template: &'a str,
+    pub request_header_names: &'a [&'a str],
+    pub response_header_names: &'a [&'a str],
+    pub query_parameter_names: &'a [&'a str],
+}
+
+impl AdmissionInputs<'_> {
+    /// Snapshot validation only; the caller must own live enrollment and check
+    /// revocation/expiry immediately before and after this synchronous operation.
+    pub fn inspect_json(
+        &self,
+        scope: &CaptureScope<'_>,
+        bytes: &[u8],
+        now: OffsetDateTime,
+    ) -> Result<(u64, crate::Observation), AdmissionError> {
+        self.current
+            .validate_capture_at(now)
+            .map_err(|_| AdmissionError::Time)?;
+        if scope.parser_profile != "http_json_v1" {
+            return Err(AdmissionError::Scope);
+        }
+        let source = self
+            .sources
+            .get(scope.source_id)
+            .ok_or(AdmissionError::Source)?;
+        if source.identity.iter().map(String::as_str).ne([
+            self.identity[0],
+            self.identity[1],
+            scope.workload[0],
+            scope.workload[1],
+            scope.workload[2],
+            scope.workload[3],
+        ]) || !source
+            .parsers
+            .iter()
+            .any(|name| name == scope.parser_profile)
+        {
+            return Err(AdmissionError::Source);
+        }
+        if !self
+            .current
+            .approves(scope.workload[1], &source.technique, scope.parser_profile)
+            || !self.current.approves_name(scope.operation)
+            || [
+                scope.request_header_names,
+                scope.response_header_names,
+                scope.query_parameter_names,
+            ]
+            .iter()
+            .any(|names| {
+                names.len() > 128 || names.iter().any(|name| !self.current.approves_name(name))
+            })
+        {
+            return Err(AdmissionError::Scope);
+        }
+        validate_route(scope.route_template, self.current)?;
+        Ok((
+            self.current.revision(),
+            crate::extract::extract_signed_json(bytes, self.current),
+        ))
+    }
+}
+
+fn validate_route(template: &str, policy: &VerifiedPolicy) -> Result<(), AdmissionError> {
+    let segments = route(template)?;
+    if segments
+        .iter()
+        .any(|segment| !placeholder(segment) && !policy.approves_segment(segment))
+    {
+        return Err(AdmissionError::Route);
+    }
+    for denied in policy.denied_templates() {
+        let denied = route(denied)?;
+        if denied.len() == segments.len()
+            && denied
+                .iter()
+                .zip(&segments)
+                .all(|(a, b)| a == b || placeholder(a) || placeholder(b))
+        {
+            return Err(AdmissionError::Route);
+        }
+    }
+    Ok(())
+}
+
 /// Pure validation only: no revocation, persistence, queue purge or transaction.
 pub fn validate_admission(
     batch: &Batch,
@@ -208,7 +300,6 @@ pub(crate) fn validate_record(
     {
         return Err(AdmissionError::Source);
     }
-    let segments = route(&record.route_template)?;
     for policy in [*historical, inputs.current] {
         if !policy.approves(
             &record.service_id,
@@ -227,23 +318,7 @@ pub(crate) fn validate_record(
         {
             return Err(AdmissionError::Scope);
         }
-        if segments
-            .iter()
-            .any(|segment| !placeholder(segment) && !policy.approves_segment(segment))
-        {
-            return Err(AdmissionError::Route);
-        }
-        for denied in policy.denied_templates() {
-            let denied = route(denied)?;
-            if denied.len() == segments.len()
-                && denied
-                    .iter()
-                    .zip(&segments)
-                    .all(|(a, b)| a == b || placeholder(a) || placeholder(b))
-            {
-                return Err(AdmissionError::Route);
-            }
-        }
+        validate_route(&record.route_template, policy)?;
         let ttl = Duration::seconds(policy.ttl() as i64);
         if expires - queued > ttl {
             return Err(AdmissionError::Retention);

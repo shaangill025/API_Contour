@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   native:
-    needs: [business, delivery, local-mvp]
+    needs: [business, delivery, local-mvp, gateway]
     if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     steps:
       - name: Require all prerequisite TLS jobs
-        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' }}
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' }}
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -214,6 +214,24 @@ jobs:
       - name: Verify failed startup and durable restart
         timeout-minutes: 4
         run: python3 deploy/local/check_stack.py
+
+  gateway:
+    name: Managed gateway TLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Fetch approved immutable Envoy fixture
+        run: docker pull envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4
+      - name: Verify managed gateway TLS on Linux
+        timeout-minutes: 5
+        run: python3 scripts/test-managed-gateway.py
 
   postgres:
     name: PostgreSQL 16 identity

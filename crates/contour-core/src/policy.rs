@@ -186,6 +186,9 @@ impl VerifiedPolicy {
     pub(crate) fn denied_templates(&self) -> &[String] {
         &self.0.denied_templates.0
     }
+    pub(crate) fn inspection_bytes(&self) -> usize {
+        self.0.inspection_bytes.get() as usize
+    }
     pub(crate) fn depth_limit(&self) -> usize {
         self.0.depth_limit.get() as usize
     }

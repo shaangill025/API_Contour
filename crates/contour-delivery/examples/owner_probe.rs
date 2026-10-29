@@ -1,8 +1,17 @@
 //! Synthetic executable exercising the public owner against real fixture TLS.
+use bytes::Bytes;
 use contour_core::*;
 use contour_delivery::{CollectorOwner, DeliveryClient, SendOutcome};
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::{Request, client::conn::http1};
+use hyper_util::rt::TokioIo;
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, ServerName},
+};
 use serde_json::{Value, json};
 use std::future::{Future, poll_fn};
+use std::sync::Arc;
 use std::{
     error::Error,
     fs,
@@ -12,7 +21,16 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
+use tokio_rustls::TlsConnector;
 fn draft(r: &Value) -> Result<RecordDraft, Box<dyn Error>> {
+    let observation = Observation {
+        shape: Shape::from_wire_json(&serde_json::to_vec(&r["structure"])?)?,
+        completeness: Completeness::Complete,
+        reasons: vec![],
+    };
+    draft_observation(r, observation)
+}
+fn draft_observation(r: &Value, observation: Observation) -> Result<RecordDraft, Box<dyn Error>> {
     let s = |n: &str| r[n].as_str().expect("fixture text");
     let u = |n: &str| r[n].as_u64().expect("fixture integer");
     Ok(RecordDraft::from_observation(
@@ -38,18 +56,72 @@ fn draft(r: &Value) -> Result<RecordDraft, Box<dyn Error>> {
             last_seen: Timestamp::parse(s("last_seen"))?,
             sample_numerator: u("sample_numerator"),
             sample_denominator: u("sample_denominator"),
-            status_code: Some(u("status_code").try_into()?),
+            status_code: if r["status_code"].is_null() {
+                None
+            } else {
+                Some(u("status_code").try_into()?)
+            },
             request_header_names: &[],
             response_header_names: &[],
             query_parameter_names: &[],
         },
-        Observation {
-            shape: Shape::from_wire_json(&serde_json::to_vec(&r["structure"])?)?,
-            completeness: Completeness::Complete,
-            reasons: vec![],
-        },
+        observation,
     )?)
 }
+
+// This is the owned fixture application's TLS client. Its bounded plaintext
+// buffers are application memory, not an observer queue or IPC transport.
+// Capture begins only when the owner checks scope and inspects each body.
+async fn application_exchange(
+    port: u16,
+    root: &[u8],
+    name: &str,
+) -> Result<(Bytes, Bytes), Box<dyn Error>> {
+    let mut roots = RootCertStore::empty();
+    roots.add(CertificateDer::from(root.to_vec()))?;
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let operation = async {
+        let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
+        let stream = connector
+            .connect(ServerName::try_from(name.to_owned())?, stream)
+            .await?;
+        let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await?;
+        struct AbortOnDrop(tokio::task::JoinHandle<Result<(), hyper::Error>>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let mut task = AbortOnDrop(tokio::spawn(connection));
+        let request_body =
+            Bytes::from_static(br#"{"id":{"quantity":1,"SYNTHETIC_DENIED":"SYNTHETIC_REQUEST"}}"#);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/orders/1")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Full::new(request_body.clone()))?;
+        let response = sender.send_request(request).await?;
+        if response.status() != 200 {
+            return Err("application status".into());
+        }
+        let response_body = Limited::new(response.into_body(), 65536)
+            .collect()
+            .await
+            .map_err(|_| "application response bound")?
+            .to_bytes();
+        drop(sender);
+        (&mut task.0).await??;
+        Ok::<_, Box<dyn Error>>((request_body, response_body))
+    };
+    tokio::time::timeout(Duration::from_secs(3), operation).await?
+}
+
 async fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
     let dir = Path::new(&args[1]);
@@ -131,6 +203,57 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 "wait" => Ok(
                     json!({"wait":format!("{:?}",owner.wait_retry(std::future::pending()).await?)}),
                 ),
+                "capture-https" => {
+                    let port: u16 = command["source_port"].as_u64().ok_or("source port")?.try_into()?;
+                    if port == 0 { return Err("source port".into()); }
+                    // The application exchange completes even when capture is paused.
+                    let source_root = if command["bad_root"] == true { fs::read(dir.join("untrusted.crt.der"))? } else { root.clone() };
+                    let source_name = if command["bad_name"] == true { "wrong.invalid" } else { "localhost" };
+                    let (request, response) = application_exchange(port, &source_root, source_name).await?;
+                    let mut admitted = 0;
+                    let mut safe = true;
+                    for (index, payload) in [request, response].into_iter().enumerate() {
+                        let r = &body["records"][0];
+                        let text = |name: &str| r[name].as_str().expect("fixture text");
+                        let scope = CaptureScope { source_id: text("source_id"), workload: [text("project_id"),text("service_id"),text("environment_id"),text("deployment_id")], parser_profile: text("parser_profile"), operation: text("operation"), route_template: text("route_template"), request_header_names: &[], response_header_names: &[], query_parameter_names: &[] };
+                        if let Ok((revision, observation)) = owner.inspect_json(&scope, &payload) {
+                            let wire = String::from_utf8(observation.shape.to_wire_json()?)?;
+                            safe &= wire.contains("quantity") && !wire.contains("SYNTHETIC_DENIED") && !wire.contains("SYNTHETIC_REQUEST") && !wire.contains("SYNTHETIC_RESPONSE");
+                            let mut record = r.clone();
+                            record["record_id"] = json!(if index == 0 { "00000000-0000-4000-8000-0000000000a1" } else { "00000000-0000-4000-8000-0000000000a2" });
+                            record["policy_revision"] = json!(revision);
+                            record["direction"] = json!(if index == 0 { "request" } else { "response" });
+                            record["status_code"] = if index == 0 { Value::Null } else { json!(200) };
+                            let seen = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+                            record["first_seen"] = json!(seen);
+                            record["last_seen"] = record["first_seen"].clone();
+                            owner.admit(draft_observation(&record, observation)?)?;
+                            admitted += 1;
+                        }
+                    }
+                    Ok(json!({"application_ok":true,"admitted":admitted,"sanitized":safe}))
+                }
+                // Synthetic inspection only: no application traffic or payload
+                // values are printed, exported, or queued by this probe.
+                "inspect" => {
+                    let record = &body["records"][0];
+                    let text = |name: &str| record[name].as_str().expect("fixture text");
+                    let scope = CaptureScope {
+                        source_id: if command["invalid_source"] == true {
+                            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                        } else { text("source_id") },
+                        workload: [text("project_id"), text("service_id"), text("environment_id"), text("deployment_id")],
+                        parser_profile: text("parser_profile"),
+                        operation: text("operation"),
+                        route_template: text("route_template"),
+                        request_header_names: &[], response_header_names: &[], query_parameter_names: &[],
+                    };
+                    let (revision, observation) = owner.inspect_json(&scope, br#"{"id":{"quantity":123,"SYNTHETIC_DENIED":"SYNTHETIC_VALUE"}}"#)?;
+                    let shape = String::from_utf8(observation.shape.to_wire_json()?)?;
+                    Ok(json!({"revision":revision,"partial":observation.completeness == Completeness::Partial,
+                        "approved_nested":shape.contains("quantity"),
+                        "denied_absent":!shape.contains("SYNTHETIC_DENIED") && !shape.contains("SYNTHETIC_VALUE")}))
+                }
                 "admit" => {
                     if let Some(revision) = command["revision"].as_u64() {
                         body["records"][0]["policy_revision"] = json!(revision);
