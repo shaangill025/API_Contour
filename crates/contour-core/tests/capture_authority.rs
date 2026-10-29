@@ -195,3 +195,64 @@ fn retained_array_shapes_respect_signed_depth() {
         assert_eq!(obs.completeness, Completeness::Partial);
     }
 }
+
+#[test]
+fn adapter_clock_preserves_signed_snapshot_checks_and_revision() {
+    use contour_core::InspectionClock;
+    use std::time::Duration;
+    struct Clock(Option<Duration>);
+    impl InspectionClock for Clock {
+        fn now(&mut self) -> Option<Duration> {
+            self.0
+        }
+    }
+    let mut raw = policy();
+    raw["inspection_bytes"] = json!(32);
+    raw["depth_limit"] = json!(2);
+    let current = verified(&raw);
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut clock = Clock(Some(Duration::ZERO));
+    let (revision, observation) = inputs
+        .inspect_json_with_clock(&scope(), br#"{"id":1,"SECRET":2}"#, now(), &mut clock)
+        .unwrap();
+    assert_eq!(revision, 1);
+    assert_eq!(observation.reasons, vec![ObservationReason::Permission]);
+    assert!(
+        !String::from_utf8(observation.shape.to_wire_json().unwrap())
+            .unwrap()
+            .contains("SECRET")
+    );
+    for body in [
+        b"123456789012345678901234567890123".as_slice(),
+        b"[[0]]".as_slice(),
+    ] {
+        assert_eq!(
+            inputs
+                .inspect_json_with_clock(&scope(), body, now(), &mut clock)
+                .unwrap()
+                .1
+                .reasons,
+            vec![ObservationReason::Limit]
+        );
+    }
+    let mut bad = scope();
+    bad.operation = "SECRET";
+    assert!(matches!(
+        inputs.inspect_json_with_clock(&bad, b"0", now(), &mut clock),
+        Err(AdmissionError::Scope)
+    ));
+    assert!(matches!(
+        inputs.inspect_json_with_clock(&scope(), b"0", time("2026-10-06T12:15:00Z"), &mut clock),
+        Err(AdmissionError::Time)
+    ));
+    clock.0 = None;
+    assert_eq!(
+        inputs
+            .inspect_json_with_clock(&scope(), b"0", now(), &mut clock)
+            .unwrap()
+            .1
+            .reasons,
+        vec![ObservationReason::Limit]
+    );
+}

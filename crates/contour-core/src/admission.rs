@@ -166,6 +166,19 @@ impl AdmissionInputs<'_> {
         bytes: &[u8],
         now: OffsetDateTime,
     ) -> Result<(u64, crate::Observation), AdmissionError> {
+        self.inspect_json_with_clock(scope, bytes, now, &mut crate::extract::NativeClock::new())
+    }
+
+    /// Snapshot validation only; the caller must check live enrollment, revocation,
+    /// and expiry immediately before and after this synchronous operation. The
+    /// clock must be installed by a trusted adapter, not by request data.
+    pub fn inspect_json_with_clock(
+        &self,
+        scope: &CaptureScope<'_>,
+        bytes: &[u8],
+        now: OffsetDateTime,
+        clock: &mut dyn crate::InspectionClock,
+    ) -> Result<(u64, crate::Observation), AdmissionError> {
         self.current
             .validate_capture_at(now)
             .map_err(|_| AdmissionError::Time)?;
@@ -209,7 +222,7 @@ impl AdmissionInputs<'_> {
         validate_route(scope.route_template, self.current)?;
         Ok((
             self.current.revision(),
-            crate::extract::extract_signed_json(bytes, self.current),
+            crate::extract::extract_signed_json_with_clock(bytes, self.current, clock),
         ))
     }
 }

@@ -232,6 +232,15 @@ jobs:
       - name: Verify managed gateway TLS on Linux
         timeout-minutes: 5
         run: python3 scripts/test-managed-gateway.py
+      - name: Install pinned Rust tools for the synthetic host-service probe
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --target wasm32-unknown-unknown
+      - name: Verify probe cleanup failure cannot report success
+        run: python3 tests/fixtures/envoy-wasi-probe/test_cleanup.py
+      - name: Verify pinned Envoy WASI host services
+        timeout-minutes: 5
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 scripts/test-envoy-wasi-probe.py
 
   postgres:
     name: PostgreSQL 16 identity

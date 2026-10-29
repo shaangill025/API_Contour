@@ -63,7 +63,10 @@ pub use queue::{
 };
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
 mod wire;
-pub use extract::{Completeness, ExtractionPolicy, Observation, ObservationReason, extract_json};
+pub use extract::{
+    Completeness, ExtractionPolicy, InspectionClock, Observation, ObservationReason, extract_json,
+    extract_json_with_clock,
+};
 
 pub const MAX_NAME_SCALARS: usize = 64;
 pub const MAX_FIELDS: usize = 256;

@@ -82,10 +82,58 @@ impl ExtractionPolicy {
     }
 }
 
+/// Trusted adapter clock providing monotonic ticks in a consistent time domain.
+/// Missing or backwards ticks stop inspection with a limit result.
+pub trait InspectionClock {
+    fn now(&mut self) -> Option<Duration>;
+}
+
+pub(crate) struct NativeClock(Instant);
+impl NativeClock {
+    pub(crate) fn new() -> Self {
+        Self(Instant::now())
+    }
+}
+impl InspectionClock for NativeClock {
+    fn now(&mut self) -> Option<Duration> {
+        Some(self.0.elapsed())
+    }
+}
+
 /// Local extraction only: authorization, persistence and transport are caller concerns.
 pub fn extract_json(bytes: &[u8], policy: &ExtractionPolicy) -> Observation {
-    let start = Instant::now();
-    run(bytes, policy, &mut || start.elapsed())
+    extract_json_with_clock(bytes, policy, &mut NativeClock::new())
+}
+
+/// Extract using a trusted adapter-installed monotonic clock; this grants no authority.
+pub fn extract_json_with_clock(
+    bytes: &[u8],
+    policy: &ExtractionPolicy,
+    clock: &mut dyn InspectionClock,
+) -> Observation {
+    with_elapsed(clock, |elapsed| run(bytes, policy, elapsed))
+}
+
+fn with_elapsed<T>(
+    clock: &mut dyn InspectionClock,
+    operation: impl FnOnce(&mut dyn FnMut() -> Duration) -> T,
+) -> T {
+    let initial = clock.now();
+    let mut last = initial;
+    let mut elapsed = || {
+        let tick = clock.now();
+        match (initial, last, tick) {
+            (Some(start), Some(previous), Some(current)) if current >= previous => {
+                last = Some(current);
+                current - start
+            }
+            _ => {
+                last = None;
+                Duration::from_millis(2)
+            }
+        }
+    };
+    operation(&mut elapsed)
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +209,21 @@ fn run(
 
 // The caller has already validated scope and lease. Limits are enforced before
 // parsing, and policy names are checked recursively without copying values.
-pub(crate) fn extract_signed_json(bytes: &[u8], policy: &crate::VerifiedPolicy) -> Observation {
+pub(crate) fn extract_signed_json_with_clock(
+    bytes: &[u8],
+    policy: &crate::VerifiedPolicy,
+    clock: &mut dyn InspectionClock,
+) -> Observation {
+    with_elapsed(clock, |elapsed| {
+        extract_signed_json_elapsed(bytes, policy, elapsed)
+    })
+}
+
+fn extract_signed_json_elapsed(
+    bytes: &[u8],
+    policy: &crate::VerifiedPolicy,
+    elapsed: &mut dyn FnMut() -> Duration,
+) -> Observation {
     if bytes.len() > policy.inspection_bytes() {
         return Observation {
             shape: Shape::unknown(UnknownReason::Limit),
@@ -169,10 +231,8 @@ pub(crate) fn extract_signed_json(bytes: &[u8], policy: &crate::VerifiedPolicy) 
             reasons: vec![ObservationReason::Limit],
         };
     }
-    let start = Instant::now();
-    let mut elapsed = || start.elapsed();
     let mut context = Context {
-        elapsed: &mut elapsed,
+        elapsed,
         failure: None,
         permission: false,
         signed: Some(policy),
