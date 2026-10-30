@@ -23,7 +23,8 @@ function probe(client, ca, path, wantedStatus, wantedBody, timeoutMs) {
           } else { body=Buffer.concat([body,chunk]); }
         });
         response.on('end', () => finish({status:response.statusCode,
-          expected_body:response.statusCode===wantedStatus && body.equals(Buffer.from(wantedBody)),exception:'none'}));
+          expected_body:(Array.isArray(wantedStatus) ? wantedStatus.includes(response.statusCode) : response.statusCode===wantedStatus) &&
+            (wantedBody===null || body.equals(Buffer.from(wantedBody))),exception:'none'}));
         response.on('error', () => finish({status:response.statusCode,expected_body:false,exception:'ResponseError'}));
       });
       req.on('error', () => finish({status:null,expected_body:false,exception:'RequestError'}));
@@ -35,7 +36,8 @@ module.exports={probe};
 if (require.main === module) {
   const mode=process.argv[2];
   const cases={normal:[200,'{"result":"owned-pilot-ok"}'],redirect:[302,'{"result":"redirect"}'],
-    'wrong-name':[502,'{"error":"upstream_unavailable"}'],'wrong-ca':[502,'{"error":"upstream_unavailable"}']};
+    'wrong-name':[502,'{"error":"upstream_unavailable"}'],'wrong-ca':[502,'{"error":"upstream_unavailable"}'],
+    'gateway-denied':[[502,503],null]};
   if (!Object.hasOwn(cases,mode) || process.argv.length!==3) process.exit(2);
   const ca=fs.readFileSync('/pilot/ca.crt');
   (async () => {

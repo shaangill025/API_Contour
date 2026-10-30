@@ -92,10 +92,28 @@ impl CollectorTls {
     /// Requires a Tokio runtime with I/O and timers enabled.
     /// A successful handshake verifies client credentials, not collector enrollment.
     pub async fn accept(&self, socket: TcpStream) -> Result<TlsStream<TcpStream>, TlsError> {
+        self.accept_observed(socket, || {}).await
+    }
+    // Crate-private closed diagnostic seam; it never changes TLS acceptance.
+    pub(crate) async fn accept_observed(
+        &self,
+        socket: TcpStream,
+        missing_certificate: impl FnOnce(),
+    ) -> Result<TlsStream<TcpStream>, TlsError> {
         timeout(self.deadline, self.acceptor.accept(socket))
             .await
             .map_err(|_| TlsError::Deadline)?
-            .map_err(|_| TlsError::Handshake)
+            .map_err(|error| {
+                if matches!(
+                    error
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+                    Some(rustls::Error::NoCertificatesPresented)
+                ) {
+                    missing_certificate();
+                }
+                TlsError::Handshake
+            })
     }
 }
 fn bounded_bundle(bundle: &[&[u8]]) -> bool {

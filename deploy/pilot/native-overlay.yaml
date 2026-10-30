@@ -1,5 +1,44 @@
 # Opt-in only: combine with deploy/pilot/compose.yaml after provisioning.
 services:
+  pilot-capture-ingress:
+    image: apicontour-local-app
+    profiles: [native-capture]
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["/usr/local/bin/local_capture", "ingress", "/run/capture/ingress.json"]
+    volumes:
+      - ../../.local-mvp/pilot/capture/runtime/ingress.json:/run/capture/ingress.json:ro
+      - ../../.local-mvp/pilot/capture/runtime/ingress.password:/run/capture/ingress.password:ro
+      - ../../.local-mvp/pilot/capture/runtime/server.crt.der:/run/capture/server.crt.der:ro
+      - ../../.local-mvp/pilot/capture/runtime/server.key.der:/run/capture/server.key.der:ro
+      - ../../.local-mvp/pilot/capture/runtime/collector.crt.der:/run/capture/collector.crt.der:ro
+      - ../../.local-mvp/pilot/capture/runtime/ca.der:/run/capture/ca.der:ro
+      - ../../.local-mvp/pilot/capture/runtime/policy.raw:/run/capture/policy.raw:ro
+      - ../../.local-mvp/ca.crt:/run/capture/database-ca.crt:ro
+    networks: [capture]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  pilot-capture-worker:
+    image: apicontour-local-app
+    profiles: [native-capture]
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["/usr/local/bin/local_capture", "worker", "/run/capture/worker.json"]
+    volumes:
+      - ../../.local-mvp/pilot/capture/runtime/worker.json:/run/capture/worker.json:ro
+      - ../../.local-mvp/pilot/capture/runtime/worker.password:/run/capture/worker.password:ro
+      - ../../.local-mvp/ca.crt:/run/capture/database-ca.crt:ro
+    networks: [capture]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
   native-gateway:
     image: apicontour-local-app
     profiles: [native-capture]

@@ -23,7 +23,10 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -36,6 +39,34 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 
 type ForwardBody = UnsyncBoxBody<Bytes, hyper::Error>;
+
+#[derive(Clone, Copy)]
+enum Rejection {
+    UpstreamCertificate,
+    ForwarderMissingCertificate,
+    ForwarderLeaf,
+}
+fn report_rejection(event: Rejection) {
+    static SEEN: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
+    let (slot, name) = match event {
+        Rejection::UpstreamCertificate => (0, "upstream_certificate_rejected"),
+        Rejection::ForwarderMissingCertificate => (1, "forwarder_certificate_missing"),
+        Rejection::ForwarderLeaf => (2, "forwarder_leaf_rejected"),
+    };
+    // Bounded to three closed, data-free events per process; no error objects,
+    // addresses, names, identifiers, headers or payloads enter diagnostics.
+    if !SEEN[slot].swap(true, Ordering::Relaxed) {
+        eprintln!("apicontour_native_gateway: {name}");
+    }
+}
+fn certificate_failure(error: &std::io::Error) -> bool {
+    matches!(
+        error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        Some(rustls::Error::InvalidCertificate(_))
+    )
+}
 
 #[derive(Clone)]
 pub struct CapturePoint {
@@ -165,15 +196,24 @@ impl Gateway {
             let gateway = self.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let Ok(stream) = gateway.tls.accept(socket).await else {
+                let Ok(stream) = gateway
+                    .tls
+                    .accept_observed(socket, || {
+                        report_rejection(Rejection::ForwarderMissingCertificate);
+                    })
+                    .await
+                else {
                     return;
                 };
-                if !peer_matches(stream.get_ref().1.peer_certificates(), &gateway.peer_leaf)
-                    || stream
-                        .get_ref()
-                        .1
-                        .alpn_protocol()
-                        .is_some_and(|a| a != b"http/1.1")
+                if !peer_matches(stream.get_ref().1.peer_certificates(), &gateway.peer_leaf) {
+                    report_rejection(Rejection::ForwarderLeaf);
+                    return;
+                }
+                if stream
+                    .get_ref()
+                    .1
+                    .alpn_protocol()
+                    .is_some_and(|a| a != b"http/1.1")
                 {
                     return;
                 }
@@ -245,7 +285,11 @@ impl Gateway {
                     socket,
                 )
                 .await
-                .map_err(|_| ())?;
+                .map_err(|error| {
+                    if certificate_failure(&error) {
+                        report_rejection(Rejection::UpstreamCertificate);
+                    }
+                })?;
             let cert = stream
                 .get_ref()
                 .1
@@ -253,6 +297,7 @@ impl Gateway {
                 .and_then(|c| c.first())
                 .ok_or(())?;
             if !exact_dns_san(cert, &self.upstream_name) {
+                report_rejection(Rejection::UpstreamCertificate);
                 return Err(());
             }
             if stream
@@ -734,6 +779,20 @@ mod tests {
             .await
             .unwrap();
         });
+    }
+    #[test]
+    fn certificate_diagnostic_excludes_transport_and_generic_tls_failure() {
+        assert!(!certificate_failure(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        )));
+        assert!(!certificate_failure(&std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::General("synthetic".into())
+        )));
+        assert!(certificate_failure(&std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+        )));
     }
     #[test]
     fn forwards_original_data_and_trailers_when_capture_is_absent() {

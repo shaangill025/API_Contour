@@ -1,7 +1,6 @@
 # Opt-in native HTTP/1 pilot
 
-The native overlay is a fixture scaffold. It does not provision enrollment, keys,
-certificates, a signed policy, or database state; it does not establish production
+The native overlay is a fixture scaffold. It does not establish production
 origin, causal attribution, HTTP/2, performance, or general MVP readiness.
 
 Combine `compose.yaml` and `native-overlay.yaml` with profile `native-capture` only
@@ -10,11 +9,29 @@ available. Build the local application image using the pinned project Dockerfile
 preload the digest-pinned Envoy and Node-RED images. No host port is published by
 the overlay. Use the pilot's `PILOT_TARGET=https://pilot-gateway:9443/pilot`.
 
-Provision two separate, private directories under `.local-mvp/pilot/native`:
+After the ordinary owned local stack and stock pilot have been initialized,
+create the closed pilot capture profile and its separate identities once:
+
+```sh
+python3 deploy/local/capture_init.py --profile pilot
+python3 deploy/local/capture_provision.py --profile pilot
+python3 deploy/pilot/native_prepare.py
+```
+
+The pilot profile reuses the existing restricted ingress and worker login
+credentials; it does not create or change those roles. The fixed 0304 instance
+records the observer capture point and is not evidence of workload origin.
+Existing or partially created identities are never overwritten. If a pilot
+policy expires or its journal needs reconciliation, explicitly run
+`python3 deploy/local/capture_renew.py --profile pilot`; do not regenerate keys.
+Immediately before each startup, the operator wrapper must run
+`python3 deploy/pilot/native_prepare.py --check` and stop if it fails. Running
+Compose directly bypasses that preflight.
+
+Preparation creates two separate, private directories under `.local-mvp/pilot/native`:
 
 * `forwarder/` contains `envoy.json`, `edge.pem`, `edge.key`, `pilot-ca.pem`,
-  `observer-ca.pem`, `forwarder.pem`, and `forwarder.key`. Generate `envoy.json`
-  from `python3 deploy/pilot/native_envoy.py` without logging credential contents.
+  `observer-ca.pem`, `forwarder.pem`, and `forwarder.key`.
   The edge certificate must have the exact `pilot-destination` DNS SAN expected by
   the stock Node-RED TLS configuration. The Envoy forwarder certificate is a
   separate client identity trusted by the observer.
@@ -43,3 +60,19 @@ The overlay is not proof of successful capture. Check actual Node-RED requests a
 responses, TLS negative controls, original forwarding under capture failure,
 accepted and duplicate delivery receipts, and storage projections on the approved
 runtime lane. Do not inspect or print payloads, keys, or credential contents.
+
+Run the owned qualification with `python3 scripts/test-native-pilot.py` after the
+normal local stack and default capture roles have been provisioned. It requires
+the exact pinned images in the local Docker cache and refuses existing pilot
+containers. It tests request/response structure and scope, specific TLS rejection
+events, restored capture after each negative, forwarding during ingress outage,
+and later capture recovery. It preserves enrolled keys/configuration and removes
+only its own containers and generated negative-test keys. Logs are bounded and
+private. `--self-test` exercises driver failure handling without the live stack.
+
+Outage counts establish forwarding availability and later delivery recovery; they
+do not establish that observation copying paused during the outage. Exact
+lost-receipt retry, full sink sentinel checks, performance, HTTP/2, originating
+instance attribution and causal tracing remain separate qualification work.
+The native gateway emits at most three fixed certificate-rejection diagnostics per
+process; errors, certificates, addresses, headers and bodies are never interpolated.
