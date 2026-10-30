@@ -3,17 +3,21 @@
 IMAGE = "envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4"
 
 
-def config(upstream_ip, upstream_port, upstream_name="upstream.test", ca="/fixture/ca.pem", *, listen_address="0.0.0.0", listen_port=8443):
+def config(upstream_ip, upstream_port, upstream_name="upstream.test", ca="/fixture/ca.pem", *, listen_address="0.0.0.0", listen_port=8443, sds=False):
     if listen_address not in ("0.0.0.0", "127.0.0.1"):
         raise ValueError("unsupported fixture listener address")
     if type(listen_port) is not int or not 1024 <= listen_port <= 65535:
         raise ValueError("fixture listener port must be unprivileged")
     tls = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3."
-    return {"static_resources": {
+    downstream = {"tls_certificates": [{"certificate_chain": {"filename": "/fixture/down.pem"}, "private_key": {"filename": "/fixture/down.key"}}]}
+    if sds:
+        downstream = {"tls_certificate_sds_secret_configs": [{"name": "gateway", "sds_config": {"path_config_source": {"path": "/run/watch/sds.json", "watched_directory": {"path": "/run/watch"}}, "resource_api_version": "V3"}}]}
+    node = {"node": {"id": "local-gateway", "cluster": "local-gateway"}} if sds else {}
+    return {**node, "static_resources": {
         "listeners": [{"name": "https", "address": {"socket_address": {"address": listen_address, "port_value": listen_port}},
             "per_connection_buffer_limit_bytes": 65536,
             "filter_chains": [{"transport_socket": {"name": "envoy.transport_sockets.tls", "typed_config": {
-                "@type": tls + "DownstreamTlsContext", "common_tls_context": {"tls_certificates": [{"certificate_chain": {"filename": "/fixture/down.pem"}, "private_key": {"filename": "/fixture/down.key"}}]}}},
+                "@type": tls + "DownstreamTlsContext", "common_tls_context": downstream}},
                 "filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": {
                     "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
                     "stat_prefix": "gateway", "codec_type": "HTTP1", "stream_idle_timeout": "10s",
