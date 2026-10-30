@@ -2,7 +2,10 @@
 //! through the existing signed structural extractor.
 use super::{CollectorOwner, OwnerError};
 use contour_core::{AdmissionInputs, CaptureScope, Observation, RecordDraft, RecordMetadata};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use time::OffsetDateTime;
 
 const MAX_STREAMS: usize = 16;
@@ -10,7 +13,15 @@ const MAX_RAW: usize = 1024 * 1024;
 const MAX_BODY: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CaptureId(u64);
+pub struct CaptureId {
+    owner: u64,
+    sequence: u64,
+}
+impl CaptureId {
+    pub(super) fn sequence(self) -> u64 {
+        self.sequence
+    }
+}
 struct Stream {
     source: String,
     workload: [String; 4],
@@ -38,15 +49,33 @@ impl Stream {
         }
     }
 }
-#[derive(Default)]
 pub(crate) struct Streams {
+    instance: u64,
     next: u64,
     total: usize,
     entries: BTreeMap<CaptureId, Stream>,
 }
 impl Streams {
+    pub(crate) fn new() -> Result<Self, OwnerError> {
+        static NEXT_STREAM_OWNER: AtomicU64 = AtomicU64::new(1);
+        let instance = NEXT_STREAM_OWNER
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| OwnerError::Paused)?;
+        Ok(Self {
+            instance,
+            next: 0,
+            total: 0,
+            entries: BTreeMap::new(),
+        })
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+    pub(crate) fn cancel_through(&mut self, sequence: u64) {
+        self.entries.retain(|id, _| id.sequence > sequence);
+        self.total = self.entries.values().map(|entry| entry.bytes.len()).sum();
     }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
@@ -77,7 +106,10 @@ impl CollectorOwner {
             .map_err(|_| OwnerError::Paused)?;
         self.guard()?;
         self.streams.next = self.streams.next.checked_add(1).ok_or(OwnerError::Paused)?;
-        let id = CaptureId(self.streams.next);
+        let id = CaptureId {
+            owner: self.streams.instance,
+            sequence: self.streams.next,
+        };
         self.streams.entries.insert(
             id,
             Stream {
@@ -118,6 +150,16 @@ impl CollectorOwner {
         bytes: &[u8],
         before_copy: impl FnOnce(),
     ) -> Result<(), OwnerError> {
+        self.capture_fragment_prepared(id, bytes, |_| {}, before_copy)
+    }
+    // Private deterministic preparation seam; adapters cannot alter authority.
+    pub(super) fn capture_fragment_prepared(
+        &mut self,
+        id: CaptureId,
+        bytes: &[u8],
+        prepared: impl FnOnce(&mut Self),
+        before_copy: impl FnOnce(),
+    ) -> Result<(), OwnerError> {
         if self.guard().is_err() {
             self.streams.clear();
             return Err(OwnerError::Paused);
@@ -134,6 +176,8 @@ impl CollectorOwner {
             .bytes
             .try_reserve_exact(bytes.len())
             .map_err(|_| OwnerError::Paused)?;
+        prepared(self);
+        self.guard()?;
         before_copy();
         stream.bytes.extend_from_slice(bytes);
         if self.guard().is_err() {

@@ -99,7 +99,7 @@ impl CollectorOwner {
             policies: Vec::new(),
             live: None,
             retry: None,
-            streams: stream_capture::Streams::default(),
+            streams: stream_capture::Streams::new()?,
             configured_queue_bytes: limits.byte_limit(),
         })
     }
@@ -251,6 +251,14 @@ impl CollectorOwner {
         Ok(result)
     }
     pub fn admit(&mut self, draft: RecordDraft) -> Result<(), OwnerError> {
+        self.admit_inner(draft, |_| {})
+    }
+    // Private fault hook; forwarding adapters cannot supply or access it.
+    fn admit_inner(
+        &mut self,
+        draft: RecordDraft,
+        after_admission: impl FnOnce(&mut Self),
+    ) -> Result<(), OwnerError> {
         self.guard()?;
         let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
         let refs = self.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
@@ -261,9 +269,13 @@ impl CollectorOwner {
             &live.sources,
         )
         .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
-        self.queue.admit(draft, &inputs)?;
+        let admission = self.queue.admit_retractable(draft, &inputs)?;
+        after_admission(self);
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
+            self.queue.retract_admission(admission)?;
+            return Err(OwnerError::Paused);
         }
         Ok(())
     }
@@ -473,6 +485,90 @@ mod capture_tests {
             response_header_names: &[],
             query_parameter_names: &[],
         }
+    }
+    fn record(owner: &mut CollectorOwner, record_id: &str) -> RecordDraft {
+        let (revision, observation) = owner.inspect_json(&scope(), br#"{"id":1}"#).unwrap();
+        let seen = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        RecordDraft::from_observation(
+            contour_core::RecordMetadata {
+                record_id,
+                source_id: ID,
+                workload: [ID; 4],
+                protocol: "http",
+                direction: "request",
+                visibility: "structure",
+                operation: "GET",
+                route_template: "/orders",
+                route_uncertain: false,
+                parser_profile: "http_json_v1",
+                policy_revision: revision,
+                count: 1,
+                first_seen: seen.clone(),
+                last_seen: seen,
+                sample_numerator: 1,
+                sample_denominator: 1,
+                status_code: None,
+                request_header_names: &[],
+                response_header_names: &[],
+                query_parameter_names: &[],
+            },
+            observation,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn expiry_during_copy_preparation_prevents_the_copy_seam() {
+        let mut owner = make_owner();
+        let id = owner.begin_capture(&scope()).unwrap();
+        let mut copied = false;
+        let result = owner.capture_fragment_prepared(
+            id,
+            b"private",
+            |owner| {
+                owner.live.as_mut().unwrap().deadline = Instant::now();
+            },
+            || copied = true,
+        );
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(
+            !copied,
+            "observational copy occurred after preparation expired authority"
+        );
+        assert!(owner.streams.is_empty());
+    }
+    #[test]
+    fn raw_capture_tokens_cannot_cross_owner_boundaries() {
+        let mut a = make_owner();
+        let mut b = make_owner();
+        let foreign = a.begin_capture(&scope()).unwrap();
+        let own = b.begin_capture(&scope()).unwrap();
+        assert!(b.capture_fragment(foreign, b"foreign").is_err());
+        b.cancel_capture(foreign);
+        b.capture_fragment(own, br#"{"id":1}"#).unwrap();
+        assert!(b.finish_capture(own).is_ok());
+    }
+    #[test]
+    fn expiry_during_admission_retracts_only_the_new_record() {
+        let mut owner = make_owner();
+        owner.queue = MemoryQueue::new([ID; 2], QueueLimits::new(2, 10000).unwrap()).unwrap();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let prior_id = "00000000-0000-4000-8000-000000000002";
+        let first = record(&mut owner, prior_id);
+        owner.admit(first).unwrap();
+        let prior_bytes = owner.stats().bytes;
+        let second = record(&mut owner, "00000000-0000-4000-8000-000000000003");
+        let result = owner.admit_inner(second, |owner| {
+            assert_eq!(owner.stats().records, 2);
+            owner.live.as_mut().unwrap().deadline = Instant::now();
+        });
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(!owner.is_live());
+        assert_eq!(owner.stats().records, 1);
+        assert_eq!(owner.stats().bytes, prior_bytes);
+        assert_eq!(
+            owner.queue.retained_record_times().next().unwrap().0,
+            prior_id
+        );
     }
     #[test]
     fn paused_and_expired_owner_reject_before_inspection() {

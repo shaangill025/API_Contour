@@ -25,6 +25,7 @@ impl fmt::Display for AdmissionError {
 impl std::error::Error for AdmissionError {}
 
 /// Checked assignment syntax, not proof of authentication or enrollment.
+#[derive(PartialEq, Eq)]
 pub struct SourceAssignment {
     source_id: String,
     identity: [String; 6],

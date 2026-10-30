@@ -208,6 +208,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "contour-core",
+ "contour-delivery",
  "contour-postgres",
  "http-body-util",
  "hyper",
@@ -215,6 +216,7 @@ dependencies = [
  "libc",
  "ring",
  "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2 0.10.9",
