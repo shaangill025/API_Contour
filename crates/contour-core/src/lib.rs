@@ -1,6 +1,10 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
 use std::fmt;
+mod authority_reply;
+pub use authority_reply::{
+    AuthorityReplyError, CheckedAuthorityReply, MAX_AUTHORITY_REPLY_BYTES, check_authority_reply,
+};
 mod admission;
 pub use admission::{
     AdmissionError, AdmissionInputs, CaptureScope, SourceAssignment, validate_admission,
