@@ -99,7 +99,7 @@ fn read(path: &str, max: usize) -> Result<Vec<u8>, &'static str> {
     }
     Ok(bytes)
 }
-fn required<'a>(v: &'a Option<String>) -> Result<&'a str, &'static str> {
+fn required(v: &Option<String>) -> Result<&str, &'static str> {
     v.as_deref().ok_or("configuration incomplete")
 }
 fn main() {
