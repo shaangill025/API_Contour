@@ -1,4 +1,5 @@
 """Exercise only the owned synthetic capture profile; retains all records and state."""
+import base64
 import copy
 import datetime
 import http.client
@@ -50,6 +51,9 @@ def main():
     status,authority=post('/v1/collector-authority',dict(wire_version=1,challenge=challenge,source_ids=[SOURCE]))
     assert status==200 and authority['challenge']==challenge and authority['tenant_id']==TENANT and authority['collector_id']==COLLECTOR
     assert len(authority['sources'])==1 and authority['sources'][0]['source_id']==SOURCE
+    encoded=authority['signed_policy']['payload_base64url']
+    revision=json.loads(base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4)))['revision']
+    assert type(revision) is int and 1 <= revision <= 18446744073709551615
     no_client=ssl.create_default_context(cafile=str(STATE/'ca.crt'))
     try: post('/v1/collector-authority',dict(wire_version=1,challenge=challenge,source_ids=[SOURCE]),no_client)
     except (ssl.SSLError,ConnectionError,OSError): pass
@@ -59,7 +63,7 @@ def main():
     batch=copy.deepcopy(next(x['body'] for x in json.loads((ROOT/'docs/specification/fixtures/batches.json').read_text()) if x['id']=='valid_structure'))
     batch.update(batch_id=str(uuid.uuid4()),tenant_id=TENANT,collector_id=COLLECTOR,created_at=iso(now))
     record=batch['records'][0]
-    record.update(record_id=str(uuid.uuid4()),project_id=PROJECT,service_id=SERVICE,environment_id=ENVIRONMENT,deployment_id=DEPLOYMENT,source_id=SOURCE,first_seen=iso(now),last_seen=iso(now),queued_at=iso(now),expires_at=iso(now+datetime.timedelta(minutes=5)),structure={'kind':'object','fields':{'id':{'kind':'string'}},'additional':None})
+    record.update(policy_revision=revision,record_id=str(uuid.uuid4()),project_id=PROJECT,service_id=SERVICE,environment_id=ENVIRONMENT,deployment_id=DEPLOYMENT,source_id=SOURCE,first_seen=iso(now),last_seen=iso(now),queued_at=iso(now),expires_at=iso(now+datetime.timedelta(minutes=5)),structure={'kind':'object','fields':{'id':{'kind':'string'}},'additional':None})
     wrong_identity=copy.deepcopy(batch)
     wrong_identity['collector_id']='00000000-0000-4000-8000-000000000299'
     assert post('/v1/batches',wrong_identity)[0]==403

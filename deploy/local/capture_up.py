@@ -30,6 +30,7 @@ def run(command, timeout):
 
 
 def lease():
+    if os.path.lexists(CAPTURE/'private/renew.pending'): raise RuntimeError('policy renewal requires reconciliation')
     envelope=json.loads((CAPTURE/'private/policy.json').read_text())
     payload=envelope['payload_base64url']
     policy=json.loads(base64.urlsafe_b64decode(payload+'='*(-len(payload)%4)))
@@ -125,5 +126,5 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception:
-        print('Capture startup failed; state retained. Synthetic policy renewal is not yet implemented.',file=sys.stderr)
+        print('Capture startup failed; state retained. Run capture_renew.py if the policy expired or has a pending renewal.',file=sys.stderr)
         raise SystemExit(1)

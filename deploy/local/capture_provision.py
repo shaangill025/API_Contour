@@ -1,4 +1,5 @@
 """Provision the opt-in local capture profile, retaining all existing state."""
+import base64
 import importlib.util
 import json
 import os
@@ -22,8 +23,13 @@ def main():
     runtime = CAPTURE / 'runtime'; private = CAPTURE / 'private'
     for name in ['server.crt.der','server.key.der','collector.crt.der','ca.der','policy.raw','ingress.password','worker.password']:
         if not (runtime/name).is_file(): raise RuntimeError('capture credentials incomplete')
+    if os.path.lexists(private/'renew.pending'): raise RuntimeError('policy renewal requires reconciliation')
     envelope = (private/'policy.json').read_bytes()
     if not 1 <= len(envelope) <= 1048576: raise RuntimeError('policy invalid')
+    encoded = json.loads(envelope)['payload_base64url']
+    policy = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
+    revision = policy['revision']
+    if type(revision) is not int or not 1 <= revision <= 18446744073709551615: raise RuntimeError('policy revision invalid')
     roles = [('contour_local_ingress','contour_ingestion'),('contour_local_worker','contour_catalog_worker')]
     quote = base.sql_quote
     # A login can SET ROLE into inherited groups. Reject unsafe attributes or a
@@ -45,6 +51,7 @@ def main():
     t,p,s,e,c,src,d,i,n = map(quote,[TENANT,PROJECT,SERVICE,ENVIRONMENT,COLLECTOR,SOURCE,DEPLOYMENT,INSTANCE,NONCE])
     existing = base.psql('SELECT count(*) FROM contour.collectors WHERE tenant_id='+t+' AND collector_id='+c)
     if existing == '0':
+        if revision != 1: raise RuntimeError('initial policy revision invalid')
         statements = [f"SELECT set_config('apicontour.tenant_id',{t},true);", 'SET LOCAL ROLE contour_admin;',
             f"INSERT INTO contour.deployments VALUES ({t},{d},{p},{s},{e});",
             f"SELECT contour.lock_collector({t},{c});", f"INSERT INTO contour.collectors VALUES ({t},{c});",
@@ -57,7 +64,7 @@ def main():
         base.psql('BEGIN; '+'\n'.join(statements)+' COMMIT;')
     elif existing != '1': raise RuntimeError('capture identity drift')
     # Refuse partial or changed enrollment rather than implicitly repairing it.
-    valid = base.psql(f"SELECT EXISTS (SELECT 1 FROM contour.collector_authorization a JOIN contour.policy_revisions r USING(tenant_id,collector_id) JOIN contour.source_authorization sa USING(tenant_id,collector_id) JOIN contour.source_instance_bindings b USING(tenant_id,source_id,collector_id) WHERE a.tenant_id={t} AND a.collector_id={c} AND a.enabled AND a.revoked_at IS NULL AND a.active_revision=1 AND r.revision=1 AND r.signed_envelope=decode('{envelope.hex()}','hex') AND sa.source_id={src} AND sa.technique='gateway' AND sa.parser_profiles=ARRAY['http_json_v1'] AND b.project_id={p} AND b.service_id={s} AND b.environment_id={e} AND b.deployment_id={d} AND b.instance_id={i})::text;")
+    valid = base.psql(f"SELECT EXISTS (SELECT 1 FROM contour.collector_authorization a JOIN contour.policy_revisions r USING(tenant_id,collector_id) JOIN contour.source_authorization sa USING(tenant_id,collector_id) JOIN contour.source_instance_bindings b USING(tenant_id,source_id,collector_id) WHERE a.tenant_id={t} AND a.collector_id={c} AND a.enabled AND a.revoked_at IS NULL AND a.active_revision={revision} AND r.revision={revision} AND r.signed_envelope=decode('{envelope.hex()}','hex') AND sa.source_id={src} AND sa.technique='gateway' AND sa.parser_profiles=ARRAY['http_json_v1'] AND b.project_id={p} AND b.service_id={s} AND b.environment_id={e} AND b.deployment_id={d} AND b.instance_id={i})::text;")
     if valid != 'true': raise RuntimeError('capture enrollment drift')
     # Existing valid rows are insufficient if the fixed collector also has
     # additional authority. Check only this tenant/collector; do not repair it.
