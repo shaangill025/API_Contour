@@ -174,6 +174,13 @@ impl CollectorOwner {
             return Err(OwnerError::Paused);
         }
         let (revision, observation) = self.inspect_json(&stream.scope(), &stream.bytes)?;
+        if observation.completeness == contour_core::Completeness::Unavailable
+            || observation
+                .reasons
+                .contains(&contour_core::ObservationReason::Malformed)
+        {
+            return Err(OwnerError::Paused);
+        }
         metadata.policy_revision = revision;
         let draft =
             RecordDraft::from_observation(metadata, observation).map_err(|_| OwnerError::Paused)?;

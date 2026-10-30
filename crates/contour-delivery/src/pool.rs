@@ -399,4 +399,39 @@ impl CollectorPool {
         })
         .await
     }
+    /// Advance the existing retry controller without losing the frozen owner.
+    /// Cancellation releases this borrow and leaves the same payload retained.
+    pub async fn wait_retry(&self, slot: usize) -> Result<crate::WaitOutcome, OwnerError> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        if !self.current(epoch) {
+            return Err(OwnerError::Paused);
+        }
+        let mut owner = {
+            let _gate = self.gate.try_lock().map_err(|_| OwnerError::Paused)?;
+            let owner = self
+                .slots
+                .get(slot)
+                .ok_or(OwnerError::Paused)?
+                .try_lock()
+                .map_err(|_| OwnerError::Paused)?;
+            if !self.current(epoch) || !owner.streams.is_empty() {
+                return Err(OwnerError::Paused);
+            }
+            owner
+        };
+        let notify = self.cancel.notified();
+        let mut notify = pin!(notify);
+        let cancel = poll_fn(|cx| {
+            if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        });
+        let result = owner.wait_retry(cancel).await;
+        if !self.current(epoch) {
+            return Err(OwnerError::Paused);
+        }
+        result
+    }
 }
