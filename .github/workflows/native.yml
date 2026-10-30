@@ -232,6 +232,11 @@ jobs:
       - name: Verify managed gateway TLS on Linux
         timeout-minutes: 5
         run: python3 scripts/test-managed-gateway.py
+      - name: Verify bounded certificate state and publication failures
+        run: python3 -B -m unittest discover -s tests/gateway -p test_certificates.py
+      - name: Verify real certificate rotation and rollback
+        timeout-minutes: 5
+        run: python3 scripts/test-managed-certificate-lifecycle.py
       - name: Install pinned Rust tools for the synthetic host-service probe
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt --target wasm32-unknown-unknown
       - name: Verify probe cleanup failure cannot report success
