@@ -742,3 +742,16 @@ These relational bindings do not establish verified capture origin or lifecycle
 validity; admission, catalog and wire behavior are unchanged. Registry rows are
 immutable and tenant scoped. No lifecycle closure or cross-collector locking is
 provided.
+
+Migration `0014_observation_evidence.sql` adds an opaque `observation_id` to each
+original observation. It backfills existing rows and generates an ID for new rows;
+the original tenant/collector/batch/record key still governs duplicate delivery.
+The UUID is globally unique and has a tenant/operation-scoped unique key for future
+provenance references. Existing immutable-row and tenant policies continue to apply;
+this migration grants no new access or public lookup. The existing catalog worker
+has table-level INSERT and can supply an ID for a new row, but cannot update an
+existing row or reuse an existing ID. IDs do not grant authorization. The volatile
+UUID default rewrites a populated table and the migration holds an exclusive lock
+while adding the column and building unique constraints; plan a maintenance window
+for large tables. Rolling back the column discards these identities; reapplying it
+generates new ones and breaks references to the discarded IDs.

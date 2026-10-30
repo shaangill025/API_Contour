@@ -532,3 +532,105 @@ if [[ "$missing_binding_output" != *"23514"* ]]; then
     echo "$missing_binding_output" >&2; echo 'Missing binding failed for unexpected reason' >&2; exit 1
 fi
 echo 'PostgreSQL instance registry fixture passed'
+# Seed another original record before upgrading, under the restricted writer.
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_catalog_worker_test -d contour_fixture <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+DO $$ DECLARE row contour.observation_windows; BEGIN
+    SELECT * INTO row FROM contour.observation_windows LIMIT 1;
+    row.record_id := '00000000-0000-0000-0000-000000000096';
+    INSERT INTO contour.observation_windows SELECT row.*;
+END $$;
+COMMIT;
+SQL
+# Upgrade populated catalog evidence; injected failure must leave no partial column.
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/migrations/0014_observation_evidence.sql" | admin_sql; then
+    echo 'Injected observation identity migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='contour'
+    AND table_name='observation_windows' AND column_name='observation_id')
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=14), 'observation identity migration rollback');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/migrations/0014_observation_evidence.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9,10,11,12,13,14]::integer[], 'fourteen migration ledger entries');
+SELECT fixture.expect_state('UPDATE contour.observation_windows SET observation_id=observation_id','23514');
+SQL
+# Semantic mutation: removing both identity constraints must expose reuse across
+# two otherwise valid operations. The failed fixture transaction rolls back its rows.
+admin_sql <<'SQL'
+ALTER TABLE contour.observation_windows DROP CONSTRAINT observation_windows_observation_id_key;
+ALTER TABLE contour.observation_windows DROP CONSTRAINT observation_windows_scoped_observation_key;
+SQL
+if mutation_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_catalog_worker_test -d contour_fixture < "$root/db/tests/observation_evidence.sql" 2>&1); then
+    echo 'Missing identity constraints unexpectedly passed' >&2; exit 1
+fi
+if [[ "$mutation_output" != *'global identity reused across operations'* ]]; then
+    echo "$mutation_output" >&2; echo 'Identity mutation failed for an unexpected reason' >&2; exit 1
+fi
+admin_sql <<'SQL'
+ALTER TABLE contour.observation_windows ADD CONSTRAINT observation_windows_observation_id_key UNIQUE (observation_id);
+ALTER TABLE contour.observation_windows ADD CONSTRAINT observation_windows_scoped_observation_key UNIQUE (tenant_id, operation_id, observation_id);
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_catalog_worker_test -d contour_fixture < "$root/db/tests/observation_evidence.sql"
+# Two independent sessions insert different records concurrently using the default.
+# A third session holds an advisory barrier until both inserts are waiting at it.
+docker exec -i -e PGAPPNAME=observation_barrier "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U postgres -d contour_fixture <<'SQL' &
+BEGIN;
+SELECT pg_advisory_xact_lock(140014);
+SELECT pg_sleep(10);
+COMMIT;
+SQL
+barrier_pid=$!
+barrier_ready=false
+for ((attempt = 0; attempt < 100; attempt++)); do
+    if [[ $(docker exec "$container_id" psql -X -Atc "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=140014" -h /var/run/postgresql -U postgres -d contour_fixture) == 1 ]]; then
+        barrier_ready=true; break
+    fi
+    sleep 0.05
+done
+if [[ "$barrier_ready" != true ]]; then echo 'Observation barrier did not acquire lock' >&2; exit 1; fi
+for record in 00000000-0000-0000-0000-000000000094 00000000-0000-0000-0000-000000000095; do
+    docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 -v record="$record" \
+        -h /var/run/postgresql -U contour_catalog_worker_test -d contour_fixture <<'SQL' &
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+INSERT INTO contour.observation_windows (tenant_id,collector_id,batch_id,record_id,operation_id,variant_id,
+    source_id,project_id,service_id,environment_id,deployment_id,observation_count,sample_numerator,
+    sample_denominator,visibility,completeness,reasons,route_uncertain,status_code,first_seen,last_seen,
+    queued_at,expires_at,request_header_names,response_header_names,query_parameter_names)
+SELECT tenant_id,collector_id,batch_id,:'record'::uuid,operation_id,variant_id,
+    source_id,project_id,service_id,environment_id,deployment_id,observation_count,sample_numerator,
+    sample_denominator,visibility,completeness,reasons,route_uncertain,status_code,first_seen,last_seen,
+    queued_at,expires_at,request_header_names,response_header_names,query_parameter_names
+FROM contour.observation_windows WHERE record_id='00000000-0000-0000-0000-000000000001';
+SELECT pg_advisory_xact_lock(140014);
+COMMIT;
+SQL
+    if [[ "$record" == *094 ]]; then first_pid=$!; else second_pid=$!; fi
+done
+overlap=false
+for ((attempt = 0; attempt < 100; attempt++)); do
+    if [[ $(docker exec "$container_id" psql -X -Atc "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objid=140014" -h /var/run/postgresql -U postgres -d contour_fixture) == 2 ]]; then
+        overlap=true; break
+    fi
+    sleep 0.05
+done
+if [[ "$overlap" != true ]]; then echo 'Concurrent observation inserts did not both reach barrier' >&2; exit 1; fi
+wait "$barrier_pid"
+wait "$first_pid"
+wait "$second_pid"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT count(*)=2 AND count(DISTINCT observation_id)=2 FROM contour.observation_windows
+    WHERE record_id IN ('00000000-0000-0000-0000-000000000094','00000000-0000-0000-0000-000000000095')),
+    'concurrent inserts have distinct identities');
+SQL
+echo 'PostgreSQL observation identity fixture, mutation and concurrency passed'
