@@ -26,6 +26,44 @@ services:
     mem_limit: 512m
     cpus: 1
     restart: "no"
+  capture-ingress:
+    profiles: [capture]
+    image: apicontour-local-app
+    entrypoint: ["/usr/local/bin/local_capture", "ingress", "/run/capture/ingress.json"]
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    ports: ["127.0.0.1:9445:9445"]
+    volumes:
+      - ../../.local-mvp/capture/runtime/ingress.json:/run/capture/ingress.json:ro
+      - ../../.local-mvp/capture/runtime/ingress.password:/run/capture/ingress.password:ro
+      - ../../.local-mvp/capture/runtime/server.crt.der:/run/capture/server.crt.der:ro
+      - ../../.local-mvp/capture/runtime/server.key.der:/run/capture/server.key.der:ro
+      - ../../.local-mvp/capture/runtime/collector.crt.der:/run/capture/collector.crt.der:ro
+      - ../../.local-mvp/capture/runtime/ca.der:/run/capture/ca.der:ro
+      - ../../.local-mvp/capture/runtime/policy.raw:/run/capture/policy.raw:ro
+      - ../../.local-mvp/ca.crt:/run/capture/database-ca.crt:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  capture-worker:
+    profiles: [capture]
+    image: apicontour-local-app
+    entrypoint: ["/usr/local/bin/local_capture", "worker", "/run/capture/worker.json"]
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    volumes:
+      - ../../.local-mvp/capture/runtime/worker.json:/run/capture/worker.json:ro
+      - ../../.local-mvp/capture/runtime/worker.password:/run/capture/worker.password:ro
+      - ../../.local-mvp/ca.crt:/run/capture/database-ca.crt:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
   postgres:
     image: postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
     entrypoint: ["sh", "-c"]

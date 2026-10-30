@@ -85,3 +85,21 @@ python3.13 deploy/local/check_stack.py
 These checks create synthetic import and review records, retain those records,
 and restart the owned application, provider and database containers. The restart
 check also verifies that startup rejects an application that exits immediately.
+
+The optional local capture profile is experimental. After starting the business
+stack, `python3.13 deploy/local/capture_up.py` creates a synthetic collector and
+instance-bound source in the same business database, provisions separate ingress
+and catalog-worker logins, and starts both services. It uses a 14-minute signed
+policy and does not yet renew it: after expiry, admission pauses; startup refuses
+an expired or nearly expired policy. Private signer and collector keys remain in
+host-only state. The ingress receives its own server key, collector certificate,
+policy public key and its restricted database password; the worker receives only
+its own database credential and database trust root. The source binding is not
+proof of capture origin. No gateway exporter is included in this profile.
+
+The worker polls up to 32 pending batch IDs at a time in tenant/collector scope.
+It advances past a failed item and wraps after the end, so a poison item remains
+pending and is retried without permanently blocking later IDs. An unknown commit
+outcome is retried with the same ID. SIGTERM/SIGINT request bounded cooperative
+shutdown. The durable inbox starts at a committed ingestion receipt; this profile
+provides no durable pre-commit collector queue.
