@@ -28,13 +28,13 @@ services:
     environment:
       PILOT_TARGET: "${PILOT_TARGET:-https://pilot-destination:9443/pilot}"
       PILOT_TLS_TEST: "${PILOT_TLS_TEST:-normal}"
-    ports: ["127.0.0.1:18811:1880"]
     volumes:
       - ./settings.js:/pilot/settings.js:ro
       - ./flows.json:/pilot/flows.json:ro
       - ./flows-wrong-name.json:/pilot/flows-wrong-name.json:ro
       - ./flows-wrong-ca.json:/pilot/flows-wrong-ca.json:ro
       - ./check_tls.js:/pilot/check_tls.js:ro
+      - ./probe.js:/pilot/probe.js:ro
       - ../../.local-mvp/ca.crt:/pilot/ca.crt:ro
       - ../../.local-mvp/pilot/replica1/client.crt:/pilot/tls/client.crt:ro
       - ../../.local-mvp/pilot/replica1/client.key:/pilot/tls/client.key:ro
@@ -50,13 +50,13 @@ services:
     restart: "no"
   replica2:
     <<: *replica
-    ports: ["127.0.0.1:18812:1880"]
     volumes:
       - ./settings.js:/pilot/settings.js:ro
       - ./flows.json:/pilot/flows.json:ro
       - ./flows-wrong-name.json:/pilot/flows-wrong-name.json:ro
       - ./flows-wrong-ca.json:/pilot/flows-wrong-ca.json:ro
       - ./check_tls.js:/pilot/check_tls.js:ro
+      - ./probe.js:/pilot/probe.js:ro
       - ../../.local-mvp/ca.crt:/pilot/ca.crt:ro
       - ../../.local-mvp/pilot/replica2/client.crt:/pilot/tls/client.crt:ro
       - ../../.local-mvp/pilot/replica2/client.key:/pilot/tls/client.key:ro

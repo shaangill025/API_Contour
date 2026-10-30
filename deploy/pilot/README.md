@@ -23,7 +23,9 @@ Seven-day synthetic leaf certificates are intentionally short-lived. No system
 trust store is changed. Stop/removal targets this Compose project only; the
 private pilot state remains on disk.
 
-Both product HTTPS listeners bind host loopback. The editor/admin API is disabled;
+Product HTTPS listeners remain private to the internal container network; no host
+ports are published. A later root-managed gateway may provide a separate entrypoint.
+The editor/admin API is disabled;
 a fixed `GET /pilot` invokes a stock HTTP Request node to send a constant synthetic
 POST to the owned destination. Its TLS config requires peer verification and
 uses that replica's mounted client identity. The default fixed target is
@@ -62,4 +64,6 @@ Each must return a static failure from the product flow. Redirect mode returns a
 controlled 302 to `/disallowed`; the flow disables redirects and the checker reads
 the destination's synthetic disallowed-request counter. A nonzero counter fails
 the check. These modes are local qualification controls, not capture evidence.
-Both the host HTTP check and container TLS probe have whole-exchange deadlines.
+Both the in-container product HTTPS probe and destination TLS probe have
+whole-exchange deadlines. The product probe verifies the local CA and hostname;
+it does not disable TLS checks.
