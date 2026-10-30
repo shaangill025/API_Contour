@@ -214,6 +214,22 @@ jobs:
       - name: Verify failed startup and durable restart
         timeout-minutes: 4
         run: python3 deploy/local/check_stack.py
+      - name: Test capture policy and provisioning regressions
+        run: python3 -B -m unittest discover -s deploy/local -p 'test_capture*.py'
+      - name: Start and verify synthetic capture profile
+        timeout-minutes: 4
+        run: |
+          python3 deploy/local/capture_up.py
+          python3 deploy/local/check_capture.py
+      - name: Renew and verify synthetic capture policy
+        timeout-minutes: 4
+        run: |
+          python3 deploy/local/capture_renew.py
+          python3 deploy/local/check_capture.py
+      - name: Stop synthetic capture services
+        if: always()
+        timeout-minutes: 2
+        run: docker compose -f deploy/local/compose.yaml --profile capture stop capture-ingress capture-worker
 
   gateway:
     name: Managed gateway TLS

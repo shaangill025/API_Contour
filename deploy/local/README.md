@@ -90,8 +90,17 @@ The optional local capture profile is experimental. After starting the business
 stack, `python3.13 deploy/local/capture_up.py` creates a synthetic collector and
 instance-bound source in the same business database, provisions separate ingress
 and catalog-worker logins, and starts both services. It uses a 14-minute signed
-policy and does not yet renew it: after expiry, admission pauses; startup refuses
-an expired or nearly expired policy. Private signer and collector keys remain in
+policy and admission pauses after expiry; startup refuses an expired or nearly expired
+policy. An operator may explicitly run `python3.13 deploy/local/capture_renew.py`
+to issue the next short-lived signed revision for the existing synthetic collector.
+This is not an automatic renewal scheduler or a production issuer. A private,
+durable pending journal is written before the locked database update; rerun the
+same command to reconcile an uncertain outcome. An expired, uncommitted proposal
+is replaced only after a locked check proves the original head and confirms the
+proposal revision is absent. An already committed proposal is reconciled unchanged,
+even if expired; run the command again to renew it. Startup refuses a pending journal.
+The command rejects changes to enrollment, source scope, active head or signer and
+never replaces the collector, keys, historical revisions or accepted batches. Private signer and collector keys remain in
 host-only state. The ingress receives its own server key, collector certificate,
 policy public key and its restricted database password; the worker receives only
 its own database credential and database trust root. The source binding is not
