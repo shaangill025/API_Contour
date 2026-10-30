@@ -41,6 +41,10 @@ impl QueueLimits {
         }
         Ok(Self { records, bytes })
     }
+    /// Configured maximum charged bytes; not a policy grant.
+    pub fn byte_limit(&self) -> usize {
+        self.bytes
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueStats {

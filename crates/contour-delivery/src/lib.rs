@@ -26,7 +26,7 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 mod authority;
 mod owner;
-pub use owner::{CollectorOwner, OwnerError, SendOutcome};
+pub use owner::{CaptureId, CollectorOwner, CollectorPool, OwnerError, PoolCapture, SendOutcome};
 mod retry;
 pub use retry::{RetryController, RetryDirective, RetryError, WaitOutcome};
 

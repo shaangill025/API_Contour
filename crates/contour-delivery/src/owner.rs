@@ -8,6 +8,12 @@ use contour_core::{
     RecordDraft, VerifiedPolicy,
 };
 use std::collections::BTreeSet;
+#[path = "stream_capture.rs"]
+mod stream_capture;
+pub use stream_capture::CaptureId;
+#[path = "pool.rs"]
+mod pool;
+pub use pool::{CollectorPool, PoolCapture};
 
 #[derive(Debug)]
 pub enum OwnerError {
@@ -67,6 +73,8 @@ pub struct CollectorOwner {
     policies: Vec<PolicyEntry>,
     live: Option<LiveAuthority>,
     retry: Option<RetryState>,
+    streams: stream_capture::Streams,
+    configured_queue_bytes: usize,
 }
 impl CollectorOwner {
     pub fn new(
@@ -91,6 +99,8 @@ impl CollectorOwner {
             policies: Vec::new(),
             live: None,
             retry: None,
+            streams: stream_capture::Streams::default(),
+            configured_queue_bytes: limits.byte_limit(),
         })
     }
     pub fn stats(&self) -> QueueStats {
@@ -109,6 +119,7 @@ impl CollectorOwner {
     fn guard(&mut self) -> Result<(), OwnerError> {
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
             return Err(OwnerError::Paused);
         }
         Ok(())
@@ -131,6 +142,7 @@ impl CollectorOwner {
         }
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
         }
         Ok(())
     }
@@ -138,6 +150,7 @@ impl CollectorOwner {
     /// irreversible queue revocation. History is bounded without forgetting records.
     pub async fn refresh(&mut self) -> Result<(), OwnerError> {
         self.live = None;
+        self.streams.clear();
         self.expire_retained()?;
         let fresh = self
             .client
@@ -286,6 +299,7 @@ impl CollectorOwner {
     /// wallclock/attempt deadline. On cancellation all I/O and reservations drop.
     pub async fn send_once(&mut self) -> Result<SendOutcome, OwnerError> {
         self.guard()?;
+        self.streams.clear();
         if let Some(retry) = &self.retry {
             if !retry.ready {
                 return Ok(SendOutcome::Deferred(retry.directive));
@@ -412,7 +426,7 @@ mod capture_tests {
             t.second()
         )
     }
-    fn make_owner() -> CollectorOwner {
+    pub(super) fn make_owner() -> CollectorOwner {
         let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
         let keys = PolicyKeys::new(&[("test", public)]).unwrap();
@@ -448,7 +462,7 @@ mod capture_tests {
         });
         owner
     }
-    fn scope() -> CaptureScope<'static> {
+    pub(super) fn scope() -> CaptureScope<'static> {
         CaptureScope {
             source_id: ID,
             workload: [ID; 4],
@@ -475,6 +489,39 @@ mod capture_tests {
             Err(OwnerError::Paused)
         ));
         assert!(!owner.is_live());
+    }
+    #[test]
+    fn expired_or_wrong_scope_never_copies_a_fragment() {
+        let mut owner = make_owner();
+        let mut wrong = scope();
+        wrong.route_template = "/not-approved";
+        assert!(owner.begin_capture(&wrong).is_err());
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.live.as_mut().unwrap().deadline = Instant::now();
+        let mut copies = 0;
+        assert!(
+            owner
+                .capture_fragment_inner(id, b"secret", || copies += 1)
+                .is_err()
+        );
+        assert_eq!(copies, 0);
+        assert!(owner.finish_capture(id).is_err());
+    }
+    #[test]
+    fn fragmented_body_extracts_and_cancel_discards() {
+        let mut owner = make_owner();
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, br#"{"id":"#).unwrap();
+        owner.capture_fragment(id, b"1}").unwrap();
+        let (_, observation) = owner.finish_capture(id).unwrap();
+        assert_eq!(
+            observation.completeness,
+            contour_core::Completeness::Complete
+        );
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, b"123").unwrap();
+        owner.cancel_capture(id);
+        assert!(owner.finish_capture(id).is_err());
     }
     #[test]
     fn expiry_after_extraction_discards_observation_and_pauses() {

@@ -13,7 +13,7 @@ http-body-util = { version = "=0.1.5", default-features = false }
 rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 bytes = "=1.12.1"
-tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util"] }
+tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util", "sync"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["raw_value"] }
 time = { version = "=0.3.47", default-features = false, features = ["std"] }
