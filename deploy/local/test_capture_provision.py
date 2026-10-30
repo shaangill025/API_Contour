@@ -1,4 +1,6 @@
 """Capture role drift tests; no database, network or secrets are used."""
+import base64
+import json
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -13,7 +15,7 @@ class GroupAttributes(unittest.TestCase):
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory(); self.addCleanup(self.directory.cleanup)
         self.capture=Path(self.directory.name); runtime=self.capture/'runtime'; runtime.mkdir()
-        private=self.capture/'private'; private.mkdir(); (private/'policy.json').write_text('{}')
+        private=self.capture/'private'; private.mkdir(); (private/'policy.json').write_text(json.dumps({'payload_base64url':base64.urlsafe_b64encode(b'{"revision":1}').rstrip(b'=').decode()}))
         for name in ['server.crt.der','server.key.der','collector.crt.der','ca.der','policy.raw','ingress.password','worker.password']:
             (runtime/name).write_text('fixture')
 
