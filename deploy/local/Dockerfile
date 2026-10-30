@@ -11,6 +11,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 RUN cargo build --release --locked -p contour-platform
+RUN cargo build --release --locked -p contour-ingress --bin local_capture
 # native-tls uses OpenSSL on Linux. Keep its shared libraries from the same
 # Bookworm builder; the runtime base provides glibc and libgcc.
 RUN mkdir /runtime-libs && cp /usr/lib/*-linux-gnu/libssl.so.3 /usr/lib/*-linux-gnu/libcrypto.so.3 /runtime-libs/
@@ -19,6 +20,7 @@ FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2
 COPY --from=build /runtime-libs/ /usr/local/lib/
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /src/target/release/contour-platform /usr/local/bin/contour-platform
+COPY --from=build /src/target/release/local_capture /usr/local/bin/local_capture
 COPY --from=web /src/web/dist/ /opt/contour/web/
 ENV LD_LIBRARY_PATH=/usr/local/lib
 USER 65534:65534

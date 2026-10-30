@@ -42,6 +42,59 @@ impl From<AuthorityError> for CatalogError {
     }
 }
 impl ConnectedDatabase {
+    /// One bounded keyset page of committed, unprocessed batch IDs for one
+    /// operator-configured tenant and collector. This is not user authorization.
+    /// Advance past failed IDs and wrap at end to prevent a poison batch from
+    /// starving later work; no pending row is removed by polling.
+    pub async fn pending_catalog_batches(
+        &mut self,
+        expected: [&str; 2],
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<String>, CatalogError> {
+        if !expected.into_iter().all(uuid)
+            || after.is_some_and(|id| !uuid(id))
+            || !(1..=200).contains(&limit)
+        {
+            return Err(CatalogError::Identity);
+        }
+        if self.client.is_none() {
+            return Err(CatalogError::Invalidated);
+        }
+        let deadline = Instant::now() + self.deadline;
+        let mut guard = CancellationGuard::arm(self);
+        let work = async {
+            let client = guard
+                .connection
+                .client
+                .as_mut()
+                .ok_or(CatalogError::Invalidated)?;
+            let transaction = client
+                .build_transaction()
+                .read_only(true)
+                .start()
+                .await
+                .map_err(database_error)?;
+            let result = async {
+                configure_tenant(&transaction, expected[0], deadline.saturating_duration_since(Instant::now())).await?;
+                let rows = transaction.query(
+                    "SELECT b.batch_id::text FROM contour.ingestion_batches b WHERE b.tenant_id=$1::text::uuid AND b.collector_id=$2::text::uuid AND ($3::text IS NULL OR b.batch_id>$3::text::uuid) AND NOT EXISTS (SELECT 1 FROM contour.catalog_processed_batches p WHERE p.tenant_id=b.tenant_id AND p.collector_id=b.collector_id AND p.batch_id=b.batch_id) ORDER BY b.batch_id LIMIT $4",
+                    &[&expected[0], &expected[1], &after, &i64::from(limit)],
+                ).await.map_err(database_error)?;
+                rows.into_iter().map(|row| row.try_get::<_, String>(0).map_err(|_| CatalogError::Corrupt)).collect()
+            }.await;
+            transaction.rollback().await.map_err(database_error)?;
+            empty_context(client).await?;
+            check_deadline(deadline)?;
+            if !matches!(result, Err(CatalogError::Deadline)) {
+                guard.confirm();
+            }
+            result
+        };
+        timeout_at(deadline, work)
+            .await
+            .map_err(|_| CatalogError::Deadline)?
+    }
     /// Process one committed inbox batch using a separately provisioned catalog-worker
     /// login. The operator supplies tenant/collector scope and batch ID. Accepted
     /// history is independent of current capture authorization or policy expiry.
