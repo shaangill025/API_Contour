@@ -735,3 +735,56 @@ SELECT fixture.expect_state('TRUNCATE contour.origin_terminal_events','23514');
 SQL
 python3 "$root/scripts/test-origin-lifecycle-concurrency.py" "$container_id"
 echo 'PostgreSQL opt-in origin lifecycle registry fixture passed'
+
+# Opt-in V2 inbox migration: failure must leave legacy DDL, ACLs and data intact.
+admin_sql < "$root/db/provision_v2_ingress.sql"
+admin_sql <<'SQL'
+CREATE FUNCTION fixture.v2_legacy_ddl_fingerprint() RETURNS text LANGUAGE sql AS $$
+ SELECT md5(coalesce((SELECT string_agg(c.conrelid::regclass::text||':'||c.conname||':'||pg_get_constraintdef(c.oid), E'\n' ORDER BY c.conrelid::regclass::text,c.conname)
+   FROM pg_constraint c WHERE c.conrelid IN ('contour.ingestion_batches'::regclass,'contour.ingestion_payloads'::regclass)), '') || '|' ||
+   coalesce((SELECT string_agg(p.polrelid::regclass::text||':'||p.polname||':'||p.polpermissive::text||':'||p.polcmd::text||':'||p.polroles::text||':'||coalesce(pg_get_expr(p.polqual,p.polrelid),'')||':'||coalesce(pg_get_expr(p.polwithcheck,p.polrelid),''), E'\n' ORDER BY p.polrelid::regclass::text,p.polname)
+   FROM pg_policy p WHERE p.polrelid IN ('contour.ingestion_batches'::regclass,'contour.ingestion_payloads'::regclass)), '') || '|' ||
+   coalesce((SELECT string_agg(c.oid::regclass::text||':'||coalesce(c.relacl::text,''), E'\n' ORDER BY c.oid::regclass::text)
+   FROM pg_class c WHERE c.oid IN ('contour.ingestion_batches'::regclass,'contour.ingestion_payloads'::regclass)), ''))
+$$;
+CREATE TABLE fixture.v2_before AS SELECT fixture.v2_legacy_ddl_fingerprint() AS ddl, fixture.origin_v1_fingerprint() AS rows;
+SQL
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/opt-in-migrations/0016_v2_unattributed.sql" | admin_sql; then
+    echo 'Injected V2 inbox migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.ingestion_v2_metadata') IS NULL
+ AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=16)
+ AND NOT has_schema_privilege('contour_v2_ingress','contour','USAGE')
+ AND NOT has_table_privilege('contour_v2_ingress','contour.ingestion_batches','SELECT')
+ AND fixture.v2_legacy_ddl_fingerprint()=(SELECT ddl FROM fixture.v2_before)
+ AND fixture.origin_v1_fingerprint()=(SELECT rows FROM fixture.v2_before),
+ 'V2 migration failure restores constraints policies grants ledger and V1 rows');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/opt-in-migrations/0016_v2_unattributed.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+ = ARRAY[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]::integer[]
+ AND fixture.origin_v1_fingerprint()=(SELECT rows FROM fixture.v2_before), 'V2 upgrade retains V1 rows');
+CREATE ROLE contour_v2_ingress_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_v2_ingress TO contour_v2_ingress_test;
+GRANT USAGE ON SCHEMA fixture TO contour_v2_ingress_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text),fixture.expect_state(text,text) TO contour_v2_ingress_test;
+BEGIN;
+SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',true);
+INSERT INTO contour.policy_revisions VALUES ('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001',1,decode('01','hex')) ON CONFLICT DO NOTHING;
+COMMIT;
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_v2_ingress_test -d contour_fixture < "$root/db/tests/v2_unattributed.sql"
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_ingest_test -d contour_fixture <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count) VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-00000000c011',decode(repeat('aa',32),'hex'),2,1)$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_payloads VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-00000000c011',2,decode('7b7d','hex'))$q$,'42501');
+ROLLBACK;
+SQL
+echo 'PostgreSQL opt-in V2 inbox rollback and role fixtures passed'

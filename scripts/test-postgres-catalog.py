@@ -104,6 +104,8 @@ def run_cases(container, execute, setup, submit, port, directory, environment, r
         raise AssertionError('equal operation/structure did not share identities')
     check(body, 'AlreadyProcessed')
     counts(body, 1, 2)
+    # Synthetic opt-in V2 storage; this does not exercise trusted admission.
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_cases'](execute, accepted, check, counts)
     # Independently accepted same key/shape, different collector: same operation,
     # separate collector-scoped policy variant and separate source observations.
     second = accepted('second_collector')
