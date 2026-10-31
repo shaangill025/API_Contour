@@ -240,10 +240,10 @@ class Driver:
             bounded(['docker','image','inspect',image],self.base.env)
         if self.image in self.image_tags(): raise pilot.Failure('privacy image collision')
         if self.verifier in self.verifier_names(): raise pilot.Failure('privacy image verifier collision')
-        # Build with network disabled and without touching the shared app tag.
+        # Use the existing locked Dockerfile build without touching the shared app tag.
         # Intent precedes creation so a lost acknowledgement still gets cleanup.
         self.image_intent=True
-        self.base.run('privacy-image-build',['docker','build','--pull=false','--network=none',
+        self.base.run('privacy-image-build',['docker','build','--pull=false',
             '-f',str(ROOT/'deploy/local/Dockerfile'),'-t',self.image,str(ROOT)],1800)
         bounded(['docker','image','inspect',self.image],self.base.env)
         self.verifier_intent=True
@@ -492,7 +492,7 @@ class OfflineTests(unittest.TestCase):
             self.assertFalse((driver.folder/'policy.key').exists())
             self.assertEqual(driver.compose.call_args.args[1],['down','--timeout','10','--remove-orphans','--volumes'])
 
-    def test_image_build_is_owned_offline_and_before_policy(self):
+    def test_image_build_is_owned_and_before_policy(self):
         driver=Driver.__new__(Driver)
         driver.project='fixture-project'; driver.network='fixture-capture'; driver.frontend='fixture-front'
         driver.override=Path('/private/tmp/fixture-overlay.json')
@@ -513,7 +513,7 @@ class OfflineTests(unittest.TestCase):
             self.assertTrue(driver.image_intent)
             self.assertFalse(driver.policy.called)
             self.assertEqual(name,'privacy-image-build')
-            self.assertIn('--network=none',args)
+            self.assertNotIn('--network=none',args)
             self.assertIn('--pull=false',args)
             self.assertEqual(args[args.index('-t')+1],driver.image)
             self.assertNotIn('apicontour-local-app',args)
