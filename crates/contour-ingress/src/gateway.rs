@@ -189,6 +189,9 @@ impl Gateway {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<(), &'static str> {
         loop {
             let (socket, _) = listener.accept().await.map_err(|_| "accept failed")?;
+            if socket.set_nodelay(true).is_err() {
+                continue;
+            }
             let Ok(permit) = self.connections.clone().try_acquire_owned() else {
                 drop(socket);
                 continue;
