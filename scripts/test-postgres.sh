@@ -634,3 +634,104 @@ SELECT fixture.assert((SELECT count(*)=2 AND count(DISTINCT observation_id)=2 FR
     'concurrent inserts have distinct identities');
 SQL
 echo 'PostgreSQL observation identity fixture, mutation and concurrency passed'
+
+# Opt-in origin registry is exercised only here, after every schema-14 check.
+# Snapshot legacy rows before both failure injection and the successful upgrade.
+admin_sql <<'SQL'
+CREATE FUNCTION fixture.origin_v1_fingerprint() RETURNS text
+LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+ SELECT pg_catalog.md5(
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.sources t),'') || '|' ||
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.policy_revisions t),'') || '|' ||
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.collector_authorization t),'') || '|' ||
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.ingestion_batches t),'') || '|' ||
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.ingestion_payloads t),'') || '|' ||
+   coalesce((SELECT string_agg(to_jsonb(t)::text, E'\n' ORDER BY to_jsonb(t)::text) FROM contour.observation_windows t),'')
+ )
+$$;
+CREATE TABLE fixture.origin_v1_before AS SELECT fixture.origin_v1_fingerprint() AS fingerprint;
+SQL
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/opt-in-migrations/0015_origin_lifecycle.sql" | admin_sql; then
+    echo 'Injected origin lifecycle migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.origin_lifecycles') IS NULL
+    AND to_regclass('contour.origin_credentials') IS NULL
+    AND to_regclass('contour.origin_observer_grants') IS NULL
+    AND to_regclass('contour.origin_terminal_events') IS NULL
+    AND to_regprocedure('contour.enroll_origin(uuid,uuid,uuid,uuid,uuid,uuid,uuid,text,bytea)') IS NULL
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polname IN ('origin_owner_instance_read','origin_owner_source_read'))
+    AND NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=15)
+    AND fixture.origin_v1_fingerprint()=(SELECT fingerprint FROM fixture.origin_v1_before),
+    'origin migration failure rolls back DDL policies grants and V1 rows');
+SQL
+# Owner membership is sufficient; no superuser/BYPASSRLS or legacy backfill.
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/opt-in-migrations/0015_origin_lifecycle.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations)
+    = ARRAY[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]::integer[]
+    AND fixture.origin_v1_fingerprint()=(SELECT fingerprint FROM fixture.origin_v1_before),
+    'opt-in origin migration preserves V1 rows and ledger');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_admin_test -d contour_fixture < "$root/db/tests/origin_lifecycle.sql"
+# Exercise each trigger row type directly without the required gate, including
+# both terminal-event branches. Existing rows ensure every INSERT fires a guard.
+admin_sql <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.assert(EXISTS(SELECT 1 FROM contour.origin_lifecycles)
+ AND EXISTS(SELECT 1 FROM contour.origin_credentials)
+ AND EXISTS(SELECT 1 FROM contour.origin_observer_grants)
+ AND EXISTS(SELECT 1 FROM contour.origin_terminal_events WHERE event_kind='grant_revoked')
+ AND EXISTS(SELECT 1 FROM contour.origin_terminal_events WHERE event_kind='credential_revoked'), 'all guard row types seeded');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_lifecycles SELECT * FROM contour.origin_lifecycles LIMIT 1$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_credentials SELECT * FROM contour.origin_credentials LIMIT 1$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_observer_grants SELECT * FROM contour.origin_observer_grants LIMIT 1$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_terminal_events SELECT * FROM contour.origin_terminal_events WHERE event_kind='grant_revoked' LIMIT 1$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_terminal_events SELECT * FROM contour.origin_terminal_events WHERE event_kind='credential_revoked' LIMIT 1$q$,'42501');
+ROLLBACK;
+SQL
+# Only in this isolated transaction, replace the private, no-argument clock
+# helper with fixed earlier server instants. Rollback restores the real helper.
+admin_sql <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+DO $$ DECLARE early timestamptz; later timestamptz; BEGIN
+  SELECT granted_at + interval '1 microsecond' INTO early FROM contour.origin_observer_grants
+    WHERE tenant_id=contour.tenant_context() AND grant_id='00000000-0000-0000-0000-000000000522';
+  SELECT enrolled_at INTO later FROM contour.origin_credentials
+    WHERE tenant_id=contour.tenant_context() AND credential_id='00000000-0000-0000-0000-000000000516';
+  PERFORM fixture.assert(early IS NOT NULL AND later IS NOT NULL AND early < later,'clock regression fixture gap');
+  EXECUTE format('CREATE OR REPLACE FUNCTION contour.origin_server_time() RETURNS timestamptz LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS %L',
+    format('SELECT %L::timestamptz', early));
+END $$;
+SELECT fixture.expect_state($q$SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','lifecycle_closed','00000000-0000-0000-0000-000000000501')$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','credential_revoked','00000000-0000-0000-0000-000000000512')$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','grant_revoked','00000000-0000-0000-0000-000000000522')$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000517','00000000-0000-0000-0000-000000000501',decode(repeat('55',32),'hex'))$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.grant_origin_observer('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000527','00000000-0000-0000-0000-000000000501','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002')$q$,'23514');
+DO $$ DECLARE early timestamptz; later timestamptz; BEGIN
+  SELECT granted_at + interval '1 microsecond' INTO early FROM contour.origin_observer_grants
+    WHERE tenant_id=contour.tenant_context() AND grant_id='00000000-0000-0000-0000-000000000525';
+  SELECT event_at INTO later FROM contour.origin_terminal_events
+    WHERE tenant_id=contour.tenant_context() AND grant_id='00000000-0000-0000-0000-000000000525' AND event_kind='grant_revoked';
+  PERFORM fixture.assert(early IS NOT NULL AND later IS NOT NULL AND early < later,'regrant clock regression fixture gap');
+  EXECUTE format('CREATE OR REPLACE FUNCTION contour.origin_server_time() RETURNS timestamptz LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS %L',
+    format('SELECT %L::timestamptz', early));
+END $$;
+SELECT fixture.expect_state($q$SELECT contour.grant_origin_observer('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000526','00000000-0000-0000-0000-000000000505','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001')$q$,'23514');
+ROLLBACK;
+SELECT fixture.assert(pg_get_functiondef('contour.origin_server_time()'::regprocedure) LIKE '%pg_catalog.clock_timestamp()%','fixture clock replacement rolled back');
+SQL
+admin_sql <<'SQL'
+SELECT fixture.expect_state('UPDATE contour.origin_lifecycles SET instance_id=instance_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.origin_credentials','23514');
+SELECT fixture.expect_state('UPDATE contour.origin_observer_grants SET source_id=source_id','23514');
+SELECT fixture.expect_state('DELETE FROM contour.origin_terminal_events','23514');
+SELECT fixture.expect_state('TRUNCATE contour.origin_terminal_events','23514');
+SQL
+python3 "$root/scripts/test-origin-lifecycle-concurrency.py" "$container_id"
+echo 'PostgreSQL opt-in origin lifecycle registry fixture passed'
