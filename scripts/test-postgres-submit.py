@@ -26,10 +26,12 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
         if counts != '%d|%d' % (wanted, wanted):
             raise AssertionError('inbox atomic pair count mismatch')
 
-    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False, compact_utf8=False):
+    def check(body, wanted='Accepted', deadline=5000, discard=False, port_override=None, status=None, include_status=False, compact_utf8=False, v2=False):
         path = directory / ('submit-%d.json' % next(sequence))
         path.write_text(json.dumps(body, ensure_ascii=False, separators=(',', ':')) if compact_utf8 else json.dumps(body))
-        process = subprocess.Popen([probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        selected_probe = str(Path(probe).with_name('v2_submit_probe')) if v2 else probe
+        username = 'contour_v2_ingress_test' if v2 and wanted != 'RoleDenied' else 'contour_tls'
+        process = subprocess.Popen([selected_probe, str(port_override or port), str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(path), wanted, body['tenant_id'], body['collector_id'], str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda: output.put(process.stdout.readline()), daemon=True)
         reader.start()
@@ -48,7 +50,7 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
             if not (actual == expected or expected == 'Accepted' and actual.startswith('Accepted ')):
                 raise AssertionError('submission marker mismatch: expected ' + expected + ', got ' + actual)
             until = time.monotonic() + 5
-            while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_tls';") != '0':
+            while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='%s';" % username) != '0':
                 if time.monotonic() > until:
                     raise AssertionError('submission backend leaked while runtime alive')
                 time.sleep(0.02)
@@ -285,4 +287,5 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
     print('Restricted TLS atomic inbox accepted/duplicate statuses, concurrent/retry identity, integrity/scope/expiry and bytea assertions passed')
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     catalog_recovery = runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment, catalog_recovery)

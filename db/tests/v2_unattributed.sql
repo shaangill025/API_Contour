@@ -14,6 +14,12 @@ SELECT fixture.expect_state('DELETE FROM contour.ingestion_v2_metadata','42501')
 SELECT fixture.expect_state('TRUNCATE contour.ingestion_v2_metadata','42501');
 BEGIN;
 SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.assert(has_function_privilege(current_user,'contour.lock_collector(uuid,uuid)','EXECUTE')
+ AND has_table_privilege(current_user,'contour.sources','SELECT')
+ AND has_table_privilege(current_user,'contour.source_authorization','SELECT')
+ AND has_table_privilege(current_user,'contour.collector_authorization','SELECT')
+ AND has_table_privilege(current_user,'contour.policy_revisions','SELECT'), 'V2 authority read and lock grants');
+SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count) VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-00000000c099',decode(repeat('aa',32),'hex'),1,1)$q$,'42501');
 SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count,accepted_at) VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-00000000c001',decode(repeat('aa',32),'hex'),2,1,clock_timestamp())$q$,'42501');
 SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count,receipt_id) VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-00000000c001',decode(repeat('aa',32),'hex'),2,1,gen_random_uuid())$q$,'42501');
 INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count)

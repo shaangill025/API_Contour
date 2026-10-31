@@ -72,6 +72,14 @@ impl LoadedAuthority {
     ) -> Result<(), AuthorityError> {
         self.validate_input(BatchInput::V1(batch), expected, now)
     }
+    pub(crate) fn validate_v2(
+        &self,
+        batch: &BatchV2,
+        expected: [&str; 2],
+        now: OffsetDateTime,
+    ) -> Result<(), AuthorityError> {
+        self.validate_input(BatchInput::V2(batch), expected, now)
+    }
     fn validate_input(
         &self,
         batch: BatchInput<'_>,
@@ -151,13 +159,24 @@ impl ConnectedDatabase {
             let result = async {
                 configure_context(&transaction, expected, guard.connection.deadline).await?;
                 let initial = clock(&transaction).await?;
-                let loaded =
-                    load_input(&transaction, batch, expected, keys, initial, deadline, None)
-                        .await?;
-                loaded.validate_input(batch, expected, clock(&transaction).await?)?;
+                let loaded = match batch {
+                    BatchInput::V1(_) => {
+                        load_input(&transaction, batch, expected, keys, initial, deadline, None)
+                            .await?
+                    }
+                    BatchInput::V2(batch) => {
+                        load_staged_v2(&transaction, batch, expected, keys, initial, deadline, None)
+                            .await?
+                    }
+                };
+                let validate = |now| match batch {
+                    BatchInput::V1(batch) => loaded.validate(batch, expected, now),
+                    BatchInput::V2(batch) => loaded.validate_v2(batch, expected, now),
+                };
+                validate(clock(&transaction).await?)?;
                 check_deadline(deadline)?;
                 // Refresh every time-sensitive admission rule again before success.
-                loaded.validate_input(batch, expected, clock(&transaction).await?)?;
+                validate(clock(&transaction).await?)?;
                 check_deadline(deadline)
             }
             .await;
@@ -297,6 +316,28 @@ pub(crate) async fn load_staged(
     load_input(
         transaction,
         BatchInput::V1(batch),
+        expected,
+        keys,
+        initial,
+        deadline,
+        staged,
+    )
+    .await
+}
+
+// The caller must hold the required transaction locks through any subsequent write.
+pub(crate) async fn load_staged_v2(
+    transaction: &Transaction<'_>,
+    batch: &BatchV2,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    initial: OffsetDateTime,
+    deadline: Instant,
+    staged: Option<StagedCurrent>,
+) -> Result<LoadedAuthority, AuthorityError> {
+    load_input(
+        transaction,
+        BatchInput::V2(batch),
         expected,
         keys,
         initial,

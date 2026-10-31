@@ -1,13 +1,13 @@
 //! Atomic checked submission; callers independently authenticate expected identity.
 use crate::{
     AuthorityError, ConnectedDatabase,
-    authority::{load_staged, stage_current},
+    authority::{load_staged, load_staged_v2, stage_current},
     transaction::{
         CancellationGuard, begin, check_deadline, clock, configure_context, database_error,
         empty_context, time_from_micros,
     },
 };
-use contour_core::{Batch, PolicyKeys};
+use contour_core::{Batch, BatchV2, OriginWitness, PolicyKeys};
 use std::fmt;
 use time::OffsetDateTime;
 use tokio::time::{Instant, timeout_at};
@@ -228,6 +228,266 @@ async fn duplicate(
             != *digest
     {
         return Err(SubmitError::Corrupt);
+    }
+    Ok(Some(receipt(&row, ReceiptStatus::Duplicate)?))
+}
+
+/// An explicitly verified database session. Callers must independently authenticate
+/// the collector principal and bind it to this operator-configured capability.
+pub struct V2Ingress<'a> {
+    database: &'a mut ConnectedDatabase,
+}
+impl ConnectedDatabase {
+    pub async fn v2_ingress(&mut self) -> Result<V2Ingress<'_>, SubmitError> {
+        let deadline = Instant::now() + self.deadline;
+        let mut guard = CancellationGuard::arm(self);
+        let work = async {
+            let client = guard
+                .connection
+                .client
+                .as_mut()
+                .ok_or(AuthorityError::Invalidated)?;
+            let row = client.query_one("SELECT session_user=current_user AND pg_has_role(current_user,'contour_v2_ingress','USAGE') AND NOT pg_has_role(current_user,'contour_ingestion','MEMBER') AND NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user)", &[]).await.map_err(database_error)?;
+            let allowed: bool = row.try_get(0).map_err(|_| AuthorityError::Database)?;
+            if !allowed {
+                return Err(AuthorityError::Identity);
+            }
+            empty_context(client).await?;
+            guard.confirm();
+            Ok(())
+        };
+        timeout_at(deadline, work)
+            .await
+            .map_err(|_| AuthorityError::Deadline)??;
+        drop(guard);
+        Ok(V2Ingress { database: self })
+    }
+}
+
+impl V2Ingress<'_> {
+    pub async fn submit_batch_v2_until(
+        &mut self,
+        batch: &BatchV2,
+        expected: [&str; 2],
+        keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<DurableReceipt, SubmitError> {
+        let deadline = deadline.min(Instant::now() + self.database.deadline);
+        if batch.tenant_id() != expected[0] || batch.collector_id() != expected[1] {
+            return Err(AuthorityError::Identity.into());
+        }
+        if self.database.client.is_none() {
+            return Err(AuthorityError::Invalidated.into());
+        }
+        if batch
+            .records()
+            .iter()
+            .any(|record| !matches!(record.origin_witness(), OriginWitness::Unattributed))
+        {
+            return Err(SubmitError::Batch);
+        }
+        let digest = batch
+            .request_digest_bytes()
+            .map_err(|_| SubmitError::Batch)?;
+        let payload = batch.to_wire_json().map_err(|_| SubmitError::Batch)?;
+        check_deadline(deadline)?;
+        let mut guard = CancellationGuard::arm(self.database);
+        let mut committing = false;
+        let mut accepted = None;
+        let work = async {
+            let duration = guard.connection.deadline;
+            let client = guard
+                .connection
+                .client
+                .as_mut()
+                .ok_or(AuthorityError::Invalidated)?;
+            let transaction = begin(client).await?;
+            let preparation = async {
+                configure_context(&transaction, expected, duration).await?;
+                let current = stage_current(&transaction, expected, keys, clock(&transaction).await?, deadline).await?;
+                if let Some(receipt) = duplicate_v2(&transaction, batch, &digest, expected).await? {
+                    current.policy.validate_capture_at(clock(&transaction).await?).map_err(|_| AuthorityError::Admission)?;
+                    check_deadline(deadline)?;
+                    return Ok((receipt, true));
+                }
+                let loaded = load_staged_v2(&transaction, batch, expected, keys, clock(&transaction).await?, deadline, Some(current)).await?;
+                loaded.validate_v2(batch, expected, clock(&transaction).await?)?;
+                let count = i32::try_from(batch.record_count()).map_err(|_| SubmitError::Batch)?;
+                let row = transaction.query_one("INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,$4,2,$5) RETURNING receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint", &[&expected[0], &expected[1], &batch.batch_id(), &digest.as_slice(), &count]).await.map_err(database_error)?;
+                let receipt = receipt(&row, ReceiptStatus::Accepted)?;
+                transaction.execute("INSERT INTO contour.ingestion_payloads(tenant_id,collector_id,batch_id,payload_format,checked_batch) VALUES($1::text::uuid,$2::text::uuid,$3::text::uuid,2,$4)", &[&expected[0], &expected[1], &batch.batch_id(), &payload]).await.map_err(database_error)?;
+                for (observation, _) in batch.operation_observations() {
+                    let parts = observation.key.components();
+                    let revision = observation.policy_revision.to_string();
+                    transaction.execute("INSERT INTO contour.ingestion_v2_metadata (tenant_id,collector_id,batch_id,record_id,digest_version,request_digest,accepted_at,source_id,project_id,service_id,environment_id,deployment_id,policy_revision,parser_profile,attribution_class) SELECT tenant_id,collector_id,batch_id,$4::text::uuid,2,request_digest,accepted_at,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::numeric,$11,'unattributed' FROM contour.ingestion_batches WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND batch_id=$3::text::uuid", &[&expected[0], &expected[1], &batch.batch_id(), &observation.record_id, &observation.source_id, &parts[1], &parts[2], &parts[3], &observation.deployment_id, &revision, &observation.parser_profile]).await.map_err(database_error)?;
+                }
+                transaction.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(database_error)?;
+                loaded.validate_v2(batch, expected, clock(&transaction).await?)?;
+                check_deadline(deadline)?;
+                Ok::<_, SubmitError>((receipt, false))
+            }.await;
+            match preparation {
+                Ok((receipt, false)) => {
+                    // No intervening await after confirmed COMMIT before latching acceptance.
+                    committing = true;
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(|_| SubmitError::OutcomeUnknown)?;
+                    accepted = Some(receipt.clone());
+                    empty_context(client).await?;
+                    check_deadline(deadline)?;
+                    guard.confirm();
+                    Ok(receipt)
+                }
+                result => {
+                    transaction.rollback().await.map_err(database_error)?;
+                    empty_context(client).await?;
+                    check_deadline(deadline)?;
+                    if result != Err(SubmitError::Authority(AuthorityError::Deadline)) {
+                        guard.confirm();
+                    }
+                    result.map(|(receipt, _)| receipt)
+                }
+            }
+        };
+        let result = timeout_at(deadline, work).await;
+        // A known commit is not erased by subsequent deadline/context cleanup failure.
+        if let Some(receipt) = accepted {
+            return Ok(receipt);
+        }
+        match result {
+            Ok(result) => result,
+            Err(_) if committing => Err(SubmitError::OutcomeUnknown),
+            Err(_) => Err(AuthorityError::Deadline.into()),
+        }
+    }
+}
+
+async fn validate_submit_v2_metadata(
+    transaction: &Transaction<'_>,
+    batch: &BatchV2,
+    expected: [&str; 2],
+    batch_id: &str,
+) -> Result<(), SubmitError> {
+    // Inspect every row, including extras, and recheck bindings even if storage
+    // constraints were bypassed by privileged repair.
+    let rows = transaction.query("SELECT m.record_id::text,m.source_id::text,m.project_id::text,m.service_id::text,m.environment_id::text,m.deployment_id::text,CASE WHEN m.policy_revision BETWEEN 1 AND 18446744073709551615 AND m.policy_revision=trunc(m.policy_revision) THEN trunc(m.policy_revision)::text END,CASE WHEN octet_length(m.parser_profile) BETWEEN 1 AND 64 THEN m.parser_profile END,CASE WHEN octet_length(m.attribution_class)=12 THEN m.attribution_class END,(m.digest_version=2 AND m.request_digest=b.request_digest AND m.accepted_at=b.accepted_at AND isfinite(m.accepted_at)) FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE m.tenant_id=$1::text::uuid AND m.collector_id=$2::text::uuid AND m.batch_id=$3::text::uuid LIMIT 501", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
+    if rows.len() != batch.record_count() {
+        return Err(SubmitError::Corrupt);
+    }
+    let mut by_record = std::collections::HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let id: &str = row.try_get(0).map_err(|_| SubmitError::Corrupt)?;
+        if by_record.insert(id, row).is_some() {
+            return Err(SubmitError::Corrupt);
+        }
+    }
+    for (observation, witness) in batch.operation_observations() {
+        if !matches!(witness, OriginWitness::Unattributed) {
+            return Err(SubmitError::Corrupt);
+        }
+        let row = by_record
+            .remove(observation.record_id)
+            .ok_or(SubmitError::Corrupt)?;
+        let parts = observation.key.components();
+        let expected_fields = [
+            observation.source_id,
+            parts[1],
+            parts[2],
+            parts[3],
+            observation.deployment_id,
+        ];
+        for (index, value) in expected_fields.iter().enumerate() {
+            if row
+                .try_get::<_, &str>(index + 1)
+                .map_err(|_| SubmitError::Corrupt)?
+                != *value
+            {
+                return Err(SubmitError::Corrupt);
+            }
+        }
+        if row
+            .try_get::<_, &str>(6)
+            .map_err(|_| SubmitError::Corrupt)?
+            != observation.policy_revision.to_string()
+            || row
+                .try_get::<_, &str>(7)
+                .map_err(|_| SubmitError::Corrupt)?
+                != observation.parser_profile
+            || row
+                .try_get::<_, &str>(8)
+                .map_err(|_| SubmitError::Corrupt)?
+                != "unattributed"
+            || !row
+                .try_get::<_, bool>(9)
+                .map_err(|_| SubmitError::Corrupt)?
+        {
+            return Err(SubmitError::Corrupt);
+        }
+    }
+    if !by_record.is_empty() {
+        return Err(SubmitError::Corrupt);
+    }
+    Ok(())
+}
+
+async fn duplicate_v2(
+    transaction: &Transaction<'_>,
+    batch: &BatchV2,
+    digest: &[u8; 32],
+    expected: [&str; 2],
+) -> Result<Option<DurableReceipt>, SubmitError> {
+    let row = transaction.query_opt("SELECT b.receipt_id::text,floor(extract(epoch FROM b.accepted_at)*1000000)::bigint,b.digest_version,octet_length(b.request_digest),b.record_count,p.payload_format,octet_length(p.checked_batch) FROM contour.ingestion_batches b LEFT JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.tenant_id=$1::text::uuid AND b.collector_id=$2::text::uuid AND b.batch_id=$3::text::uuid", &[&expected[0], &expected[1], &batch.batch_id()]).await.map_err(database_error)?;
+    let Some(row) = row else { return Ok(None) };
+    let version: i16 = row.try_get(2).map_err(|_| SubmitError::Corrupt)?;
+    let digest_size: i32 = row.try_get(3).map_err(|_| SubmitError::Corrupt)?;
+    let count: i32 = row.try_get(4).map_err(|_| SubmitError::Corrupt)?;
+    let format: Option<i16> = row.try_get(5).map_err(|_| SubmitError::Corrupt)?;
+    let size: Option<i32> = row.try_get(6).map_err(|_| SubmitError::Corrupt)?;
+    if !matches!(version, 1 | 2)
+        || digest_size != 32
+        || !(1..=500).contains(&count)
+        || format != Some(version)
+        || !size.is_some_and(|n| (1..=1_048_576).contains(&n))
+    {
+        return Err(SubmitError::Corrupt);
+    }
+    let stored = transaction.query_one("SELECT b.request_digest,p.checked_batch FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.tenant_id=$1::text::uuid AND b.collector_id=$2::text::uuid AND b.batch_id=$3::text::uuid AND octet_length(b.request_digest)=32 AND octet_length(p.checked_batch) BETWEEN 1 AND 1048576", &[&expected[0], &expected[1], &batch.batch_id()]).await.map_err(database_error)?;
+    let stored_digest: &[u8] = stored.try_get(0).map_err(|_| SubmitError::Corrupt)?;
+    let bytes: &[u8] = stored.try_get(1).map_err(|_| SubmitError::Corrupt)?;
+    if version == 1 {
+        let old = Batch::from_wire_json(bytes).map_err(|_| SubmitError::Corrupt)?;
+        if old.tenant_id() != expected[0]
+            || old.collector_id() != expected[1]
+            || old.batch_id() != batch.batch_id()
+            || old.record_count() != count as usize
+            || old
+                .request_digest_bytes()
+                .map_err(|_| SubmitError::Corrupt)?
+                .as_slice()
+                != stored_digest
+        {
+            return Err(SubmitError::Corrupt);
+        }
+        return Err(SubmitError::Conflict);
+    }
+    let old = BatchV2::from_wire_json(bytes).map_err(|_| SubmitError::Corrupt)?;
+    if old.tenant_id() != expected[0]
+        || old.collector_id() != expected[1]
+        || old.batch_id() != batch.batch_id()
+        || old.record_count() != count as usize
+        || old
+            .request_digest_bytes()
+            .map_err(|_| SubmitError::Corrupt)?
+            .as_slice()
+            != stored_digest
+    {
+        return Err(SubmitError::Corrupt);
+    }
+    validate_submit_v2_metadata(transaction, &old, expected, batch.batch_id()).await?;
+    if stored_digest != digest {
+        return Err(SubmitError::Conflict);
     }
     Ok(Some(receipt(&row, ReceiptStatus::Duplicate)?))
 }

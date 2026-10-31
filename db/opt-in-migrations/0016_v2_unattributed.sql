@@ -10,13 +10,19 @@ ALTER TABLE contour.ingestion_payloads ADD CHECK (payload_format IN (1,2));
 CREATE POLICY ingestion_v1_only ON contour.ingestion_batches AS RESTRICTIVE FOR INSERT TO contour_ingestion WITH CHECK (digest_version=1);
 CREATE POLICY payload_v1_only ON contour.ingestion_payloads AS RESTRICTIVE FOR INSERT TO contour_ingestion WITH CHECK (payload_format=1);
 CREATE POLICY v2_ingress_batches ON contour.ingestion_batches TO contour_v2_ingress
-    USING (tenant_id=contour.tenant_context() AND digest_version=2)
+    USING (tenant_id=contour.tenant_context())
     WITH CHECK (tenant_id=contour.tenant_context() AND digest_version=2);
 CREATE POLICY v2_ingress_payloads ON contour.ingestion_payloads TO contour_v2_ingress
-    USING (tenant_id=contour.tenant_context() AND payload_format=2)
+    USING (tenant_id=contour.tenant_context())
     WITH CHECK (tenant_id=contour.tenant_context() AND payload_format=2);
 GRANT USAGE ON SCHEMA contour TO contour_v2_ingress;
-GRANT EXECUTE ON FUNCTION contour.tenant_context(), contour.collector_lock_key(uuid,uuid), contour.guard_collector(uuid,uuid) TO contour_v2_ingress;
+GRANT EXECUTE ON FUNCTION contour.tenant_context(), contour.collector_lock_key(uuid,uuid), contour.guard_collector(uuid,uuid), contour.lock_collector(uuid,uuid) TO contour_v2_ingress;
+DO $$ DECLARE relation text; BEGIN
+    FOREACH relation IN ARRAY ARRAY['sources','policy_revisions','collector_authorization','source_authorization'] LOOP
+        EXECUTE pg_catalog.format('CREATE POLICY v2_authority_read ON contour.%I FOR SELECT TO contour_v2_ingress USING (tenant_id=contour.tenant_context())', relation);
+        EXECUTE pg_catalog.format('GRANT SELECT ON contour.%I TO contour_v2_ingress', relation);
+    END LOOP;
+END $$;
 GRANT SELECT ON contour.ingestion_batches, contour.ingestion_payloads TO contour_v2_ingress;
 -- The database, not ingress, supplies receipt and acceptance time.
 GRANT INSERT (tenant_id,collector_id,batch_id,request_digest,digest_version,record_count)
