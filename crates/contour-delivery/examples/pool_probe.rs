@@ -66,7 +66,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         query_parameter_names: &[],
                     };
                     let token = pool.try_begin(&scope)?;
-                    pool.try_fragment(token, br#"{"id":{"quantity":1}}"#)?;
+                    let marker = body["privacy_marker"].as_str().ok_or("privacy marker")?;
+                    let payload = serde_json::to_vec(
+                        &json!({"id":{"quantity":1,"SYNTHETIC_DENIED":marker}}),
+                    )?;
+                    pool.try_fragment(token, &payload)?;
                     let metadata = RecordMetadata {
                         record_id: get("record_id"),
                         source_id: get("source_id"),

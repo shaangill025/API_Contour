@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import unittest
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 1_048_576
@@ -33,6 +34,18 @@ def domain_digest(raw):
     value = json.loads(raw)
     canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()
     return hashlib.sha256(b'apicontour/batch/1\n' + canonical).hexdigest()
+
+
+def validate_private_wire(raw, marker):
+    if marker.encode() in raw or b'SYNTHETIC_DENIED' in raw:
+        raise AssertionError('pool private marker in export')
+    batch = json.loads(raw)
+    try:
+        shape = batch['records'][0]['structure']['fields']['id']['fields']
+        if set(shape) != {'quantity'} or shape['quantity']['kind'] != 'integer':
+            raise AssertionError('pool sanitized shape mismatch')
+    except (KeyError, IndexError, TypeError):
+        raise AssertionError('pool sanitized shape missing') from None
 
 
 def validate_replay(raw, first_wire, value, batch, receipt):
@@ -82,6 +95,7 @@ def operation_key(body):
 
 def run_cases(execute, setup, server, directory, environment, pool_probe, catalog_probe, pg_port):
     body, _, _ = setup('pool_lost_receipt', current=1, history=(1,))
+    body['privacy_marker'] = 'SYNTHETIC_POOL_' + uuid.uuid4().hex
     scope = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (body['tenant_id'], body['collector_id'], body['batch_id'])
     evidence = {'sends': 0}
     errors = []
@@ -108,7 +122,9 @@ def run_cases(execute, setup, server, directory, environment, pool_probe, catalo
                     if not 0 <= size <= LIMIT: raise AssertionError('request bound')
                     raw = self.rfile.read(size)
                     if len(raw) != size: raise AssertionError('truncated request')
-                    if self.path == '/v1/batches': validate_batch_identity(raw, body)
+                    if self.path == '/v1/batches':
+                        validate_batch_identity(raw, body)
+                        validate_private_wire(raw, body['privacy_marker'])
                     context = ssl.create_default_context(cafile=str(directory/'ca.crt'))
                     context.load_cert_chain(directory/'http-client.crt', directory/'http-client.key')
                     connection = http.client.HTTPSConnection('localhost', upstream, context=context, timeout=3)
@@ -241,6 +257,15 @@ def run_cases(execute, setup, server, directory, environment, pool_probe, catalo
 
 
 class OfflineTests(unittest.TestCase):
+    def test_pool_export_scanner_positive_control(self):
+        wire = {'records':[{'structure':{'fields':{'id':{'fields':{'quantity':{'kind':'integer'}}}}}}]}
+        raw = json.dumps(wire).encode()
+        validate_private_wire(raw, 'private-value')
+        for key, value in (('approved','private-value'), ('SYNTHETIC_DENIED','ignored')):
+            import copy
+            changed=copy.deepcopy(wire); changed[key]=value
+            with self.assertRaises(AssertionError): validate_private_wire(json.dumps(changed).encode(), 'private-value')
+
     def test_identity_and_snapshot_mutations_fail(self):
         import copy
         record = {key: key for key in IDENTITY_FIELDS}
