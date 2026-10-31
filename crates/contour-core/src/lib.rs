@@ -11,6 +11,8 @@ pub use admission::{
 };
 mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
+mod batch_v2;
+pub use batch_v2::{BatchV2, BatchV2Record, OriginWitness};
 mod comparison;
 pub use comparison::{
     ComparisonError, MAX_COMPARISON_DIFFERENCES, MAX_COMPARISON_PATH_BYTES,

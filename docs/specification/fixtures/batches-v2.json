@@ -1,0 +1,358 @@
+[
+  {
+    "id": "valid_claim",
+    "expected": "accept",
+    "body": {
+      "wire_version": 2,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          },
+          "origin_witness": {
+            "kind": "downstream_mtls_leaf_sha256_v1",
+            "leaf_sha256": "abababababababababababababababababababababababababababababababab"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "valid_unattributed",
+    "expected": "accept",
+    "body": {
+      "wire_version": 2,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          },
+          "origin_witness": {
+            "kind": "unattributed"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "missing_witness",
+    "expected": "reject",
+    "body": {
+      "wire_version": 2,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "witness_extra",
+    "expected": "reject",
+    "body": {
+      "wire_version": 2,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          },
+          "origin_witness": {
+            "kind": "downstream_mtls_leaf_sha256_v1",
+            "leaf_sha256": "abababababababababababababababababababababababababababababababab",
+            "verified": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "uppercase_digest",
+    "expected": "reject",
+    "body": {
+      "wire_version": 2,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          },
+          "origin_witness": {
+            "kind": "downstream_mtls_leaf_sha256_v1",
+            "leaf_sha256": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "wrong_wire_version",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "00000000-0000-4000-8000-000000000001",
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "created_at": "2026-10-06T12:00:05Z",
+      "records": [
+        {
+          "record": {
+            "record_id": "00000000-0000-4000-8000-000000000001",
+            "project_id": "00000000-0000-4000-8000-000000000001",
+            "service_id": "00000000-0000-4000-8000-000000000001",
+            "environment_id": "00000000-0000-4000-8000-000000000001",
+            "deployment_id": "00000000-0000-4000-8000-000000000001",
+            "protocol": "http",
+            "direction": "response",
+            "operation": "GET",
+            "route_template": "/orders/{id}",
+            "route_uncertain": false,
+            "parser_profile": "http_json_v1",
+            "policy_revision": 1,
+            "visibility": "structure",
+            "completeness": "complete",
+            "reasons": [],
+            "structure": {
+              "kind": "object",
+              "fields": {
+                "id": {
+                  "kind": "string"
+                },
+                "quantity": {
+                  "kind": "integer"
+                }
+              },
+              "additional": null
+            },
+            "count": 12,
+            "first_seen": "2026-10-06T12:00:00Z",
+            "last_seen": "2026-10-06T12:00:05Z",
+            "sample_numerator": 1,
+            "sample_denominator": 1,
+            "status_code": 200,
+            "source_id": "00000000-0000-4000-8000-000000000002",
+            "request_header_names": [],
+            "response_header_names": [],
+            "query_parameter_names": [],
+            "queued_at": "2026-10-06T12:00:05Z",
+            "expires_at": "2026-10-07T12:00:05Z"
+          },
+          "origin_witness": {
+            "kind": "downstream_mtls_leaf_sha256_v1",
+            "leaf_sha256": "abababababababababababababababababababababababababababababababab"
+          }
+        }
+      ]
+    }
+  }
+]

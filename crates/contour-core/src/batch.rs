@@ -11,7 +11,7 @@ use std::fmt;
 use std::{collections::HashSet, io, marker::PhantomData};
 use time::{Duration, OffsetDateTime};
 
-const MAX_BATCH_BYTES: usize = 1_048_576;
+pub(crate) const MAX_BATCH_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchError {
@@ -446,7 +446,7 @@ impl Record {
     pub(crate) fn record_id(&self) -> &str {
         &self.record_id
     }
-    fn validate(&self, created: OffsetDateTime) -> Result<(), BatchError> {
+    pub(crate) fn validate(&self, created: OffsetDateTime) -> Result<(), BatchError> {
         let reasons = &self.reasons.0;
         if [
             &self.record_id,
@@ -667,17 +667,25 @@ impl io::Write for Output {
         Ok(())
     }
 }
-fn encode(value: &impl Serialize) -> Result<Vec<u8>, BatchError> {
+pub(crate) fn encode(value: &impl Serialize) -> Result<Vec<u8>, BatchError> {
     let mut output = Output(Vec::new());
     serde_json::to_writer(&mut output, value).map_err(|_| BatchError::Size)?;
     Ok(output.0)
 }
 fn request_digest(value: &impl Serialize) -> Result<[u8; 32], BatchError> {
+    canonical_digest(value, b"apicontour/batch/1\n")
+}
+// This conversion is performed only after strict typed deserialization has
+// rejected duplicate and unknown fields; it is never used to parse input.
+pub(crate) fn canonical_digest(
+    value: &impl Serialize,
+    domain: &[u8],
+) -> Result<[u8; 32], BatchError> {
     let mut value = serde_json::to_value(value).map_err(|_| BatchError::Invalid)?;
     value.sort_all_objects();
     let bytes = encode(&value)?;
     let mut digest = Sha256::new();
-    digest.update(b"apicontour/batch/1\n");
+    digest.update(domain);
     digest.update(bytes);
     Ok(digest.finalize().into())
 }
