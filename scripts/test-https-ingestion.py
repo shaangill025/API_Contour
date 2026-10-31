@@ -108,6 +108,11 @@ def run_cases(container, execute, setup, probe, pg_port, directory, environment,
     if delivery_only:
         runpy.run_path(str(Path(__file__).with_name('test-collector-delivery.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('delivery_probe')))
         runpy.run_path(str(Path(__file__).with_name('test-collector-owner.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('owner_probe')))
+        root = Path(__file__).resolve().parents[1]
+        execute((root/'db/provision_catalog.sql').read_text())
+        execute((root/'db/migrations/0004_catalog.sql').read_text())
+        execute("CREATE ROLE contour_catalog_tls LOGIN PASSWORD '%s'; GRANT contour_catalog_worker TO contour_catalog_tls; ALTER ROLE contour_catalog_tls SET log_statement='all';" % environment['CONTOUR_FIXTURE_PASSWORD'])
+        runpy.run_path(str(Path(__file__).with_name('test-collector-pool.py')))['run_cases'](execute,setup,server,directory,environment,str(Path(probe).with_name('pool_probe')),str(Path(probe).with_name('catalog_probe')),pg_port)
         return
 
     def request(port, body, wanted=200, client='http-client', headers=None, method='POST', target='/v1/batches'):
