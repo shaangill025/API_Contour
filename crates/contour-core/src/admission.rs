@@ -1,5 +1,5 @@
 use crate::{
-    Batch, Node, Shape, VerifiedPolicy,
+    Batch, BatchV2, Node, Shape, VerifiedPolicy,
     policy::{profile, uuid},
 };
 use std::{collections::BTreeMap, fmt};
@@ -270,11 +270,34 @@ pub fn validate_admission(
         return Err(AdmissionError::Identity);
     }
     batch.validate_at(now).map_err(|_| AdmissionError::Time)?;
+    validate_records(batch.records().iter(), inputs, now)
+}
+
+/// Pure V2 record validation. Origin witnesses remain untrusted claims and
+/// provide no origin, collector, destination, or capture authority. Callers
+/// must authenticate and recheck the live policy and assignments at commit.
+pub fn validate_admission_v2(
+    batch: &BatchV2,
+    inputs: &AdmissionInputs<'_>,
+    now: OffsetDateTime,
+) -> Result<(), AdmissionError> {
+    if batch.tenant_id() != inputs.identity[0] || batch.collector_id() != inputs.identity[1] {
+        return Err(AdmissionError::Identity);
+    }
+    batch.validate_at(now).map_err(|_| AdmissionError::Time)?;
+    validate_records(batch.internal_records(), inputs, now)
+}
+
+fn validate_records<'a>(
+    records: impl Iterator<Item = &'a crate::batch::Record>,
+    inputs: &AdmissionInputs<'_>,
+    now: OffsetDateTime,
+) -> Result<(), AdmissionError> {
     inputs
         .current
         .validate_capture_at(now)
         .map_err(|_| AdmissionError::Time)?;
-    for record in batch.records() {
+    for record in records {
         validate_record(
             record,
             inputs,

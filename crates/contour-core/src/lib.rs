@@ -8,6 +8,7 @@ pub use authority_reply::{
 mod admission;
 pub use admission::{
     AdmissionError, AdmissionInputs, CaptureScope, SourceAssignment, validate_admission,
+    validate_admission_v2,
 };
 mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};

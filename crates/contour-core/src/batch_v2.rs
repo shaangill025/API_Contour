@@ -178,4 +178,36 @@ impl BatchV2 {
     pub fn records(&self) -> &[BatchV2Record] {
         &self.envelope.records.0
     }
+    /// Checks declared batch age and record expiry, without authenticating
+    /// origin, collector, workload or policy authority.
+    pub fn validate_at(&self, now: time::OffsetDateTime) -> Result<(), BatchError> {
+        batch::validate_batch_at(&self.envelope.created_at, self.internal_records(), now)
+    }
+    /// Minimal legacy source-policy lookup dimensions. Witnesses are excluded.
+    pub fn authority_requests(&self) -> impl ExactSizeIterator<Item = crate::AuthorityRequest<'_>> {
+        self.internal_records().map(batch::authority_request)
+    }
+    /// Destination observations paired with their untrusted witness, in record
+    /// order. The witness does not establish origin or alter the operation key.
+    pub fn operation_observations(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (crate::OperationObservation<'_>, &OriginWitness)> {
+        self.envelope.records.0.iter().map(|wrapper| {
+            (
+                batch::operation_observation(
+                    &wrapper.record,
+                    self.tenant_id(),
+                    self.collector_id(),
+                ),
+                &wrapper.origin_witness,
+            )
+        })
+    }
+    pub(crate) fn internal_records(&self) -> impl ExactSizeIterator<Item = &Record> {
+        self.envelope
+            .records
+            .0
+            .iter()
+            .map(|wrapper| &wrapper.record)
+    }
 }

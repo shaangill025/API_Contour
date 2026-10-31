@@ -281,19 +281,11 @@ impl Batch {
         request_digest(&self.envelope)
     }
     pub fn validate_at(&self, now: OffsetDateTime) -> Result<(), BatchError> {
-        let age = self.envelope.created_at.instant() - now;
-        if age < -Duration::hours(24) - Duration::minutes(5)
-            || age > Duration::minutes(5)
-            || self
-                .envelope
-                .records
-                .0
-                .iter()
-                .any(|record| record.expires_at.instant() <= now)
-        {
-            return Err(BatchError::AdmissionTime);
-        }
-        Ok(())
+        validate_batch_at(
+            &self.envelope.created_at,
+            self.envelope.records.0.iter(),
+            now,
+        )
     }
     pub fn batch_id(&self) -> &str {
         &self.envelope.batch_id
@@ -308,15 +300,7 @@ impl Batch {
         self.envelope.records.0.len()
     }
     pub fn authority_requests(&self) -> impl ExactSizeIterator<Item = AuthorityRequest<'_>> {
-        self.envelope
-            .records
-            .0
-            .iter()
-            .map(|record| AuthorityRequest {
-                source_id: &record.source_id,
-                revision: record.policy_revision.get(),
-                queued_at: record.queued_at.instant(),
-            })
+        self.envelope.records.0.iter().map(authority_request)
     }
     /// Checked syntax only. Persist projections only after trusted inbox integrity
     /// and scope validation. Deployment/source evidence never changes the key.
@@ -327,46 +311,75 @@ impl Batch {
             .records
             .0
             .iter()
-            .map(|record| crate::OperationObservation {
-                key: crate::OperationKey {
-                    components: [
-                        self.tenant_id(),
-                        &record.project_id,
-                        &record.service_id,
-                        &record.environment_id,
-                        &record.protocol,
-                        &record.direction,
-                        &record.operation,
-                        &record.route_template,
-                    ],
-                },
-                deployment_id: &record.deployment_id,
-                collector_id: self.collector_id(),
-                source_id: &record.source_id,
-                parser_profile: &record.parser_profile,
-                policy_revision: record.policy_revision.get(),
-                visibility: &record.visibility,
-                route_uncertain: record.route_uncertain,
-                record_id: &record.record_id,
-                canonicalization_version: 1,
-                structure: &record.structure.0,
-                completeness: &record.completeness,
-                reasons: &record.reasons.0,
-                count: record.count.get(),
-                first_seen: &record.first_seen,
-                last_seen: &record.last_seen,
-                sample_numerator: record.sample_numerator.get(),
-                sample_denominator: record.sample_denominator.get(),
-                status_code: record.status_code.map(|status| status.get()),
-                request_header_names: &record.request_header_names.0,
-                response_header_names: &record.response_header_names.0,
-                query_parameter_names: &record.query_parameter_names.0,
-                queued_at: &record.queued_at,
-                expires_at: &record.expires_at,
-            })
+            .map(|record| operation_observation(record, self.tenant_id(), self.collector_id()))
     }
     pub(crate) fn records(&self) -> &[Record] {
         &self.envelope.records.0
+    }
+}
+
+pub(crate) fn validate_batch_at<'a>(
+    created_at: &Timestamp,
+    mut records: impl Iterator<Item = &'a Record>,
+    now: OffsetDateTime,
+) -> Result<(), BatchError> {
+    let age = created_at.instant() - now;
+    if age < -Duration::hours(24) - Duration::minutes(5)
+        || age > Duration::minutes(5)
+        || records.any(|record| record.expires_at.instant() <= now)
+    {
+        return Err(BatchError::AdmissionTime);
+    }
+    Ok(())
+}
+pub(crate) fn authority_request(record: &Record) -> AuthorityRequest<'_> {
+    AuthorityRequest {
+        source_id: &record.source_id,
+        revision: record.policy_revision.get(),
+        queued_at: record.queued_at.instant(),
+    }
+}
+pub(crate) fn operation_observation<'a>(
+    record: &'a Record,
+    tenant: &'a str,
+    collector: &'a str,
+) -> crate::OperationObservation<'a> {
+    crate::OperationObservation {
+        key: crate::OperationKey {
+            components: [
+                tenant,
+                &record.project_id,
+                &record.service_id,
+                &record.environment_id,
+                &record.protocol,
+                &record.direction,
+                &record.operation,
+                &record.route_template,
+            ],
+        },
+        deployment_id: &record.deployment_id,
+        collector_id: collector,
+        source_id: &record.source_id,
+        parser_profile: &record.parser_profile,
+        policy_revision: record.policy_revision.get(),
+        visibility: &record.visibility,
+        route_uncertain: record.route_uncertain,
+        record_id: &record.record_id,
+        canonicalization_version: 1,
+        structure: &record.structure.0,
+        completeness: &record.completeness,
+        reasons: &record.reasons.0,
+        count: record.count.get(),
+        first_seen: &record.first_seen,
+        last_seen: &record.last_seen,
+        sample_numerator: record.sample_numerator.get(),
+        sample_denominator: record.sample_denominator.get(),
+        status_code: record.status_code.map(|status| status.get()),
+        request_header_names: &record.request_header_names.0,
+        response_header_names: &record.response_header_names.0,
+        query_parameter_names: &record.query_parameter_names.0,
+        queued_at: &record.queued_at,
+        expires_at: &record.expires_at,
     }
 }
 
