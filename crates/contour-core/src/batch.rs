@@ -756,7 +756,7 @@ impl<'a> BorrowedBatch<'a> {
         request_digest(self)
     }
 }
-struct Count(usize);
+pub(crate) struct Count(pub(crate) usize);
 impl io::Write for Count {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > MAX_BATCH_BYTES - self.0 {

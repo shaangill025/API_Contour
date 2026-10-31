@@ -1,6 +1,8 @@
 //! Single-owner sanitized retention and frozen ownership. Snapshots remain caller authority.
 use crate::admission::validate_record;
-use crate::{AdmissionError, AdmissionInputs, CheckedRecord, RecordDraft, Timestamp};
+use crate::{
+    AdmissionError, AdmissionInputs, CheckedRecord, OriginWitness, RecordDraft, Timestamp,
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -78,6 +80,7 @@ impl fmt::Debug for UnfrozenAdmission {
 struct Entry {
     admission_sequence: u64,
     record: CheckedRecord,
+    witness: Option<OriginWitness>,
     // Base C bounds this record's wire contribution including envelope slack.
     base_allowance: usize,
     // Admission reserves checked 3C before retaining records or future copies.
@@ -86,6 +89,7 @@ struct Entry {
 /// Not enrollment, online freshness, persistent anti-rollback or authenticated I/O.
 pub struct MemoryQueue {
     identity: [String; 2],
+    v2: bool,
     limits: QueueLimits,
     entries: VecDeque<Entry>,
     stats: QueueStats,
@@ -103,11 +107,19 @@ impl fmt::Debug for MemoryQueue {
 }
 impl MemoryQueue {
     pub fn new(identity: [&str; 2], limits: QueueLimits) -> Result<Self, QueueError> {
+        Self::new_version(identity, limits, false)
+    }
+    /// Create an isolated V2 queue. Witness claims grant no authority.
+    pub fn new_v2(identity: [&str; 2], limits: QueueLimits) -> Result<Self, QueueError> {
+        Self::new_version(identity, limits, true)
+    }
+    fn new_version(identity: [&str; 2], limits: QueueLimits, v2: bool) -> Result<Self, QueueError> {
         if identity.iter().any(|id| !crate::policy::uuid(id)) {
             return Err(QueueError::Identity);
         }
         Ok(Self {
             identity: identity.map(str::to_owned),
+            v2,
             limits,
             entries: VecDeque::new(),
             stats: QueueStats::default(),
@@ -161,6 +173,32 @@ impl MemoryQueue {
         inputs: &AdmissionInputs<'_>,
     ) -> Result<(), QueueError> {
         self.admit_with(draft, inputs, wall_clock)
+    }
+    /// Admit an immutable untrusted V2 witness together with its record.
+    pub fn admit_v2(
+        &mut self,
+        draft: RecordDraft,
+        witness: OriginWitness,
+        inputs: &AdmissionInputs<'_>,
+    ) -> Result<(), QueueError> {
+        self.admit_version_with(draft, Some(witness), inputs, wall_clock)
+    }
+    /// Admit a V2 record that can be retracted while still pending.
+    pub fn admit_v2_retractable(
+        &mut self,
+        draft: RecordDraft,
+        witness: OriginWitness,
+        inputs: &AdmissionInputs<'_>,
+    ) -> Result<UnfrozenAdmission, QueueError> {
+        self.admit_version_with(draft, Some(witness), inputs, wall_clock)?;
+        Ok(UnfrozenAdmission {
+            instance: self.instance,
+            sequence: self
+                .entries
+                .back()
+                .ok_or(QueueError::Ownership)?
+                .admission_sequence,
+        })
     }
     /// Permit a native owner to undo only this new pending record when its final
     /// live-authority check fails. All normal admission and charging checks run.
@@ -333,8 +371,31 @@ impl MemoryQueue {
         inputs: &AdmissionInputs<'_>,
         mut clock: impl FnMut() -> Result<OffsetDateTime, QueueError>,
     ) -> Result<(), QueueError> {
+        self.admit_version_with(draft, None, inputs, &mut clock)
+    }
+    fn admit_version_with(
+        &mut self,
+        draft: RecordDraft,
+        witness: Option<OriginWitness>,
+        inputs: &AdmissionInputs<'_>,
+        mut clock: impl FnMut() -> Result<OffsetDateTime, QueueError>,
+    ) -> Result<(), QueueError> {
         let initial = self.clock_result(clock())?;
         self.reconcile_at(inputs, initial)?;
+        if self.v2 != witness.is_some() {
+            return Err(self.reject(QueueError::Record));
+        }
+        let extra = if let Some(witness) = &witness {
+            witness
+                .validate()
+                .map_err(|_| self.reject(QueueError::Record))?;
+            let witness_bytes = serde_json::to_vec(witness)
+                .map_err(|_| self.reject(QueueError::Record))?
+                .len();
+            b"{\"record\":".len() + b",\"origin_witness\":".len() + b"}".len() + witness_bytes
+        } else {
+            0
+        };
         if draft.record.policy_revision.get() != inputs.current.revision() {
             return Err(self.reject(QueueError::Revision));
         }
@@ -355,6 +416,9 @@ impl MemoryQueue {
         let base_allowance = draft
             .retention_charge()
             .map_err(|_| self.reject(QueueError::Record))?;
+        let base_allowance = base_allowance
+            .checked_add(extra)
+            .ok_or_else(|| self.reject(QueueError::Limits))?;
         let charge = base_allowance
             .checked_mul(3)
             .ok_or_else(|| self.reject(QueueError::Limits))?;
@@ -396,6 +460,7 @@ impl MemoryQueue {
         self.entries.push_back(Entry {
             admission_sequence,
             record,
+            witness,
             base_allowance,
             charge,
         });

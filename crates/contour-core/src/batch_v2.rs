@@ -69,7 +69,7 @@ impl fmt::Debug for BatchV2 {
     }
 }
 impl OriginWitness {
-    fn validate(&self) -> Result<(), BatchError> {
+    pub(crate) fn validate(&self) -> Result<(), BatchError> {
         match self {
             Self::Unattributed => Ok(()),
             Self::DownstreamMtlsLeafSha256V1 { leaf_sha256 }
@@ -214,5 +214,63 @@ impl BatchV2 {
             .0
             .iter()
             .map(|wrapper| &wrapper.record)
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct BorrowedV2Record<'a> {
+    pub(crate) record: &'a Record,
+    pub(crate) origin_witness: &'a OriginWitness,
+}
+#[derive(Serialize)]
+pub(crate) struct BorrowedBatchV2<'a> {
+    wire_version: UnsignedInteger,
+    batch_id: &'a str,
+    tenant_id: &'a str,
+    collector_id: &'a str,
+    created_at: &'a Timestamp,
+    records: &'a [BorrowedV2Record<'a>],
+}
+impl<'a> BorrowedBatchV2<'a> {
+    pub(crate) fn new(
+        batch_id: &'a str,
+        identity: [&'a str; 2],
+        created_at: &'a Timestamp,
+        records: &'a [BorrowedV2Record<'a>],
+    ) -> Result<Self, BatchError> {
+        if !batch::uuid(batch_id)
+            || identity.iter().any(|id| !batch::uuid(id))
+            || records.is_empty()
+            || records.len() > 500
+        {
+            return Err(BatchError::Semantic);
+        }
+        let mut ids = HashSet::new();
+        for wrapper in records {
+            if !ids.insert(wrapper.record.record_id()) {
+                return Err(BatchError::Semantic);
+            }
+            wrapper.origin_witness.validate()?;
+            wrapper.record.validate(created_at.instant())?;
+        }
+        Ok(Self {
+            wire_version: UnsignedInteger::new(2),
+            batch_id,
+            tenant_id: identity[0],
+            collector_id: identity[1],
+            created_at,
+            records,
+        })
+    }
+    pub(crate) fn length(&self) -> Result<usize, BatchError> {
+        let mut count = batch::Count(0);
+        serde_json::to_writer(&mut count, self).map_err(|_| BatchError::Size)?;
+        Ok(count.0)
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, BatchError> {
+        batch::encode(self)
+    }
+    pub(crate) fn digest(&self) -> Result<[u8; 32], BatchError> {
+        batch::canonical_digest(self, b"apicontour/batch/2\n")
     }
 }

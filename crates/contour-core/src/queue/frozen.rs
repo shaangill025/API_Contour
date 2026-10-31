@@ -1,7 +1,9 @@
 //! Queue-owned payloads and local callback routing, not transport authentication.
 use super::*;
 use crate::batch::BorrowedBatch;
+use crate::batch_v2::{BorrowedBatchV2, BorrowedV2Record};
 use std::sync::atomic::{AtomicU64, Ordering};
+type PrefixWire = (usize, Option<([u8; 32], Vec<u8>)>);
 static INSTANCES: AtomicU64 = AtomicU64::new(1);
 pub(super) fn next_instance() -> Result<u64, QueueError> {
     INSTANCES
@@ -345,20 +347,15 @@ impl MemoryQueue {
             }
             count = lower;
         }
-        let records = self
-            .entries
-            .iter()
-            .take(count)
-            .map(|entry| &entry.record.record)
-            .collect::<Vec<_>>();
-        let batch = BorrowedBatch::new(
-            batch_id,
-            [&self.identity[0], &self.identity[1]],
-            &created,
-            &records,
-        )
-        .map_err(|_| QueueError::Record)?;
-        let length = batch.length().map_err(|_| QueueError::Record)?;
+        let (length, _) = self
+            .prefix_wire(batch_id, &created, count, false)
+            .map_err(|error| {
+                if error == QueueError::Limits {
+                    QueueError::Record
+                } else {
+                    error
+                }
+            })?;
         let allowance = self
             .entries
             .iter()
@@ -372,8 +369,10 @@ impl MemoryQueue {
         }
         // Admission reserved 3C: records plus this wire plus one transport copy.
         // W <= selected C guarantees that even a full queue needs no headroom.
-        let digest = batch.digest().map_err(|_| QueueError::Record)?;
-        let wire = batch.encode().map_err(|_| QueueError::Record)?;
+        let (_, output) = self
+            .prefix_wire(batch_id, &created, count, true)
+            .map_err(|_| QueueError::Record)?;
+        let (digest, wire) = output.ok_or(QueueError::Record)?;
         if wire.len() != length {
             return Err(QueueError::Record);
         }
@@ -407,23 +406,68 @@ impl MemoryQueue {
         count: usize,
         limit: usize,
     ) -> Result<bool, QueueError> {
-        let records = self
-            .entries
-            .iter()
-            .take(count)
-            .map(|entry| &entry.record.record)
-            .collect::<Vec<_>>();
-        let batch = BorrowedBatch::new(
-            batch_id,
-            [&self.identity[0], &self.identity[1]],
-            created,
-            &records,
-        )
-        .map_err(|_| QueueError::Record)?;
-        match batch.length() {
-            Ok(length) => Ok(length <= limit),
-            Err(crate::batch::BatchError::Size) => Ok(false),
+        match self.prefix_wire(batch_id, created, count, false) {
+            Ok((length, _)) => Ok(length <= limit),
+            Err(QueueError::Limits) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    fn prefix_wire(
+        &self,
+        batch_id: &str,
+        created: &Timestamp,
+        count: usize,
+        output: bool,
+    ) -> Result<PrefixWire, QueueError> {
+        let identity = [&*self.identity[0], &*self.identity[1]];
+        let map_length = |result: Result<usize, crate::batch::BatchError>| match result {
+            Ok(length) => Ok(length),
+            Err(crate::batch::BatchError::Size) => Err(QueueError::Limits),
             Err(_) => Err(QueueError::Record),
+        };
+        if self.v2 {
+            let records = self
+                .entries
+                .iter()
+                .take(count)
+                .map(|entry| {
+                    Ok(BorrowedV2Record {
+                        record: &entry.record.record,
+                        origin_witness: entry.witness.as_ref().ok_or(QueueError::Record)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, QueueError>>()?;
+            let batch = BorrowedBatchV2::new(batch_id, identity, created, &records)
+                .map_err(|_| QueueError::Record)?;
+            let length = map_length(batch.length())?;
+            let result = if output {
+                Some((
+                    batch.digest().map_err(|_| QueueError::Record)?,
+                    batch.encode().map_err(|_| QueueError::Record)?,
+                ))
+            } else {
+                None
+            };
+            Ok((length, result))
+        } else {
+            let records = self
+                .entries
+                .iter()
+                .take(count)
+                .map(|entry| &entry.record.record)
+                .collect::<Vec<_>>();
+            let batch = BorrowedBatch::new(batch_id, identity, created, &records)
+                .map_err(|_| QueueError::Record)?;
+            let length = map_length(batch.length())?;
+            let result = if output {
+                Some((
+                    batch.digest().map_err(|_| QueueError::Record)?,
+                    batch.encode().map_err(|_| QueueError::Record)?,
+                ))
+            } else {
+                None
+            };
+            Ok((length, result))
         }
     }
     pub(super) fn delivery_at(
