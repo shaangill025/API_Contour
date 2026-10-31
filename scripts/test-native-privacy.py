@@ -420,10 +420,35 @@ class Driver:
         print('native volatile queue, process memory, dumps and other sinks: uninspected',flush=True)
 
 
+def normal_snapshot():
+    normal = pilot.Driver()
+    count = normal.base.psql("SELECT count(*) FROM contour.ingestion_batches WHERE tenant_id='"+pilot.TENANT+"' AND collector_id='00000000-0000-4000-8000-000000000301';")
+    return normal.proof(), count
+
+
+def qualify(factory=Driver, snapshot=normal_snapshot):
+    before = snapshot()
+    positive = factory(shutdown_negative=False)
+    pilot.with_restoration(positive.run, positive.cleanup)
+    negative = factory(shutdown_negative=True)
+    try:
+        pilot.with_restoration(negative.run, negative.cleanup)
+    except MarkerFound:
+        pass
+    else:
+        raise pilot.Failure('shutdown marker control was not detected')
+    if snapshot() != before:
+        raise pilot.Failure('normal pilot changed during privacy qualification')
+    print('native privacy positive, shutdown marker control and unchanged normal pilot: passed', flush=True)
+
+
 def main():
     if sys.argv[1:] == ['--self-test']:
         result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(OfflineTests))
         return 0 if result.wasSuccessful() else 1
+    if sys.argv[1:] == ['--qualify']:
+        qualify()
+        return 0
     if sys.argv[1:] not in ([], ['--shutdown-negative']): raise pilot.Failure('unsupported argument')
     driver=Driver(shutdown_negative=sys.argv[1:] == ['--shutdown-negative'])
     pilot.with_restoration(driver.run,driver.cleanup)
@@ -431,6 +456,30 @@ def main():
 
 
 class OfflineTests(unittest.TestCase):
+    def test_qualification_requires_positive_exact_negative_and_unchanged_normal(self):
+        def factory(error=None, cleanup_error=None):
+            def make(*, shutdown_negative):
+                case=mock.Mock()
+                if shutdown_negative:
+                    case.run.side_effect=error
+                    case.cleanup.side_effect=cleanup_error
+                return case
+            return make
+        stable=lambda: ('normal-proof', 'normal-count')
+        with mock.patch('builtins.print'):
+            qualify(factory(MarkerFound()),stable)
+        for error in (None,pilot.Failure('setup failed')):
+            with self.assertRaises(pilot.Failure): qualify(factory(error),stable)
+        with self.assertRaises(BaseExceptionGroup):
+            qualify(factory(MarkerFound(),RuntimeError('cleanup failed')),stable)
+        values=iter([('before',),('changed',)])
+        with self.assertRaises(pilot.Failure):
+            qualify(factory(MarkerFound()),lambda: next(values))
+        positive=mock.Mock()
+        positive.run.side_effect=MarkerFound()
+        with self.assertRaises(MarkerFound):
+            qualify(lambda **kwargs: positive,stable)
+
     def test_private_overlay_pins_unrotated_logs_for_every_service(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
