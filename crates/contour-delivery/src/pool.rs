@@ -430,7 +430,7 @@ impl CollectorPool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::capture_tests::{make_owner, scope};
+    use super::super::capture_tests::{make_owner, make_owner_at, scope};
     use super::*;
 
     #[test]
@@ -470,8 +470,9 @@ mod tests {
     }
     #[test]
     fn common_policy_cannot_resume_with_different_source_authorizations() {
-        let a = make_owner();
-        let b = make_owner();
+        let now = time::OffsetDateTime::now_utc();
+        let a = make_owner_at(now);
+        let b = make_owner_at(now);
         let pool = CollectorPool::new(vec![a, b]).unwrap();
         let mut guards = pool
             .slots
@@ -486,6 +487,31 @@ mod tests {
         guards[1].live.as_mut().unwrap().sources = vec![
             contour_core::SourceAssignment::new(id, [id; 6], "runtime", &["http_text_v1"]).unwrap(),
         ];
+        assert!(CollectorPool::validate_common(&guards).is_err());
+    }
+    #[test]
+    fn common_policy_rejects_same_revision_different_signed_content() {
+        let now = time::OffsetDateTime::now_utc();
+        let a = make_owner_at(now - time::Duration::seconds(1));
+        let b = make_owner_at(now);
+        let pool = CollectorPool::new(vec![a, b]).unwrap();
+        let mut guards = pool
+            .slots
+            .iter()
+            .map(|slot| slot.try_lock().unwrap())
+            .collect::<Vec<_>>();
+        for owner in &mut guards {
+            owner.configured_queue_bytes = 5000;
+            assert!(owner.is_live());
+        }
+        assert_eq!(
+            guards[0].policies.last().unwrap().policy.revision(),
+            guards[1].policies.last().unwrap().policy.revision()
+        );
+        assert_ne!(
+            guards[0].policies.last().unwrap().policy.expires_at(),
+            guards[1].policies.last().unwrap().policy.expires_at()
+        );
         assert!(CollectorPool::validate_common(&guards).is_err());
     }
     #[test]
