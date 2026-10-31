@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
     steps:
       - name: Require all prerequisite TLS jobs
         if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' }}
