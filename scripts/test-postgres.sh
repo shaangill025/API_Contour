@@ -788,3 +788,40 @@ SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_payloads VALUES ('a
 ROLLBACK;
 SQL
 echo 'PostgreSQL opt-in V2 inbox rollback and role fixtures passed'
+
+# Phase 1 origin-ingress capability, isolated from the basic V2 role.
+admin_sql < "$root/db/provision_origin_ingress.sql"
+admin_sql <<'SQL'
+CREATE TABLE fixture.origin_ingress_before AS SELECT fixture.origin_v1_fingerprint() AS fingerprint;
+SQL
+if awk '/-- transaction failure probe/ { print "SELECT 1 / 0;" } { print }' \
+    "$root/db/opt-in-migrations/0017_origin_proofs.sql" | admin_sql; then
+    echo 'Injected origin ingress migration failure unexpectedly succeeded' >&2; exit 1
+fi
+admin_sql <<'SQL'
+SELECT fixture.assert(to_regclass('contour.origin_ingress_context') IS NULL, 'origin ingress rollback removes context table');
+SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM contour.schema_migrations WHERE version=17), 'origin ingress rollback removes migration ledger entry');
+SELECT fixture.assert(NOT has_schema_privilege('contour_origin_ingress','contour','USAGE'), 'origin ingress rollback removes schema grant');
+SELECT fixture.assert(fixture.origin_v1_fingerprint()=(SELECT fingerprint FROM fixture.origin_ingress_before), 'origin ingress rollback preserves prior rows');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_provision_test -d contour_fixture < "$root/db/opt-in-migrations/0017_origin_proofs.sql"
+admin_sql <<'SQL'
+CREATE ROLE contour_origin_ingress_test LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT contour_origin_ingress TO contour_origin_ingress_test;
+GRANT USAGE ON SCHEMA fixture TO contour_origin_ingress_test;
+GRANT EXECUTE ON FUNCTION fixture.assert(boolean,text),fixture.expect_state(text,text) TO contour_origin_ingress_test;
+CREATE FUNCTION fixture.origin_collector_key(uuid,uuid) RETURNS bigint LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS $$
+ SELECT contour.collector_lock_key($1,$2)
+$$;
+REVOKE ALL ON FUNCTION fixture.origin_collector_key(uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fixture.origin_collector_key(uuid,uuid) TO contour_origin_ingress_test;
+SELECT fixture.assert(NOT pg_has_role('contour_origin_ingress','contour_v2_ingress','MEMBER')
+ AND NOT pg_has_role('contour_origin_ingress','contour_ingestion','MEMBER'), 'origin role is independent');
+SQL
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_origin_ingress_test -d contour_fixture < "$root/db/tests/origin_proofs.sql"
+admin_sql <<'SQL'
+SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM contour.origin_ingress_context), 'committed and aborted contexts leave no rows');
+SQL
+echo 'PostgreSQL opt-in origin ingress capability fixture passed'
