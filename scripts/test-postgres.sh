@@ -789,6 +789,18 @@ ROLLBACK;
 SQL
 echo 'PostgreSQL opt-in V2 inbox rollback and role fixtures passed'
 
+# Dedicated pre-17 origin facts for the epoch fixture. Each enrollment runs
+# in its own transaction and remains independent of the legacy concurrency cases.
+admin_sql <<'SQL'
+INSERT INTO contour.workload_instances VALUES
+ ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001703'),
+ ('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001704');
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',false);
+SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001701','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001703','trusted_platform_v1',decode(repeat('a7',32),'hex'));
+SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',false);
+SELECT contour.enroll_origin('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001702','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001704','trusted_platform_v1',decode(repeat('b7',32),'hex'));
+SQL
+
 # Phase 1 origin-ingress capability, isolated from the basic V2 role.
 admin_sql < "$root/db/provision_origin_ingress.sql"
 admin_sql <<'SQL'
@@ -825,3 +837,118 @@ admin_sql <<'SQL'
 SELECT fixture.assert(NOT EXISTS(SELECT 1 FROM contour.origin_ingress_context), 'committed and aborted contexts leave no rows');
 SQL
 echo 'PostgreSQL opt-in origin ingress capability fixture passed'
+
+# Registry epoch and tenant clock: deterministic clock overrides are rolled back.
+admin_sql <<'SQL'
+SELECT fixture.assert((SELECT bool_and(fact_epoch=0) FROM contour.origin_lifecycles)
+ AND (SELECT bool_and(fact_epoch=0) FROM contour.origin_credentials)
+ AND (SELECT bool_and(fact_epoch=0) FROM contour.origin_observer_grants)
+ AND (SELECT bool_and(fact_epoch=0) FROM contour.origin_terminal_events), 'legacy facts have epoch zero');
+SELECT fixture.assert((SELECT s.epoch=0 AND s.clock_floor=(SELECT max(h.t) FROM (
+ SELECT enrolled_at AS t FROM contour.origin_lifecycles WHERE tenant_id=s.tenant_id
+ UNION ALL SELECT enrolled_at FROM contour.origin_credentials WHERE tenant_id=s.tenant_id
+ UNION ALL SELECT granted_at FROM contour.origin_observer_grants WHERE tenant_id=s.tenant_id
+ UNION ALL SELECT event_at FROM contour.origin_terminal_events WHERE tenant_id=s.tenant_id
+ ) h) FROM contour.origin_tenant_state s WHERE s.tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'lazy seed includes all legacy fact clocks');
+SELECT fixture.assert(NOT has_table_privilege('contour_origin_ingress','contour.origin_tenant_state','SELECT')
+ AND NOT has_table_privilege('contour_admin','contour.origin_tenant_state','INSERT')
+ AND NOT has_table_privilege('contour_admin','contour.origin_tenant_state','UPDATE'), 'tenant state is private');
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',false);
+SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001711','00000000-0000-0000-0000-000000001701',decode(repeat('99',32),'hex'));
+SELECT contour.grant_origin_observer('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001721','00000000-0000-0000-0000-000000001701','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001');
+SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','grant_revoked','00000000-0000-0000-0000-000000001721');
+SELECT fixture.assert((SELECT fact_epoch=1 FROM contour.origin_credentials WHERE credential_id='00000000-0000-0000-0000-000000001711')
+ AND (SELECT fact_epoch=2 FROM contour.origin_observer_grants WHERE grant_id='00000000-0000-0000-0000-000000001721')
+ AND (SELECT fact_epoch=3 FROM contour.origin_terminal_events WHERE grant_id='00000000-0000-0000-0000-000000001721')
+ AND (SELECT epoch=3 FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'post-activation facts advance epoch');
+BEGIN;
+SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001712','00000000-0000-0000-0000-000000001701',decode(repeat('98',32),'hex'));
+SELECT fixture.assert((SELECT epoch=4 FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'epoch advances inside transaction');
+ROLLBACK;
+SELECT fixture.assert((SELECT epoch=3 FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000')
+ AND NOT EXISTS(SELECT 1 FROM contour.origin_credentials WHERE credential_id='00000000-0000-0000-0000-000000001712'), 'rollback restores epoch and fact');
+BEGIN;
+SET LOCAL ROLE contour_origin_ingress_test;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+RESET ROLE;
+SELECT fixture.assert((SELECT c.fact_epoch=s.epoch AND c.started_at>=s.clock_floor FROM contour.origin_ingress_context c JOIN contour.origin_tenant_state s USING(tenant_id)), 'context snapshots epoch and checked clock');
+ROLLBACK;
+-- Different tenant starts its own epoch at zero even with prior tenant history.
+SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',false);
+SELECT contour.enroll_origin_credential('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001712','00000000-0000-0000-0000-000000001702',decode(repeat('97',32),'hex'));
+SELECT fixture.assert((SELECT epoch=1 FROM contour.origin_tenant_state WHERE tenant_id='bbbbbbbb-0000-0000-0000-000000000000'), 'tenant epochs independent');
+SET ROLE contour_origin_ingress_test;
+SELECT fixture.expect_state($q$SELECT * FROM contour.origin_tenant_state$q$,'42501');
+RESET ROLE;
+-- Add a real unused instance for initial enrollment's global-floor check.
+INSERT INTO contour.workload_instances VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001799');
+BEGIN;
+SET LOCAL ROLE contour_owner;
+CREATE OR REPLACE FUNCTION contour.origin_server_time() RETURNS timestamptz LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS $$ SELECT '2000-01-01 UTC'::timestamptz $$;
+RESET ROLE;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.expect_state($q$SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001798','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001799','trusted_platform_v1',decode(repeat('aa',32),'hex'))$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001712','00000000-0000-0000-0000-000000001701',decode(repeat('98',32),'hex'))$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001')$q$,'23514');
+ROLLBACK;
+SQL
+# Do not force an index plan: retain the actual planner choice as evidence.
+admin_sql <<'SQL'
+SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',false);
+SELECT contour.end_origin('bbbbbbbb-0000-0000-0000-000000000000','credential_revoked','00000000-0000-0000-0000-000000001712');
+SELECT fixture.assert((SELECT count(DISTINCT tenant_id)>=2 FROM contour.origin_terminal_events), 'terminal history has multiple tenants');
+-- Planner-only synthetic history: disable FK and mutation triggers only inside
+-- this rolled-back transaction. These rows are not admission or epoch evidence.
+BEGIN;
+SET LOCAL session_replication_role=replica;
+INSERT INTO contour.origin_terminal_events (tenant_id,event_kind,grant_id,event_at)
+SELECT CASE WHEN n % 2=0 THEN 'aaaaaaaa-0000-0000-0000-000000000000'::uuid
+            ELSE 'bbbbbbbb-0000-0000-0000-000000000000'::uuid END,
+       'grant_revoked', md5('origin-planner-' || n::text)::uuid,
+       '2020-01-01 UTC'::timestamptz + n * interval '1 second'
+FROM generate_series(1,10000) AS n;
+SET LOCAL session_replication_role=origin;
+ANALYZE contour.origin_terminal_events;
+EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) SELECT max(event_at) FROM contour.origin_terminal_events
+ WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+ROLLBACK;
+ANALYZE contour.origin_terminal_events;
+SELECT fixture.assert((SELECT count(DISTINCT tenant_id)>=2 FROM contour.origin_lifecycles), 'epoch fixture has populated multiple tenants');
+-- Owner-only fixture insertion deliberately supplies a false epoch under the
+-- real lifecycle and credential locks. The trigger must overwrite it.
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SET LOCAL ROLE contour_owner;
+SELECT contour.begin_origin_operation('aaaaaaaa-0000-0000-0000-000000000000');
+SELECT contour.lock_origin_credential(decode(repeat('96',32),'hex'));
+INSERT INTO contour.origin_credentials (tenant_id,credential_id,lifecycle_id,leaf_sha256,enrolled_at,fact_epoch)
+ VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001713','00000000-0000-0000-0000-000000001701',decode(repeat('96',32),'hex'),contour.origin_server_time(),777777);
+RESET ROLE;
+SELECT fixture.assert((SELECT c.fact_epoch=s.epoch AND c.fact_epoch<>777777 FROM contour.origin_credentials c JOIN contour.origin_tenant_state s USING(tenant_id) WHERE c.credential_id='00000000-0000-0000-0000-000000001713'), 'fact epoch overrides caller value');
+ROLLBACK;
+-- Exhaustion is a closed error and must not wrap the epoch.
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SET LOCAL ROLE contour_owner;
+UPDATE contour.origin_tenant_state SET epoch=9223372036854775807 WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+RESET ROLE;
+SELECT fixture.expect_state($q$SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001713','00000000-0000-0000-0000-000000001701',decode(repeat('96',32),'hex'))$q$,'54000');
+SELECT fixture.assert((SELECT epoch=9223372036854775807 FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'exhaustion does not wrap epoch');
+ROLLBACK;
+-- Equal clock values are permitted and still advance epoch, with the trusted
+-- clock override and inserted fact both rolled back at transaction end.
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+CREATE TEMP TABLE origin_equal_before AS SELECT epoch,clock_floor FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+SET LOCAL ROLE contour_owner;
+DO $$ DECLARE floor_time timestamptz; BEGIN
+ SELECT clock_floor INTO floor_time FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+ EXECUTE pg_catalog.format('CREATE OR REPLACE FUNCTION contour.origin_server_time() RETURNS timestamptz LANGUAGE sql VOLATILE SECURITY INVOKER SET search_path=pg_catalog AS %L', 'SELECT ' || pg_catalog.quote_literal(floor_time::text) || '::timestamptz');
+END $$;
+RESET ROLE;
+SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001713','00000000-0000-0000-0000-000000001701',decode(repeat('96',32),'hex'));
+SELECT fixture.assert((SELECT s.epoch=b.epoch+1 AND s.clock_floor=b.clock_floor FROM contour.origin_tenant_state s CROSS JOIN origin_equal_before b WHERE s.tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'equal clock advances epoch');
+ROLLBACK;
+SQL
+echo 'PostgreSQL opt-in origin epoch and clock fixture passed'
