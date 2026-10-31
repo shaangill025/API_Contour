@@ -8,6 +8,10 @@ on an owned local stack. The existing `apicontour-local_default` network must be
 available. Build the local application image using the pinned project Dockerfile;
 preload the digest-pinned Envoy and Node-RED images. No host port is published by
 the overlay. Use the pilot's `PILOT_TARGET=https://pilot-gateway:9443/pilot`.
+The native overlay starts the destination and pilot ingress before the gateway,
+then Envoy before the replicas. This establishes startup order; runtime readiness
+still requires the positive product and persisted-capture checks. On failure the
+qualification retains bounded private diagnostics before its owned cleanup.
 
 After the ordinary owned local stack and stock pilot have been initialized,
 create the closed pilot capture profile and its separate identities once:

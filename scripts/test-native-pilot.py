@@ -285,6 +285,18 @@ class Driver:
         private_write(overlay, json.dumps(override(service,target,config_file,mounts),separators=(',',':')).encode())
         return overlay
 
+    def diagnose_failure(self, work):
+        # Preserve the failing configuration's diagnostics before its service is
+        # recreated; main also collects the final project state before cleanup.
+        try:
+            work()
+        except Exception as original:
+            try:
+                self.diagnostics()
+            except BaseException as diagnostic:
+                raise BaseExceptionGroup('operation and diagnostics failed', [original, diagnostic])
+            raise
+
     def event_snapshot(self, event):
         container = self.compose('event-container', ['ps','-q','native-gateway'], 20).strip()
         if not container or b'\n' in container:
@@ -320,7 +332,7 @@ class Driver:
             self.compose(name+'-restore', ['up','-d','--pull','never','--no-deps','--force-recreate',service])
         # Recreate from the untampered project definition even after a failed
         # negative check; no normal preflight is asserted during the override.
-        with_restoration(work, restore)
+        with_restoration(lambda: self.diagnose_failure(work), restore)
         self.run(name+'-preflight', [sys.executable,'deploy/pilot/native_prepare.py','--check'], 30)
         self.product(name+'-recovered')
         self.wait_growth(initial, 4, name+'-recovered')
@@ -387,10 +399,24 @@ class Driver:
             if self.proof() != baseline: raise Failure('outage changed persisted captures')
         def restart():
             self.compose('ingress-restart',['up','-d','--pull','never','--no-deps','--force-recreate','pilot-capture-ingress'])
-        with_restoration(outage, restart)
+        with_restoration(lambda: self.diagnose_failure(outage), restart)
         self.product('outage-recovered')
         self.wait_growth(baseline, 4, 'outage-recovered')
         self.run('native-final-preflight',[sys.executable,'deploy/pilot/native_prepare.py','--check'],30)
+
+    def diagnostics(self):
+        """Collect bounded private diagnostics before destroying owned services."""
+        failures=[]
+        checks=[('failure-service-status',['ps','--all','--format','json'])]
+        checks.extend(('failure-'+service+'-logs', ['logs','--no-color','--no-log-prefix','--tail','500',service])
+                      for service in ('native-gateway','native-envoy','pilot-capture-ingress'))
+        for name, args in checks:
+            try:
+                self.compose(name, args, 20)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup('private diagnostics failed', failures)
 
     def cleanup(self):
         def containers():
@@ -410,6 +436,11 @@ def main():
         driver.run_all()
     except BaseException as exc:
         failed=exc
+        if isinstance(exc, Exception) and driver.started:
+            try:
+                driver.diagnostics()
+            except BaseException as diagnostic:
+                failed=BaseExceptionGroup('qualification and diagnostics failed', [failed, diagnostic])
     try:
         driver.cleanup()
     except BaseException as exc:
@@ -454,9 +485,60 @@ class DriverUnitTests(unittest.TestCase):
     def test_failure_always_invokes_cleanup(self):
         fake=mock.Mock()
         fake.run_all.side_effect=Failure('synthetic')
+        fake.started=True
         with mock.patch(__name__+'.Driver',return_value=fake), mock.patch('builtins.print'):
             with self.assertRaises(SystemExit): main()
         fake.cleanup.assert_called_once_with()
+        fake.diagnostics.assert_called_once_with()
+        self.assertLess(fake.method_calls.index(mock.call.diagnostics()),fake.method_calls.index(mock.call.cleanup()))
+
+    def test_diagnostic_and_cleanup_failures_preserve_original(self):
+        fake=mock.Mock(); fake.started=True
+        fake.run_all.side_effect=Failure('original')
+        fake.diagnostics.side_effect=Failure('diagnostic')
+        fake.cleanup.side_effect=Failure('cleanup')
+        with mock.patch(__name__+'.Driver',return_value=fake), mock.patch('builtins.print'):
+            with self.assertRaises(SystemExit) as stopped: main()
+        error=stopped.exception.__cause__
+        self.assertIsInstance(error, ExceptionGroup)
+        self.assertEqual(str(error.exceptions[0].exceptions[0]), 'original')
+        self.assertEqual(str(error.exceptions[0].exceptions[1]), 'diagnostic')
+        self.assertEqual(str(error.exceptions[1]), 'cleanup')
+
+    def test_diagnostics_attempt_all_bounded_service_checks_after_one_failure(self):
+        driver=Driver.__new__(Driver); checks=[]
+        def compose(name,args,seconds=90,extra_config=None):
+            checks.append((name,args,seconds))
+            if name=='failure-service-status': raise Failure('status')
+        driver.compose=compose
+        with self.assertRaises(ExceptionGroup): driver.diagnostics()
+        self.assertEqual([name for name,_,_ in checks], ['failure-service-status','failure-native-gateway-logs','failure-native-envoy-logs','failure-pilot-capture-ingress-logs'])
+        self.assertTrue(all(seconds==20 for _,_,seconds in checks))
+        self.assertTrue(all('--tail' in args and '500' in args for _,args,_ in checks[1:]))
+
+    def test_override_failure_diagnosed_before_restore_and_original_retained(self):
+        driver=Driver.__new__(Driver); events=[]
+        driver.stable=lambda: (4,0,2,2)
+        driver.product=lambda name: None
+        driver.wait_growth=lambda before,minimum,label: None
+        driver.write_override=lambda *args: Path('/synthetic/override')
+        driver.event_snapshot=lambda event: (b'gateway',0)
+        driver.proof=lambda: (4,0,2,2)
+        def compose(name,args,seconds=90,extra_config=None):
+            events.append(name)
+            return b'native-envoy\n' if name.endswith('-running') else b''
+        driver.compose=compose
+        driver.product_closed=lambda name: (_ for _ in ()).throw(Failure('closed failure'))
+        driver.diagnostics=lambda: events.append('diagnostics')
+        with mock.patch(__name__+'.time.sleep'):
+            with self.assertRaisesRegex(Failure,'closed failure'):
+                driver.negative('missing-forwarder','native-envoy','/run/config',{})
+        self.assertLess(events.index('diagnostics'),events.index('missing-forwarder-restore'))
+        driver.diagnostics=lambda: (_ for _ in ()).throw(Failure('diagnostic failure'))
+        with mock.patch(__name__+'.time.sleep'):
+            with self.assertRaises(ExceptionGroup) as failure:
+                driver.negative('missing-forwarder','native-envoy','/run/config',{})
+        self.assertEqual([str(item) for item in failure.exception.exceptions],['closed failure','diagnostic failure'])
 
     def test_restoration_runs_and_preserves_both_failures(self):
         def fail(): raise Failure('test')

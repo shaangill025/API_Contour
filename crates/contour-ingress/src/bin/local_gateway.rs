@@ -127,8 +127,10 @@ fn new_id() -> Option<String> {
     ))
 }
 fn main() {
-    if run().is_err() {
-        eprintln!("native gateway failed");
+    if let Err(code) = run() {
+        // Every error is a closed static code; configuration values and error
+        // objects never enter startup diagnostics.
+        eprintln!("native gateway failed: {code}");
         std::process::exit(1);
     }
 }
