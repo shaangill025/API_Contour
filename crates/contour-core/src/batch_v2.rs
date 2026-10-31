@@ -154,6 +154,11 @@ impl BatchV2 {
     pub fn to_wire_json(&self) -> Result<Vec<u8>, BatchError> {
         batch::encode(&self.envelope)
     }
+    /// Encode the checked envelope as the bytes used by its request digest.
+    /// This encoding does not authenticate or admit the batch.
+    pub fn to_canonical_wire_json(&self) -> Result<Vec<u8>, BatchError> {
+        batch::canonical_encode(&self.envelope)
+    }
     /// SHA-256 of the entire canonical V2 envelope, using its distinct domain.
     pub fn request_digest_bytes(&self) -> Result<[u8; 32], BatchError> {
         batch::canonical_digest(&self.envelope, b"apicontour/batch/2\n")

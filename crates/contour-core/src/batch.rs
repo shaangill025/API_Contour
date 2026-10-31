@@ -688,15 +688,18 @@ pub(crate) fn encode(value: &impl Serialize) -> Result<Vec<u8>, BatchError> {
 fn request_digest(value: &impl Serialize) -> Result<[u8; 32], BatchError> {
     canonical_digest(value, b"apicontour/batch/1\n")
 }
+pub(crate) fn canonical_encode(value: &impl Serialize) -> Result<Vec<u8>, BatchError> {
+    let mut value = serde_json::to_value(value).map_err(|_| BatchError::Invalid)?;
+    value.sort_all_objects();
+    encode(&value)
+}
 // This conversion is performed only after strict typed deserialization has
 // rejected duplicate and unknown fields; it is never used to parse input.
 pub(crate) fn canonical_digest(
     value: &impl Serialize,
     domain: &[u8],
 ) -> Result<[u8; 32], BatchError> {
-    let mut value = serde_json::to_value(value).map_err(|_| BatchError::Invalid)?;
-    value.sort_all_objects();
-    let bytes = encode(&value)?;
+    let bytes = canonical_encode(value)?;
     let mut digest = Sha256::new();
     digest.update(domain);
     digest.update(bytes);

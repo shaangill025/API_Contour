@@ -245,7 +245,9 @@ fn record_and_byte_bounds_and_unique_record_identity_are_enforced() {
         records.push(row);
     }
     body["records"] = json!(records);
-    assert_eq!(decode(&body).unwrap().record_count(), 500);
+    let largest = decode(&body).unwrap();
+    assert_eq!(largest.record_count(), 500);
+    assert!(largest.to_canonical_wire_json().unwrap().len() <= 1_048_576);
     body["records"].as_array_mut().unwrap().push(item.clone());
     assert!(decode(&body).is_err());
     body = base.clone();
@@ -288,4 +290,52 @@ fn v1_record_wire_is_byte_identical_inside_v2_and_v1_rejects_witness() {
     );
     v1["records"][0]["origin_witness"] = json!({"kind":"unattributed"});
     assert!(Batch::from_wire_json(&serde_json::to_vec(&v1).unwrap()).is_err());
+}
+
+#[test]
+fn canonical_wire_has_independent_golden_bytes_and_digest() {
+    let batch = decode(&valid()).unwrap();
+    let expected = br#"{"batch_id":"00000000-0000-4000-8000-000000000001","collector_id":"00000000-0000-4000-8000-000000000001","created_at":"2026-10-06T12:00:05Z","records":[{"origin_witness":{"kind":"downstream_mtls_leaf_sha256_v1","leaf_sha256":"abababababababababababababababababababababababababababababababab"},"record":{"completeness":"complete","count":12,"deployment_id":"00000000-0000-4000-8000-000000000001","direction":"response","environment_id":"00000000-0000-4000-8000-000000000001","expires_at":"2026-10-07T12:00:05Z","first_seen":"2026-10-06T12:00:00Z","last_seen":"2026-10-06T12:00:05Z","operation":"GET","parser_profile":"http_json_v1","policy_revision":1,"project_id":"00000000-0000-4000-8000-000000000001","protocol":"http","query_parameter_names":[],"queued_at":"2026-10-06T12:00:05Z","reasons":[],"record_id":"00000000-0000-4000-8000-000000000001","request_header_names":[],"response_header_names":[],"route_template":"/orders/{id}","route_uncertain":false,"sample_denominator":1,"sample_numerator":1,"service_id":"00000000-0000-4000-8000-000000000001","source_id":"00000000-0000-4000-8000-000000000002","status_code":200,"structure":{"additional":null,"fields":{"id":{"kind":"string"},"quantity":{"kind":"integer"}},"kind":"object"},"visibility":"structure"}}],"tenant_id":"00000000-0000-4000-8000-000000000001","wire_version":2}"#;
+    let canonical = batch.to_canonical_wire_json().unwrap();
+    assert_eq!(canonical, expected);
+    assert_ne!(canonical, batch.to_wire_json().unwrap());
+    let digest: [u8; 32] =
+        Sha256::digest([b"apicontour/batch/2\n".as_slice(), expected].concat()).into();
+    assert_eq!(digest, batch.request_digest_bytes().unwrap());
+    assert_eq!(
+        batch.request_digest().unwrap(),
+        "d3a8f1b43d3f4a1e6c7b9256112717ed94bbd0e130c9ad993c3a338b56caca1b"
+    );
+}
+
+#[test]
+fn canonical_wire_preserves_unicode_and_time_text_and_normalizes_numbers() {
+    let mut value = valid();
+    value["records"][0]["record"]["structure"]["fields"]["é"] = json!({"kind":"string"});
+    let text = serde_json::to_string(&value).unwrap();
+    let decimals = text
+        .replace("\"wire_version\":2", "\"wire_version\":2.0")
+        .replace("\"count\":12", "\"count\":1200e-2")
+        .replace("\"status_code\":200", "\"status_code\":2e2")
+        .replace("é", "\\u00e9");
+    let canonical = BatchV2::from_wire_json(text.as_bytes())
+        .unwrap()
+        .to_canonical_wire_json()
+        .unwrap();
+    assert_eq!(
+        canonical,
+        BatchV2::from_wire_json(decimals.as_bytes())
+            .unwrap()
+            .to_canonical_wire_json()
+            .unwrap()
+    );
+    assert!(std::str::from_utf8(&canonical).unwrap().contains("é"));
+    value["created_at"] = json!("2026-10-06T12:00:05+00:00");
+    let altered = decode(&value).unwrap().to_canonical_wire_json().unwrap();
+    assert_ne!(canonical, altered);
+    assert!(
+        std::str::from_utf8(&altered)
+            .unwrap()
+            .contains("2026-10-06T12:00:05+00:00")
+    );
 }
