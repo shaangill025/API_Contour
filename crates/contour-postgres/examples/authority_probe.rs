@@ -1,8 +1,31 @@
 //! Dedicated synthetic live-fixture probe; no reusable authorization token.
-use contour_core::{Batch, PolicyKeys};
-use contour_postgres::{AuthorityError, DatabaseSettings, TransportError, TrustedCa};
+use contour_core::{Batch, BatchV2, PolicyKeys};
+use contour_postgres::{
+    AuthorityError, ConnectedDatabase, DatabaseSettings, TransportError, TrustedCa,
+};
 use std::{env, fs, future::Future, task::Poll, time::Duration};
 
+enum ProbeBatch {
+    V1(Batch),
+    V2(BatchV2),
+}
+impl ProbeBatch {
+    async fn validate(
+        &self,
+        connection: &mut ConnectedDatabase,
+        expected: [&str; 2],
+        keys: &PolicyKeys,
+    ) -> Result<(), AuthorityError> {
+        match self {
+            Self::V1(batch) => connection.validate_authority(batch, expected, keys).await,
+            Self::V2(batch) => {
+                connection
+                    .validate_v2_record_authority(batch, expected, keys)
+                    .await
+            }
+        }
+    }
+}
 fn main() {
     if let Err(message) = probe() {
         eprintln!("{message}");
@@ -22,8 +45,16 @@ fn probe() -> Result<(), &'static str> {
         .try_into()
         .map_err(|_| "signer invalid")?;
     let keys = PolicyKeys::new(&[("fixture", public)]).map_err(|_| "signer invalid")?;
-    let batch = Batch::from_wire_json(&fs::read(&args[3]).map_err(|_| "batch missing")?)
-        .map_err(|_| "batch invalid")?;
+    let bytes = fs::read(&args[3]).map_err(|_| "batch missing")?;
+    let (v2, wanted) = match args[4].strip_prefix("V2:") {
+        Some(wanted) => (true, wanted),
+        None => (false, args[4].as_str()),
+    };
+    let batch = if v2 {
+        ProbeBatch::V2(BatchV2::from_wire_json(&bytes).map_err(|_| "batch invalid")?)
+    } else {
+        ProbeBatch::V1(Batch::from_wire_json(&bytes).map_err(|_| "batch invalid")?)
+    };
     let expected = [args[5].as_str(), args[6].as_str()];
     let deadline = Duration::from_millis(args[7].parse().map_err(|_| "deadline invalid")?);
     let password = env::var("CONTOUR_FIXTURE_PASSWORD").map_err(|_| "credential missing")?;
@@ -42,7 +73,7 @@ fn probe() -> Result<(), &'static str> {
         .map_err(|_| "runtime failed")?
         .block_on(async {
             let mut connection = settings.connect(&trust).await.map_err(|_| "TLS failed")?;
-            if args[4] == "HarnessMismatch" {
+            if wanted == "HarnessMismatch" {
                 use std::io::{self, Write};
                 println!("UNEXPECTED");
                 io::stdout().flush().map_err(|_| "output failed")?;
@@ -52,8 +83,8 @@ fn probe() -> Result<(), &'static str> {
                     .map_err(|_| "ack failed")?;
                 return Err("unexpected harness acknowledgement");
             }
-            let result = if args[4] == "Cancel" {
-                let mut future = Box::pin(connection.validate_authority(&batch, expected, &keys));
+            let result = if wanted == "Cancel" {
+                let mut future = Box::pin(batch.validate(&mut connection, expected, &keys));
                 let until = tokio::time::Instant::now() + Duration::from_millis(600);
                 while tokio::time::Instant::now() < until {
                     let completed =
@@ -65,18 +96,18 @@ fn probe() -> Result<(), &'static str> {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 drop(future);
-                connection.validate_authority(&batch, expected, &keys).await
+                batch.validate(&mut connection, expected, &keys).await
             } else {
-                connection.validate_authority(&batch, expected, &keys).await
+                batch.validate(&mut connection, expected, &keys).await
             };
             let actual = match result {
                 Ok(()) => "Ok".to_owned(),
                 Err(error) => error.to_string(),
             };
-            let wanted = if args[4] == "Cancel" {
+            let wanted = if wanted == "Cancel" {
                 "Invalidated"
             } else {
-                &args[4]
+                wanted
             };
             if actual != wanted {
                 eprintln!("safe result: {actual}");

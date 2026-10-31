@@ -106,10 +106,10 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         result = subprocess.run(['docker', 'logs', container], capture_output=True, text=True, check=True, timeout=5)
         return result.stdout + result.stderr
 
-    def check(body, wanted='Ok', expected=None, deadline=5000):
+    def check(body, wanted='Ok', expected=None, deadline=5000, v2=False):
         (directory / 'batch.json').write_text(json.dumps(body))
         identity = expected or (body['tenant_id'], body['collector_id'])
-        process = subprocess.Popen([probe, port, str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(directory / 'batch.json'), wanted, *identity, str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        process = subprocess.Popen([probe, port, str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(directory / 'batch.json'), ('V2:' if v2 else '') + wanted, *identity, str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda : output.put(process.stdout.readline()), daemon=True)
         reader.start()
@@ -135,6 +135,31 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
                 pipe.close()
     (body, collector, source) = setup('valid')
     check(body)
+    # Both data-only witness variants must receive the same legacy authority result.
+    def v2_body(original, witness):
+        value = copy.deepcopy(original)
+        value['wire_version'] = 2
+        value['records'] = [dict(record=record, origin_witness=witness) for record in value['records']]
+        return value
+    witnesses = [dict(kind='unattributed'), dict(kind='downstream_mtls_leaf_sha256_v1', leaf_sha256='ab' * 32)]
+    for witness in witnesses:
+        candidate = v2_body(body, witness)
+        check(candidate, v2=True)
+        check(candidate, 'Identity', expected=(OTHER, collector), v2=True)
+        bad_source = copy.deepcopy(candidate)
+        bad_source['records'][0]['record']['source_id'] = ITEM
+        check(bad_source, 'Source', v2=True)
+        bad_route = copy.deepcopy(candidate)
+        bad_route['records'][0]['record']['route_template'] = '/not-approved'
+        check(bad_route, 'Admission', v2=True)
+        expired = copy.deepcopy(candidate)
+        expired['records'][0]['record']['expires_at'] = expired['records'][0]['record']['first_seen']
+        check(expired, 'Admission', v2=True)
+    (policy_denied, _, _) = setup('v2_policy_denied', lambda value: value.update(approved_names=['GET', 'id']))
+    (policy_expired, _, _) = setup('v2_policy_expired', lambda value: value.update(expires_at=iso(datetime.datetime.fromisoformat(value['issued_at'].replace('Z', '+00:00')) + datetime.timedelta(seconds=29))))
+    for witness in witnesses:
+        check(v2_body(policy_denied, witness), 'Admission', v2=True)
+        check(v2_body(policy_expired, witness), 'Policy', v2=True)
     missing = copy.deepcopy(body)
     missing['collector_id'] = '00000000-0000-0000-0000-000000999999'
     check(missing, 'Missing')
