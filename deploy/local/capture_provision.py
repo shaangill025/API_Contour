@@ -1,9 +1,12 @@
 """Provision the opt-in local capture profile, retaining all existing state."""
 import base64
+import datetime
 import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / '.local-mvp'
@@ -16,18 +19,53 @@ SOURCE = '00000000-0000-4000-8000-000000000202'
 DEPLOYMENT = '00000000-0000-4000-8000-000000000203'
 INSTANCE = '00000000-0000-4000-8000-000000000204'
 NONCE = '00000000-0000-4000-8000-000000000205'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import capture_profiles
 
 
-def main():
+def runtime_configs(collector):
+    common = dict(database_host='postgres',database_port=5432,database_name='contour_local',ca_file='/run/capture/database-ca.crt',tenant=TENANT,collector=collector)
+    return {
+        'ingress.json': dict(common,database_user='contour_local_ingress',password_file='/run/capture/ingress.password',server_certificate_der='/run/capture/server.crt.der',server_key_der='/run/capture/server.key.der',client_ca_der='/run/capture/ca.der',collector_certificate_der='/run/capture/collector.crt.der',policy_key_file='/run/capture/policy.raw',listen='0.0.0.0:9445'),
+        'worker.json': dict(common,database_user='contour_local_worker',password_file='/run/capture/worker.password')}
+
+
+def verify_pilot_policy(profile, private, runtime, envelope):
+    # Import lazily to avoid the renewal module's existing provisioning import.
+    import capture_renew
+    scratch = tempfile.gettempdir()
+    key = capture_renew.read_file(private/'policy.key', 16384)
+    public = capture_renew.crypt('public', key, b'', profile=profile, scratch=scratch)
+    if len(public) != 44 or public[-32:] != capture_renew.read_file(runtime/'policy.raw', 32):
+        raise RuntimeError('pilot policy signer drift')
+    return capture_renew.checked_envelope(envelope, public, profile, scratch)
+
+
+def main(profile=None):
     os.umask(0o077)
-    runtime = CAPTURE / 'runtime'; private = CAPTURE / 'private'
+    profile = profile or capture_profiles.DEFAULT
+    if profile not in (capture_profiles.DEFAULT, capture_profiles.PILOT): raise ValueError('unknown capture profile')
+    capture = CAPTURE if profile.name == 'default' else profile.capture
+    COLLECTOR, SOURCE, DEPLOYMENT, INSTANCE, NONCE = profile.collector, profile.source, profile.deployment, profile.instance, profile.nonce
+    runtime = capture / 'runtime'; private = capture / 'private'
     for name in ['server.crt.der','server.key.der','collector.crt.der','ca.der','policy.raw','ingress.password','worker.password']:
         if not (runtime/name).is_file(): raise RuntimeError('capture credentials incomplete')
     if os.path.lexists(private/'renew.pending'): raise RuntimeError('policy renewal requires reconciliation')
-    envelope = (private/'policy.json').read_bytes()
+    if profile.name == 'pilot':
+        import capture_renew
+        envelope = capture_renew.read_file(private/'policy.json', 16384)
+    else:
+        envelope = (private/'policy.json').read_bytes()
     if not 1 <= len(envelope) <= 1048576: raise RuntimeError('policy invalid')
-    encoded = json.loads(envelope)['payload_base64url']
-    policy = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
+    if profile.name == 'pilot':
+        policy = verify_pilot_policy(profile, private, runtime, envelope)
+    else:
+        encoded = json.loads(envelope)['payload_base64url']
+        policy = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
+    if profile.name == 'pilot':
+        expires = datetime.datetime.fromisoformat(policy['expires_at'].replace('Z', '+00:00'))
+        if expires.tzinfo is None or datetime.datetime.now(datetime.timezone.utc) >= expires:
+            raise RuntimeError('pilot policy expired; run capture_renew.py --profile pilot')
     revision = policy['revision']
     if type(revision) is not int or not 1 <= revision <= 18446744073709551615: raise RuntimeError('policy revision invalid')
     roles = [('contour_local_ingress','contour_ingestion'),('contour_local_worker','contour_catalog_worker')]
@@ -41,7 +79,10 @@ def main():
     if safe_groups != str(len(groups)): raise RuntimeError('capture group attributes drift')
     for role, group in roles:
         password = base.private_file(runtime / ('ingress.password' if role.endswith('ingress') else 'worker.password'))
+        if profile.name == 'pilot' and password != base.private_file(STATE / 'capture' / 'runtime' / ('ingress.password' if role.endswith('ingress') else 'worker.password')):
+            raise RuntimeError('restricted role credential drift')
         if base.psql('SELECT count(*) FROM pg_roles WHERE rolname='+quote(role)) == '0':
+            if profile.name == 'pilot': raise RuntimeError('restricted role unavailable')
             base.psql('BEGIN; CREATE ROLE '+role+' LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD '+quote(password)+'; GRANT '+group+' TO '+role+'; GRANT CONNECT ON DATABASE contour_local TO '+role+'; COMMIT;')
         membership = base.psql("SELECT r.rolname FROM pg_roles r WHERE r.rolname <> "+quote(role)+" AND pg_has_role("+quote(role)+",r.oid,'MEMBER') ORDER BY r.rolname;").splitlines()
         safe = base.psql("SELECT (rolcanlogin AND rolinherit AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolconfig IS NULL)::text FROM pg_roles WHERE rolname="+quote(role))
@@ -77,14 +118,10 @@ def main():
         f"(SELECT count(*) FROM contour.workload_assignments WHERE tenant_id={t} AND collector_id={c} AND project_id={p} AND service_id={s} AND environment_id={e} AND deployment_id={d})=1"
         f")::text;")
     if exact != 'true': raise RuntimeError('capture enrollment drift')
-    common = dict(database_host='postgres',database_port=5432,database_name='contour_local',ca_file='/run/capture/database-ca.crt',tenant=TENANT,collector=COLLECTOR)
-    configs = {
-        'ingress.json': dict(common,database_user='contour_local_ingress',password_file='/run/capture/ingress.password',server_certificate_der='/run/capture/server.crt.der',server_key_der='/run/capture/server.key.der',client_ca_der='/run/capture/ca.der',collector_certificate_der='/run/capture/collector.crt.der',policy_key_file='/run/capture/policy.raw',listen='0.0.0.0:9445'),
-        'worker.json': dict(common,database_user='contour_local_worker',password_file='/run/capture/worker.password')}
-    for name, config in configs.items():
+    for name, config in runtime_configs(COLLECTOR).items():
         path=runtime/name
         if path.exists() and json.loads(path.read_text()) != config: raise RuntimeError('capture config drift')
         if not path.exists(): path.write_text(json.dumps(config,indent=2)+'\n')
     print('Synthetic capture roles and instance-bound enrollment verified.')
 
-if __name__ == '__main__': main()
+if __name__ == '__main__': main(capture_profiles.arguments(sys.argv[1:]))

@@ -86,6 +86,91 @@ fn admit(
     queue.admit_with(draft, inputs, || Ok(now))
 }
 #[test]
+fn retractable_admission_preserves_other_pending_records_and_charges() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(3, 100000);
+    admit(&mut queue, draft(1), &inputs, time(5)).unwrap();
+    let charge = draft(2).retention_charge().unwrap() * 3;
+    let admission = queue
+        .admit_retractable_with(draft(2), &inputs, || Ok(time(5)))
+        .unwrap();
+    admit(&mut queue, draft(3), &inputs, time(5)).unwrap();
+    let before = queue.stats();
+    queue.retract_admission(admission).unwrap();
+    assert_eq!(queue.stats().records, 2);
+    assert_eq!(queue.stats().bytes, before.bytes - charge);
+    assert_eq!(queue.stats().purged, before.purged + 1);
+    let ids = queue
+        .retained_record_times()
+        .map(|(id, _, _)| id.to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000003"
+        ]
+    );
+}
+#[test]
+fn retraction_cannot_mutate_a_frozen_generation() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = queue(2, 100000);
+    let admission = queue
+        .admit_retractable_with(draft(1), &inputs, || Ok(time(5)))
+        .unwrap();
+    queue.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    let wire = queue
+        .delivery_at(&inputs, time(6))
+        .unwrap()
+        .unwrap()
+        .wire()
+        .to_vec();
+    let before = queue.stats();
+    assert_eq!(
+        queue.retract_admission(admission),
+        Err(QueueError::Ownership)
+    );
+    assert_eq!(queue.stats().records, before.records);
+    assert_eq!(queue.stats().bytes, before.bytes);
+    assert_eq!(
+        queue.delivery_at(&inputs, time(6)).unwrap().unwrap().wire(),
+        wire
+    );
+}
+#[test]
+fn retraction_rejects_foreign_and_stale_admissions_even_with_reused_record_ids() {
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut first = queue(2, 100000);
+    let mut other = queue(2, 100000);
+    let foreign = first
+        .admit_retractable_with(draft(1), &inputs, || Ok(time(5)))
+        .unwrap();
+    let other_admission = other
+        .admit_retractable_with(draft(1), &inputs, || Ok(time(5)))
+        .unwrap();
+    assert_eq!(other.retract_admission(foreign), Err(QueueError::Ownership));
+    assert_eq!(other.stats().records, 1);
+    other.retract_admission(other_admission).unwrap();
+    let stale = first
+        .admit_retractable_with(draft(2), &inputs, || Ok(time(5)))
+        .unwrap();
+    first.purge();
+    let fresh = first
+        .admit_retractable_with(draft(2), &inputs, || Ok(time(5)))
+        .unwrap();
+    assert_eq!(first.retract_admission(stale), Err(QueueError::Ownership));
+    assert_eq!(first.stats().records, 1);
+    first.retract_admission(fresh).unwrap();
+    assert_eq!(first.stats().records, 0);
+}
+#[test]
 fn final_clock_expiry_purges_before_rejected_admission() {
     let current = signed(&policy());
     let sources = [source()];

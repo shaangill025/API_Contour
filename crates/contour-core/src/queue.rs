@@ -41,6 +41,10 @@ impl QueueLimits {
         }
         Ok(Self { records, bytes })
     }
+    /// Configured maximum charged bytes; not a policy grant.
+    pub fn byte_limit(&self) -> usize {
+        self.bytes
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueStats {
@@ -56,7 +60,19 @@ pub struct QueueStats {
     pub rejected: u64,
     pub acknowledged: u64,
 }
+/// Ownership of one still-pending admission, not live authority or a receipt.
+/// It cannot retract a record that has entered a frozen transport generation.
+pub struct UnfrozenAdmission {
+    instance: u64,
+    sequence: u64,
+}
+impl fmt::Debug for UnfrozenAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("UnfrozenAdmission")
+    }
+}
 struct Entry {
+    admission_sequence: u64,
     record: CheckedRecord,
     // Base C bounds this record's wire contribution including envelope slack.
     base_allowance: usize,
@@ -74,6 +90,7 @@ pub struct MemoryQueue {
     frozen: Option<frozen::Frozen>,
     instance: u64,
     generation: u64,
+    next_admission: u64,
 }
 impl fmt::Debug for MemoryQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -95,6 +112,7 @@ impl MemoryQueue {
             frozen: None,
             instance: frozen::next_instance()?,
             generation: 0,
+            next_admission: 0,
         })
     }
     /// Revisions of retained pending and frozen records; duplicates are possible.
@@ -139,6 +157,47 @@ impl MemoryQueue {
         inputs: &AdmissionInputs<'_>,
     ) -> Result<(), QueueError> {
         self.admit_with(draft, inputs, wall_clock)
+    }
+    /// Permit a native owner to undo only this new pending record when its final
+    /// live-authority check fails. All normal admission and charging checks run.
+    pub fn admit_retractable(
+        &mut self,
+        draft: RecordDraft,
+        inputs: &AdmissionInputs<'_>,
+    ) -> Result<UnfrozenAdmission, QueueError> {
+        self.admit_retractable_with(draft, inputs, wall_clock)
+    }
+    fn admit_retractable_with(
+        &mut self,
+        draft: RecordDraft,
+        inputs: &AdmissionInputs<'_>,
+        clock: impl FnMut() -> Result<OffsetDateTime, QueueError>,
+    ) -> Result<UnfrozenAdmission, QueueError> {
+        self.admit_with(draft, inputs, clock)?;
+        Ok(UnfrozenAdmission {
+            instance: self.instance,
+            sequence: self
+                .entries
+                .back()
+                .ok_or(QueueError::Ownership)?
+                .admission_sequence,
+        })
+    }
+    /// Withdraw the exact owned pending entry without touching other records or
+    /// any frozen/possibly committed batch. Admission sequences never reset.
+    pub fn retract_admission(&mut self, admission: UnfrozenAdmission) -> Result<(), QueueError> {
+        if admission.instance != self.instance {
+            return Err(QueueError::Ownership);
+        }
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.admission_sequence == admission.sequence)
+            .ok_or(QueueError::Ownership)?;
+        self.entries.remove(index).ok_or(QueueError::Ownership)?;
+        self.stats.purged = self.stats.purged.saturating_add(1);
+        self.recount();
+        Ok(())
     }
     fn now(&mut self) -> Result<OffsetDateTime, QueueError> {
         self.clock_result(wall_clock())
@@ -326,11 +385,17 @@ impl MemoryQueue {
         let record = draft
             .declare_queue_times(queued, expires)
             .map_err(|_| self.reject(QueueError::Record))?;
+        let admission_sequence = self
+            .next_admission
+            .checked_add(1)
+            .ok_or_else(|| self.reject(QueueError::Ownership))?;
         self.entries.push_back(Entry {
+            admission_sequence,
             record,
             base_allowance,
             charge,
         });
+        self.next_admission = admission_sequence;
         self.recount();
         Ok(())
     }

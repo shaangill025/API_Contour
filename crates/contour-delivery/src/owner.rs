@@ -8,6 +8,12 @@ use contour_core::{
     RecordDraft, VerifiedPolicy,
 };
 use std::collections::BTreeSet;
+#[path = "stream_capture.rs"]
+mod stream_capture;
+pub use stream_capture::CaptureId;
+#[path = "pool.rs"]
+mod pool;
+pub use pool::{CollectorPool, PoolCapture};
 
 #[derive(Debug)]
 pub enum OwnerError {
@@ -67,6 +73,8 @@ pub struct CollectorOwner {
     policies: Vec<PolicyEntry>,
     live: Option<LiveAuthority>,
     retry: Option<RetryState>,
+    streams: stream_capture::Streams,
+    configured_queue_bytes: usize,
 }
 impl CollectorOwner {
     pub fn new(
@@ -91,6 +99,8 @@ impl CollectorOwner {
             policies: Vec::new(),
             live: None,
             retry: None,
+            streams: stream_capture::Streams::new()?,
+            configured_queue_bytes: limits.byte_limit(),
         })
     }
     pub fn stats(&self) -> QueueStats {
@@ -109,6 +119,7 @@ impl CollectorOwner {
     fn guard(&mut self) -> Result<(), OwnerError> {
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
             return Err(OwnerError::Paused);
         }
         Ok(())
@@ -131,6 +142,7 @@ impl CollectorOwner {
         }
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
         }
         Ok(())
     }
@@ -138,6 +150,7 @@ impl CollectorOwner {
     /// irreversible queue revocation. History is bounded without forgetting records.
     pub async fn refresh(&mut self) -> Result<(), OwnerError> {
         self.live = None;
+        self.streams.clear();
         self.expire_retained()?;
         let fresh = self
             .client
@@ -238,6 +251,14 @@ impl CollectorOwner {
         Ok(result)
     }
     pub fn admit(&mut self, draft: RecordDraft) -> Result<(), OwnerError> {
+        self.admit_inner(draft, |_| {})
+    }
+    // Private fault hook; forwarding adapters cannot supply or access it.
+    fn admit_inner(
+        &mut self,
+        draft: RecordDraft,
+        after_admission: impl FnOnce(&mut Self),
+    ) -> Result<(), OwnerError> {
         self.guard()?;
         let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
         let refs = self.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
@@ -248,9 +269,13 @@ impl CollectorOwner {
             &live.sources,
         )
         .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
-        self.queue.admit(draft, &inputs)?;
+        let admission = self.queue.admit_retractable(draft, &inputs)?;
+        after_admission(self);
         if !self.is_live() {
             self.live = None;
+            self.streams.clear();
+            self.queue.retract_admission(admission)?;
+            return Err(OwnerError::Paused);
         }
         Ok(())
     }
@@ -286,6 +311,7 @@ impl CollectorOwner {
     /// wallclock/attempt deadline. On cancellation all I/O and reservations drop.
     pub async fn send_once(&mut self) -> Result<SendOutcome, OwnerError> {
         self.guard()?;
+        self.streams.clear();
         if let Some(retry) = &self.retry {
             if !retry.ready {
                 return Ok(SendOutcome::Deferred(retry.directive));
@@ -412,11 +438,13 @@ mod capture_tests {
             t.second()
         )
     }
-    fn make_owner() -> CollectorOwner {
+    pub(super) fn make_owner() -> CollectorOwner {
+        make_owner_at(OffsetDateTime::now_utc())
+    }
+    pub(super) fn make_owner_at(now: OffsetDateTime) -> CollectorOwner {
         let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
         let keys = PolicyKeys::new(&[("test", public)]).unwrap();
-        let now = OffsetDateTime::now_utc();
         let payload = serde_json::to_vec(&json!({"tenant_id":ID,"collector_id":ID,"revision":1,"issued_at":stamp(now - time::Duration::minutes(1)),"expires_at":stamp(now + time::Duration::minutes(1)),"enabled":true,"service_ids":[ID],"techniques":["runtime"],"approved_names":["GET","id"],"denied_templates":[],"inspection_bytes":65536,"depth_limit":32,"queue_bytes":10000,"queue_ttl_seconds":60,"durable_queue_enabled":false,"approved_route_segments":["orders"],"parser_profiles":["http_json_v1"]})).unwrap();
         let signature = key.sign(&[b"apicontour/policy/1\n".as_slice(), &payload].concat());
         let envelope = serde_json::to_vec(&json!({"payload_base64url":base64url(&payload),"signature_base64url":base64url(signature.as_ref()),"key_id":"test","signature_profile":"ed25519-v1"})).unwrap();
@@ -448,7 +476,7 @@ mod capture_tests {
         });
         owner
     }
-    fn scope() -> CaptureScope<'static> {
+    pub(super) fn scope() -> CaptureScope<'static> {
         CaptureScope {
             source_id: ID,
             workload: [ID; 4],
@@ -459,6 +487,90 @@ mod capture_tests {
             response_header_names: &[],
             query_parameter_names: &[],
         }
+    }
+    fn record(owner: &mut CollectorOwner, record_id: &str) -> RecordDraft {
+        let (revision, observation) = owner.inspect_json(&scope(), br#"{"id":1}"#).unwrap();
+        let seen = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        RecordDraft::from_observation(
+            contour_core::RecordMetadata {
+                record_id,
+                source_id: ID,
+                workload: [ID; 4],
+                protocol: "http",
+                direction: "request",
+                visibility: "structure",
+                operation: "GET",
+                route_template: "/orders",
+                route_uncertain: false,
+                parser_profile: "http_json_v1",
+                policy_revision: revision,
+                count: 1,
+                first_seen: seen.clone(),
+                last_seen: seen,
+                sample_numerator: 1,
+                sample_denominator: 1,
+                status_code: None,
+                request_header_names: &[],
+                response_header_names: &[],
+                query_parameter_names: &[],
+            },
+            observation,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn expiry_during_copy_preparation_prevents_the_copy_seam() {
+        let mut owner = make_owner();
+        let id = owner.begin_capture(&scope()).unwrap();
+        let mut copied = false;
+        let result = owner.capture_fragment_prepared(
+            id,
+            b"private",
+            |owner| {
+                owner.live.as_mut().unwrap().deadline = Instant::now();
+            },
+            || copied = true,
+        );
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(
+            !copied,
+            "observational copy occurred after preparation expired authority"
+        );
+        assert!(owner.streams.is_empty());
+    }
+    #[test]
+    fn raw_capture_tokens_cannot_cross_owner_boundaries() {
+        let mut a = make_owner();
+        let mut b = make_owner();
+        let foreign = a.begin_capture(&scope()).unwrap();
+        let own = b.begin_capture(&scope()).unwrap();
+        assert!(b.capture_fragment(foreign, b"foreign").is_err());
+        b.cancel_capture(foreign);
+        b.capture_fragment(own, br#"{"id":1}"#).unwrap();
+        assert!(b.finish_capture(own).is_ok());
+    }
+    #[test]
+    fn expiry_during_admission_retracts_only_the_new_record() {
+        let mut owner = make_owner();
+        owner.queue = MemoryQueue::new([ID; 2], QueueLimits::new(2, 10000).unwrap()).unwrap();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let prior_id = "00000000-0000-4000-8000-000000000002";
+        let first = record(&mut owner, prior_id);
+        owner.admit(first).unwrap();
+        let prior_bytes = owner.stats().bytes;
+        let second = record(&mut owner, "00000000-0000-4000-8000-000000000003");
+        let result = owner.admit_inner(second, |owner| {
+            assert_eq!(owner.stats().records, 2);
+            owner.live.as_mut().unwrap().deadline = Instant::now();
+        });
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(!owner.is_live());
+        assert_eq!(owner.stats().records, 1);
+        assert_eq!(owner.stats().bytes, prior_bytes);
+        assert_eq!(
+            owner.queue.retained_record_times().next().unwrap().0,
+            prior_id
+        );
     }
     #[test]
     fn paused_and_expired_owner_reject_before_inspection() {
@@ -475,6 +587,39 @@ mod capture_tests {
             Err(OwnerError::Paused)
         ));
         assert!(!owner.is_live());
+    }
+    #[test]
+    fn expired_or_wrong_scope_never_copies_a_fragment() {
+        let mut owner = make_owner();
+        let mut wrong = scope();
+        wrong.route_template = "/not-approved";
+        assert!(owner.begin_capture(&wrong).is_err());
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.live.as_mut().unwrap().deadline = Instant::now();
+        let mut copies = 0;
+        assert!(
+            owner
+                .capture_fragment_inner(id, b"secret", || copies += 1)
+                .is_err()
+        );
+        assert_eq!(copies, 0);
+        assert!(owner.finish_capture(id).is_err());
+    }
+    #[test]
+    fn fragmented_body_extracts_and_cancel_discards() {
+        let mut owner = make_owner();
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, br#"{"id":"#).unwrap();
+        owner.capture_fragment(id, b"1}").unwrap();
+        let (_, observation) = owner.finish_capture(id).unwrap();
+        assert_eq!(
+            observation.completeness,
+            contour_core::Completeness::Complete
+        );
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, b"123").unwrap();
+        owner.cancel_capture(id);
+        assert!(owner.finish_capture(id).is_err());
     }
     #[test]
     fn expiry_after_extraction_discards_observation_and_pauses() {

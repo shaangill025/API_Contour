@@ -152,7 +152,8 @@ def main():
         run(["cargo", "build", "-p", "contour-core", "--example", "operation_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-delivery", "--example", "owner_probe", "--locked", "--offline"], timeout=180)
     if "--delivery-only" in sys.argv:
-        run(["cargo", "build", "-p", "contour-delivery", "--example", "delivery_probe", "--example", "owner_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-delivery", "--example", "delivery_probe", "--example", "owner_probe", "--example", "pool_probe", "--locked", "--offline"], timeout=180)
+        run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = volume = None
