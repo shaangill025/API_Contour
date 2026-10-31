@@ -84,6 +84,10 @@ impl DeliveryReservation<'_> {
     pub fn valid_until(&self) -> OffsetDateTime {
         self.valid_until
     }
+    /// Wire version established by the queue, without decoding its frozen payload.
+    pub fn wire_version(&self) -> u8 {
+        if self.queue.v2 { 2 } else { 1 }
+    }
     /// Local identity established by queue admission, without decoding payload.
     pub fn identity(&self) -> [&str; 2] {
         self.queue.identity.each_ref().map(String::as_str)

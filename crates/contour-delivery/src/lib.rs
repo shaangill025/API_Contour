@@ -98,12 +98,26 @@ impl CheckedReceipt {
     }
 }
 /// Immutable operator endpoint and credentials; not request supplied enrollment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WireMode {
+    V1,
+    V2,
+}
+impl WireMode {
+    fn version(self) -> u8 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
 pub struct DeliveryClient {
     host: String,
     address: SocketAddr,
     identity: [String; 2],
     tls: TlsConnector,
     deadline: Duration,
+    wire_mode: WireMode,
 }
 impl fmt::Debug for DeliveryClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -162,7 +176,22 @@ impl DeliveryClient {
             identity: identity.map(str::to_owned),
             tls: TlsConnector::from(Arc::new(config)),
             deadline,
+            wire_mode: WireMode::V1,
         })
+    }
+    /// Explicit V2 transport; the receiver must implement /v2/batches.
+    pub fn from_der_v2(
+        host: &str,
+        address: SocketAddr,
+        identity: [&str; 2],
+        roots: &[&[u8]],
+        chain: &[&[u8]],
+        key: &[u8],
+        deadline: Duration,
+    ) -> Result<Self, DeliveryError> {
+        let mut client = Self::from_der(host, address, identity, roots, chain, key, deadline)?;
+        client.wire_mode = WireMode::V2;
+        Ok(client)
     }
     /// Exclusive attempt borrow prevents concurrent request copies. Every body,
     /// socket and HTTP driver stays local; dropping this future drops all owners.
@@ -174,7 +203,9 @@ impl DeliveryClient {
     ) -> Result<CheckedReceipt, DeliveryError> {
         let started = Instant::now();
         let now = OffsetDateTime::now_utc();
-        if attempt.identity() != self.identity.each_ref().map(String::as_str) {
+        if attempt.wire_version() != self.wire_mode.version()
+            || attempt.identity() != self.identity.each_ref().map(String::as_str)
+        {
             return Err(DeliveryError::Configuration);
         }
         let valid_until = attempt.valid_until();
@@ -218,13 +249,17 @@ impl DeliveryClient {
                 format!("{}:{}", self.host, self.address.port())
             };
             // Exactly one bounded transport copy; immutable frozen source stays charged.
-            let request = Request::post("/v1/batches")
-                .header("Host", authority)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("Connection", "close")
-                .body(Full::new(Bytes::copy_from_slice(view.wire())))
-                .map_err(|_| DeliveryError::Configuration)?;
+            let request = Request::post(if self.wire_mode == WireMode::V2 {
+                "/v2/batches"
+            } else {
+                "/v1/batches"
+            })
+            .header("Host", authority)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Connection", "close")
+            .body(Full::new(Bytes::copy_from_slice(view.wire())))
+            .map_err(|_| DeliveryError::Configuration)?;
             let mut driver = Driver {
                 future: Box::pin(connection),
                 done: false,
