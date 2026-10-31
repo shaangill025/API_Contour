@@ -37,7 +37,7 @@ class RetentionFailure(pilot.Failure):
 
 
 def validate_retention(metadata):
-    if metadata.get('Type') != 'json-file' or metadata.get('Config', {}).get('max-size') != '-1':
+    if metadata.get('Type') != 'json-file' or metadata.get('Config') != {}:
         raise RetentionFailure('privacy log retention unavailable')
 
 
@@ -158,7 +158,7 @@ class Driver:
         worker=dict(config_common,database_user='contour_local_worker',password_file='/run/capture/worker.password')
         for name, config in [('ingress',ingress),('worker',worker)]:
             pilot.private_write(p/(name+'.json'),json.dumps(config).encode())
-        logging={'driver':'json-file','options':{'max-size':'-1'}}
+        logging={'driver':'json-file','options':{}}
         postgres={'image':POSTGRES_IMAGE, 'entrypoint':['sh','-c'],
             'command':['cp /run/local/server.key /tmp/server.key && cp /run/local/server.crt /tmp/server.crt && chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c hba_file=/run/config/pg_hba.conf'],
             'environment':{'POSTGRES_DB':'contour_local','POSTGRES_PASSWORD_FILE':'/run/secrets/admin-password','POSTGRES_HOST_AUTH_METHOD':'scram-sha-256'},
@@ -447,7 +447,7 @@ class OfflineTests(unittest.TestCase):
             services=json.loads(driver.override.read_text())['services']
             self.assertEqual(set(services),set(SERVICES)|{'postgres'})
             for service in SERVICES:
-                self.assertEqual(services[service]['logging'], {'driver':'json-file','options':{'max-size':'-1'}})
+                self.assertEqual(services[service]['logging'], {'driver':'json-file','options':{}})
             for service in ('native-gateway','pilot-capture-ingress','pilot-capture-worker'):
                 self.assertEqual(services[service]['image'],driver.image)
                 self.assertNotEqual(services[service]['image'],'apicontour-local-app')
@@ -539,10 +539,10 @@ class OfflineTests(unittest.TestCase):
                 [['docker','rm','-f',driver.verifier],['docker','image','rm',driver.image]])
 
     def test_retention_rejects_unexpected_driver_or_rotation(self):
-        validate_retention({'Type':'json-file','Config':{'max-size':'-1'}})
+        validate_retention({'Type':'json-file','Config':{}})
         for metadata in ({'Type':'local','Config':{'max-size':'-1'}},
                          {'Type':'json-file','Config':{'max-size':'10m'}},
-                         {'Type':'json-file','Config':{}}, {'Type':'none','Config':{}}):
+                         {'Type':'json-file','Config':{'mode':'non-blocking'}}, {'Type':'none','Config':{}}, {'Type':'json-file'}):
             with self.assertRaises(RetentionFailure): validate_retention(metadata)
 
     def test_shutdown_marker_scanned_after_all_services_stop(self):
