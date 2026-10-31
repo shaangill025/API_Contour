@@ -294,6 +294,72 @@ class Tests(unittest.TestCase):
         for term in ('Fixed A→B→C', 'p99 is the maximum', 'Concurrency one', 'not saturated capacity', 'coordinated delay', 'warmup'):
             self.assertIn(term,limits)
 
+    def test_metric_snapshots_are_fresh_numeric_and_monotonic(self):
+        module=load_driver()
+        def metric(sequence, **changes):
+            v={'sequence':sequence,'losses':0,'ack':0,'deferred':0,'error':0,'empty':0,
+               'slots':4,'records_per_slot':128,'bytes_per_slot':262144}
+            v.update(changes); return v
+        def line(value): return module.METRIC_PREFIX+json.dumps(value).encode()+b'\n'
+        first=metric(1,losses=2); second=metric(2,losses=3,ack=4)
+        previous=module.metric_entries(line(first))
+        current=module.metric_entries(line(first)+line(second))
+        self.assertEqual(module.fresh_snapshot(previous,current),second)
+        self.assertIsNone(module.fresh_snapshot(previous,previous))
+        self.assertEqual(module.counter_delta(first,second),{'losses':1,'ack':4,'deferred':0,'error':0,'empty':0})
+        for raw in (line(metric(2)),line(first)+line(metric(1)),line(first)+line(metric(2,losses=1)),
+                    line(metric(1,slots=True)),line(metric(1,records_per_slot=0)),
+                    module.METRIC_PREFIX+b'{broken}\n',module.METRIC_PREFIX+b'{\"sequence\":1,\"sequence\":1}\n',line(metric(1,extra=1)),
+                    line(first)+line(metric(2,slots=3))):
+            with self.assertRaises(module.pilot.Failure): module.metric_entries(raw)
+        with self.assertRaises(module.pilot.Failure): module.fresh_snapshot(current,previous)
+        with self.assertRaises(module.pilot.Failure): module.counter_delta(second,first)
+        maximum=2**64-1
+        with self.assertRaisesRegex(module.pilot.Failure,'saturated'):
+            module.counter_delta(metric(1,losses=maximum),metric(2,losses=maximum))
+        with self.assertRaisesRegex(module.pilot.Failure,'saturated'):
+            module.counter_delta(metric(1,ack=maximum-1),metric(2,ack=maximum))
+
+    def test_snapshot_deadline_and_container_replacement_never_produce_zero(self):
+        module=load_driver(); driver=module.Driver.__new__(module.Driver)
+        driver.base=mock.Mock(env={}); driver.service_id=mock.Mock(return_value='owned')
+        with mock.patch.object(module.privacy,'bounded',return_value=b''), \
+             mock.patch.object(module.time,'monotonic',side_effect=[0,1,1,6]), \
+             mock.patch.object(module.time,'sleep'):
+            with self.assertRaisesRegex(module.pilot.Failure,'deadline'):
+                driver.metrics_snapshot('owned',timeout=5)
+        driver.service_id=mock.Mock(side_effect=['owned','replacement'])
+        with mock.patch.object(module.privacy,'bounded',return_value=b''):
+            with self.assertRaisesRegex(module.pilot.Failure,'container changed'):
+                driver.metrics_snapshot('owned')
+
+    def test_snapshot_uses_exact_owned_container_and_requires_fresh_line(self):
+        module=load_driver(); driver=module.Driver.__new__(module.Driver)
+        driver.base=mock.Mock(env={}); driver.service_id=mock.Mock(return_value='owned')
+        value={'sequence':1,'losses':0,'ack':1,'deferred':0,'error':0,'empty':0,
+               'slots':4,'records_per_slot':128,'bytes_per_slot':262144}
+        line=module.METRIC_PREFIX+json.dumps(value).encode()+b'\n'
+        def bounded(args, env, **kwargs):
+            if args[:2]==['docker','kill']:
+                self.assertEqual(args,['docker','kill','--signal','USR1','owned']); return b''
+            self.assertEqual(args,['docker','logs','owned'])
+            bounded.calls+=1
+            return b'' if bounded.calls==1 else line
+        bounded.calls=0
+        with mock.patch.object(module.privacy,'bounded',side_effect=bounded):
+            self.assertEqual(driver.metrics_snapshot('owned'),value)
+
+    def test_cohort_query_returns_scoped_numeric_counts_only(self):
+        module=load_driver(); driver=module.Driver.__new__(module.Driver)
+        driver.sql=mock.Mock(return_value=b'101|6|2|99\n')
+        self.assertEqual(driver.cohort(),{'ingested_records':101,'processed_batches':6,'pending_batches':2,'projected_windows':99})
+        query=driver.sql.call_args.args[0]
+        for table in ('contour.ingestion_batches','contour.catalog_processed_batches','contour.observation_windows'):
+            self.assertIn(table,query)
+        self.assertIn('record_count',query); self.assertIn(module.pilot.SOURCE,query)
+        driver.sql.return_value=b'1|2|bad|4'
+        with self.assertRaises(ValueError): driver.cohort()
+
     def test_quantile_and_error_denominator(self):
         r = block_summary({'attempted':102,'success_ms':list(range(100)),'errors':1,'timeouts':1,'elapsed_ms':1000})
         self.assertEqual(r['p99_ms'],98)

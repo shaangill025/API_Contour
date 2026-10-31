@@ -28,6 +28,53 @@ def require_tls_rejection(kind, outcome, before, after):
         raise pilot.Failure('no typed TLS verification rejection')
 
 
+METRIC_PREFIX=b'NATIVE_PERF_METRICS '
+COUNTER_FIELDS=('losses','ack','deferred','error','empty')
+QUEUE_FIELDS=('slots','records_per_slot','bytes_per_slot')
+METRIC_FIELDS=('sequence',)+COUNTER_FIELDS+QUEUE_FIELDS
+def unique_object(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value: raise ValueError('duplicate field')
+        value[key]=item
+    return value
+
+def metric_entries(raw):
+    entries=[]
+    for line in raw.splitlines():
+        if not line.startswith(METRIC_PREFIX): continue
+        try: value=json.loads(line[len(METRIC_PREFIX):],object_pairs_hook=unique_object)
+        except (ValueError,UnicodeError): raise pilot.Failure('invalid metrics snapshot') from None
+        if not isinstance(value,dict) or set(value)!=set(METRIC_FIELDS) or any(
+            type(value[k]) is not int or not 0<=value[k]<=2**64-1 for k in METRIC_FIELDS):
+            raise pilot.Failure('invalid metrics snapshot')
+        if value['sequence'] != len(entries)+1:
+            raise pilot.Failure('metrics sequence replay or gap')
+        if not (1<=value['slots']<=8 and 1<=value['records_per_slot']<=500 and 1<=value['bytes_per_slot']<=268435456):
+            raise pilot.Failure('invalid queue configuration snapshot')
+        if entries and (any(value[k]<entries[-1][k] for k in COUNTER_FIELDS) or
+                        any(value[k]!=entries[-1][k] for k in QUEUE_FIELDS)):
+            raise pilot.Failure('metrics counter decreased')
+        entries.append(value)
+    return entries
+
+def fresh_snapshot(previous, current):
+    if len(current)<len(previous) or current[:len(previous)]!=previous:
+        raise pilot.Failure('metrics log changed or replayed')
+    if len(current)==len(previous): return None
+    if len(current)!=len(previous)+1: raise pilot.Failure('unexpected metrics snapshot count')
+    return current[-1]
+
+def counter_delta(before,after):
+    if any(before[k]==2**64-1 or after[k]==2**64-1 for k in COUNTER_FIELDS):
+        raise pilot.Failure('metrics counter saturated; delta unknown')
+    if (after['sequence']!=before['sequence']+1 or any(after[k]<before[k] for k in COUNTER_FIELDS) or
+        any(after[k]!=before[k] for k in QUEUE_FIELDS)):
+        raise pilot.Failure('metrics snapshots not consecutive or counters decreased')
+    return {key:after[key]-before[key] for key in COUNTER_FIELDS}
+
+
+
 class Driver(privacy.Driver):
     def __init__(self, screen):
         super().__init__()
@@ -195,6 +242,33 @@ class Driver(privacy.Driver):
         if len(values)!=3 or values[2]: raise pilot.Failure('unexpected capture projection')
         return values[:2]
 
+    def cohort(self):
+        # Unique collector/database: all ingestion batches belong to this owned run.
+        batch_scope="b.tenant_id='"+pilot.TENANT+"' AND b.collector_id='00000000-0000-4000-8000-000000000301'"
+        window_scope=(pilot.SCOPE+" AND w.source_id='"+pilot.SOURCE+"' AND w.project_id='"+pilot.PROJECT+
+            "' AND w.service_id='"+pilot.SERVICE+"' AND w.environment_id='"+pilot.ENVIRONMENT+
+            "' AND w.deployment_id='"+pilot.DEPLOYMENT+"'")
+        query=("SELECT coalesce(sum(b.record_count),0), count(*) FILTER (WHERE p.batch_id IS NOT NULL), "
+               "count(*) FILTER (WHERE p.batch_id IS NULL), (SELECT count(*) FROM contour.observation_windows w WHERE "+window_scope+
+               ") FROM contour.ingestion_batches b LEFT JOIN contour.catalog_processed_batches p USING(tenant_id,collector_id,batch_id) WHERE "+batch_scope+";")
+        values=tuple(map(int,self.sql(query).strip().split(b'|')))
+        if len(values)!=4 or any(v<0 for v in values): raise pilot.Failure('invalid cohort counts')
+        return dict(zip(('ingested_records','processed_batches','pending_batches','projected_windows'),values))
+
+    def metrics_snapshot(self, container, *, timeout=5):
+        if self.service_id('native-gateway')!=container: raise pilot.Failure('gateway container changed')
+        previous=metric_entries(privacy.bounded(['docker','logs',container],self.base.env,seconds=2))
+        privacy.bounded(['docker','kill','--signal','USR1',container],self.base.env,seconds=5)
+        deadline=time.monotonic()+timeout
+        while True:
+            if self.service_id('native-gateway')!=container: raise pilot.Failure('gateway container changed')
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise pilot.Failure('metrics snapshot deadline')
+            current=metric_entries(privacy.bounded(['docker','logs',container],self.base.env,seconds=min(2,remaining)))
+            result=fresh_snapshot(previous,current)
+            if result is not None: return result
+            time.sleep(min(.1,max(0,deadline-time.monotonic())))
+
     def drain(self, before, expected, seconds=20):
         deadline=time.monotonic()+seconds
         last=None; stable_since=time.monotonic()
@@ -226,7 +300,7 @@ class Driver(privacy.Driver):
         self.compose('screen-start',['up','-d','--pull','never','--no-recreate',*privacy.SERVICES],90)
         self.started_services()
         self.lane('A'); self.ready(); self.negative_direct()
-        blocks=[]; capture=[0,0]; capture_by_block=[]; hwm=[]
+        blocks=[]; capture=[0,0]; capture_by_block=[]; hwm=[]; diagnostics=[]
         for _ in range(3):
             block={}
             for lane in ('A','B','C'):
@@ -241,6 +315,9 @@ class Driver(privacy.Driver):
                     if min(self.drain(before,1)) < 1:
                         raise pilot.Failure('C authority readiness not persisted')
                     before=self.counts()
+                    gateway_container=self.service_id('native-gateway')
+                    metrics_before=self.metrics_snapshot(gateway_container)
+                    cohort_before=self.cohort()
                 started=time.monotonic()
                 block[lane]=self.sample(50)
                 if lane=='C':
@@ -252,12 +329,18 @@ class Driver(privacy.Driver):
                     capture_by_block.append({'successful_C_requests':len(block[lane]['success_ms']),
                         'persisted_request_observations':delta[0],'persisted_response_observations':delta[1]})
                     hwm.append(self.hwm())
+                    metrics_after=self.metrics_snapshot(gateway_container)
+                    diagnostics.append({'metrics_before':metrics_before,'metrics_after':metrics_after,
+                        'metrics_delta':counter_delta(metrics_before,metrics_after),
+                        'cohort_before':cohort_before,'cohort_after':self.cohort()})
             blocks.append(block)
         ctotal=sum(len(b['C']['success_ms']) for b in blocks)
         result=self.screen.report({'blocks':blocks,'capture':{'successful_C_requests':ctotal,
             'persisted_request_observations':capture[0],'persisted_response_observations':capture[1],
             'drain_seconds':20},'gateway_pid1_vmhwm_kib_by_block':hwm})
         result['capture_by_block'] = capture_by_block
+        result['diagnostics_by_block'] = diagnostics
+        result['gateway_queue_config_by_block'] = [{key:entry['metrics_before'][key] for key in QUEUE_FIELDS} for entry in diagnostics]
         result['capture_interpretation'] = ('Matching aggregate scoped counts; per-request coverage and continuous authority unverified. Readiness and failed-attempt observations may cross windows.'
             if all(row['persisted_request_observations']==row['successful_C_requests'] and
                    row['persisted_response_observations']==row['successful_C_requests'] for row in capture_by_block)

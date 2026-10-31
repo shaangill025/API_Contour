@@ -9,8 +9,72 @@ use contour_ingress::{
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
-use std::{env, fs, future::Future, io::Read, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    env, fs,
+    future::Future,
+    io::Read,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::time::sleep;
+
+// Fixture-only signal: handler does no I/O and never touches capture authority.
+static SNAPSHOT_REQUESTED: AtomicBool = AtomicBool::new(false);
+#[derive(Default)]
+struct Counters {
+    ack: AtomicU64,
+    deferred: AtomicU64,
+    error: AtomicU64,
+    empty: AtomicU64,
+}
+fn increment(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_add(1))
+    });
+}
+#[cfg(target_os = "linux")]
+extern "C" fn metrics_signal(_: libc::c_int) {
+    SNAPSHOT_REQUESTED.store(true, Ordering::Release);
+}
+#[cfg(target_os = "linux")]
+struct MetricsSignal(libc::sigaction);
+#[cfg(target_os = "linux")]
+impl MetricsSignal {
+    fn install() -> Result<Self, &'static str> {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = metrics_signal as *const () as usize;
+            if libc::sigemptyset(&mut action.sa_mask) != 0 {
+                return Err("metrics signal mask");
+            }
+            let mut old = std::mem::zeroed();
+            if libc::sigaction(libc::SIGUSR1, &action, &mut old) != 0 {
+                return Err("metrics signal setup");
+            }
+            Ok(Self(old))
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for MetricsSignal {
+    fn drop(&mut self) {
+        unsafe {
+            libc::sigaction(libc::SIGUSR1, &self.0, std::ptr::null_mut());
+        }
+    }
+}
+#[cfg(not(target_os = "linux"))]
+struct MetricsSignal;
+#[cfg(not(target_os = "linux"))]
+impl MetricsSignal {
+    fn install() -> Result<Self, &'static str> {
+        Err("metrics require Linux")
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +199,7 @@ fn main() {
     }
 }
 fn run() -> Result<(), &'static str> {
+    let _metrics_signal = MetricsSignal::install()?;
     let mut args = env::args().skip(1);
     let path = args.next().ok_or("configuration missing")?;
     if args.next().is_some() {
@@ -219,24 +284,42 @@ fn run() -> Result<(), &'static str> {
             .await
             .map_err(|_| "listener unavailable")?;
         let poll = pool.clone();
+        let counters = Arc::new(Counters::default());
+        let snapshot = counters.clone();
+        let (metric_slots, metric_records, metric_bytes) = (c.slots, c.records_per_slot, c.bytes_per_slot);
         tokio::spawn(async move {
+            let mut sequence = 0u64;
             loop {
                 let _ = poll.poll_authority();
+                // poll_authority has returned and released its gate before output.
+                if SNAPSHOT_REQUESTED.swap(false, Ordering::AcqRel) {
+                    sequence = sequence.saturating_add(1);
+                    println!("NATIVE_PERF_METRICS {{\"sequence\":{},\"losses\":{},\"ack\":{},\"deferred\":{},\"error\":{},\"empty\":{},\"slots\":{},\"records_per_slot\":{},\"bytes_per_slot\":{}}}",
+                        sequence, poll.losses(), snapshot.ack.load(Ordering::Relaxed),
+                        snapshot.deferred.load(Ordering::Relaxed), snapshot.error.load(Ordering::Relaxed),
+                        snapshot.empty.load(Ordering::Relaxed), metric_slots, metric_records, metric_bytes);
+                }
                 sleep(Duration::from_millis(100)).await;
             }
         });
         for slot in 0..c.slots {
             let p: Arc<CollectorPool> = pool.clone();
+            let counters = counters.clone();
             tokio::spawn(async move {
                 loop {
                     if let Some(id) = new_id() {
                         let _ = p.try_freeze(slot, &id, 100, 1_048_576);
                     }
-                    if matches!(
-                        p.send(slot).await,
-                        Ok(SendOutcome::Deferred(RetryDirective::Retry { .. }))
-                    ) {
-                        let _ = p.wait_retry(slot).await;
+                    match p.send(slot).await {
+                        Ok(SendOutcome::Acknowledged { .. }) => increment(&counters.ack),
+                        Ok(SendOutcome::Empty) => increment(&counters.empty),
+                        Ok(SendOutcome::Deferred(directive)) => {
+                            increment(&counters.deferred);
+                            if matches!(directive, RetryDirective::Retry { .. }) {
+                                let _ = p.wait_retry(slot).await;
+                            }
+                        }
+                        Err(_) => increment(&counters.error),
                     }
                     sleep(Duration::from_millis(500)).await;
                 }
@@ -244,4 +327,16 @@ fn run() -> Result<(), &'static str> {
         }
         gateway.serve(listener).await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn metric_increment_saturates_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        increment(&counter);
+        increment(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 }

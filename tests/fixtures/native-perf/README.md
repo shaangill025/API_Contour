@@ -59,3 +59,32 @@ stdin. The input contains `blocks` (each with `A`, `B`, and `C` objects with
 `gateway_pid1_vmhwm_kib_by_block` (one integer or null per block). Do not include payloads, markers,
 identities, credentials or request IDs. The report helper does not verify
 fixture configuration, lease, or provenance of supplied measurements.
+
+The online fixture accepts SIGUSR1 only inside its owned Linux container. Each
+request produces one bounded, numeric `NATIVE_PERF_METRICS` snapshot after the
+existing authority poll returns. The driver checks the exact gateway container,
+requires a fresh consecutive snapshot, checks monotonic counters and rejects
+malformed or missing output. It records per-C-block before/after values and
+deltas for the pool's aggregate loss counter and delivery outcomes (acknowledged,
+deferred, error, empty). These are aggregate outcomes, not counts of unique
+requests or a breakdown of loss reasons. The parsed gateway configuration's
+actual slot, records-per-slot and bytes-per-slot values are reported numerically
+for each C process; the fixture does not alter them.
+
+The database cohort snapshots separately report total ingested record counts,
+processed and pending batch counts for the unique collector in this owned
+project, and the scoped projected-window count. The metrics and database
+snapshots are taken outside the measured request window and are not atomic with
+one another. Readiness, retries, delivery, and drain can cross those boundaries.
+Even a matching aggregate count or a positive counter cannot establish
+per-request coverage, continuous authority, a loss reason, or a target pass.
+Missing or nonconsecutive signal output fails the screen; it is never replaced
+by a zero. Linux signal delivery, logging, and SQL snapshots require a separate
+operator-run live check.
+
+Instrumentation can perturb lane C: delivery counters perform atomic operations
+inside its worker loop, and snapshot output can block the current-thread runtime
+if Docker logging stalls. Snapshots are requested outside the measured window,
+but this remains a SCREEN_ONLY diagnostic rather than performance acceptance.
+A saturated counter has an unknown delta and causes the screen to fail rather
+than reporting zero.
