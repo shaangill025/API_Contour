@@ -2,7 +2,7 @@
 use crate::CollectorTls;
 mod upstream;
 use bytes::Bytes;
-use contour_core::{CaptureScope, RecordMetadata, Timestamp};
+use contour_core::{CaptureScope, OriginWitness, RecordMetadata, Timestamp};
 use contour_delivery::{CollectorPool, PoolCapture};
 use http_body_util::{BodyExt, Empty, combinators::UnsyncBoxBody};
 use hyper::{
@@ -252,6 +252,9 @@ impl Gateway {
         request: Request<Incoming>,
     ) -> Result<Response<ForwardBody>, ()> {
         let (mut parts, incoming) = request.into_parts();
+        // The trusted pinned forwarder owns this header. Remove it before any
+        // forwarding decisions, even for unmatched and malformed requests.
+        let witness = take_origin_witness(&mut parts.headers);
         // Fixed path matching is used only for observation; all request targets go
         // to the configured socket and never select the upstream destination.
         let eligible = parts.method.as_str() == self.point.method
@@ -275,11 +278,17 @@ impl Gateway {
         let eligible = prepare_request_capture(&mut parts.headers) && eligible;
         parts.headers.insert(header::HOST, self.authority.clone());
         let req_capture = if eligible {
-            Capture::begin(self.pool.clone(), self.point.clone(), "request", None)
+            Capture::begin(
+                self.pool.clone(),
+                self.point.clone(),
+                "request",
+                None,
+                &witness,
+            )
         } else {
             None
         };
-        let body = ObservedBody::new(incoming, req_capture, None).boxed_unsync();
+        let body = ObservedBody::new_request(incoming, req_capture).boxed_unsync();
         let request = Request::from_parts(parts, body);
         let response = timeout(Duration::from_secs(15), self.upstream.request(request))
             .await
@@ -292,6 +301,7 @@ impl Gateway {
                 self.point.clone(),
                 "response",
                 Some(parts.status.as_u16()),
+                &witness,
             )
         } else {
             None
@@ -350,6 +360,40 @@ fn exact_dns_san(cert: &CertificateDer<'_>, expected: &str) -> bool {
 }
 fn literal_dns_match(name: &str, expected: &str) -> bool {
     !name.contains('*') && !expected.contains('*') && name.eq_ignore_ascii_case(expected)
+}
+const ORIGIN_WITNESS: &str = "x-contour-origin-witness";
+
+fn take_origin_witness(headers: &mut HeaderMap) -> OriginWitness {
+    // A Connection-nominated field is hop-scoped and cannot carry provenance.
+    let malformed_connection = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .any(|v| v.to_str().is_err());
+    let nominated = malformed_connection
+        || headers
+            .get_all(header::CONNECTION)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .any(|v| v.trim().eq_ignore_ascii_case(ORIGIN_WITNESS));
+    let mut values = headers.get_all(ORIGIN_WITNESS).iter();
+    let candidate = values
+        .next()
+        .filter(|_| !nominated)
+        .filter(|_| values.next().is_none())
+        .and_then(|v| {
+            let bytes = v.as_bytes();
+            (bytes.len() == 64
+                && bytes
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)))
+            .then(|| String::from_utf8(bytes.to_vec()).expect("ASCII hex"))
+        });
+    headers.remove(ORIGIN_WITNESS);
+    match candidate {
+        Some(leaf_sha256) => OriginWitness::DownstreamMtlsLeafSha256V1 { leaf_sha256 },
+        None => OriginWitness::Unattributed,
+    }
 }
 fn capture_headers(headers: &HeaderMap) -> bool {
     let encoding_ok = headers
@@ -441,10 +485,16 @@ impl Capture {
         point: Arc<CapturePoint>,
         direction: &'static str,
         status: Option<u16>,
+        witness: &OriginWitness,
     ) -> Option<Self> {
         let first = stamp()?;
         let id = uuid()?;
-        let token = pool.try_begin(&point.scope()).ok()?;
+        let token = if pool.is_origin_v2() {
+            pool.try_begin_v2(&point.scope(), witness)
+        } else {
+            pool.try_begin(&point.scope())
+        }
+        .ok()?;
         Some(Self {
             pool,
             point,
@@ -540,6 +590,7 @@ struct ObservedBody<B> {
     inner: B,
     capture: Option<Capture>,
     driver: Option<AbortTask>,
+    strip_origin_trailers: bool,
 }
 impl<B> ObservedBody<B> {
     fn new(inner: B, capture: Option<Capture>, driver: Option<AbortTask>) -> Self {
@@ -547,7 +598,13 @@ impl<B> ObservedBody<B> {
             inner,
             capture,
             driver,
+            strip_origin_trailers: false,
         }
+    }
+    fn new_request(inner: B, capture: Option<Capture>) -> Self {
+        let mut body = Self::new(inner, capture, None);
+        body.strip_origin_trailers = true;
+        body
     }
 }
 impl<B> Drop for ObservedBody<B> {
@@ -562,7 +619,14 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for ObservedBody<
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let result = Pin::new(&mut self.inner).poll_frame(cx);
+        let mut result = Pin::new(&mut self.inner).poll_frame(cx);
+        if self.strip_origin_trailers {
+            if let Poll::Ready(Some(Ok(frame))) = &mut result {
+                if let Some(trailers) = frame.trailers_mut() {
+                    trailers.remove(ORIGIN_WITNESS);
+                }
+            }
+        }
         match &result {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(capture) = self.capture.as_mut() {
@@ -610,6 +674,87 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for ObservedBody<
 mod tests {
     use super::*;
     use hyper::client::conn::http1;
+    #[test]
+    fn witness_is_strict_and_always_removed() {
+        let canonical = "0123456789abcdef".repeat(4);
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN_WITNESS, HeaderValue::from_str(&canonical).unwrap());
+        assert_eq!(
+            take_origin_witness(&mut headers),
+            OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: canonical.clone()
+            }
+        );
+        assert!(!headers.contains_key(ORIGIN_WITNESS));
+        for value in [
+            "",
+            "-",
+            "a",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &format!("{canonical}, {canonical}"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(ORIGIN_WITNESS, HeaderValue::from_str(value).unwrap());
+            assert_eq!(
+                take_origin_witness(&mut headers),
+                OriginWitness::Unattributed
+            );
+            assert!(!headers.contains_key(ORIGIN_WITNESS));
+        }
+        let mut missing = HeaderMap::new();
+        assert_eq!(
+            take_origin_witness(&mut missing),
+            OriginWitness::Unattributed
+        );
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(ORIGIN_WITNESS, HeaderValue::from_str(&canonical).unwrap());
+        duplicate.append(ORIGIN_WITNESS, HeaderValue::from_str(&canonical).unwrap());
+        assert_eq!(
+            take_origin_witness(&mut duplicate),
+            OriginWitness::Unattributed
+        );
+        assert!(!duplicate.contains_key(ORIGIN_WITNESS));
+        let mut malformed = HeaderMap::new();
+        malformed.insert(ORIGIN_WITNESS, HeaderValue::from_str(&canonical).unwrap());
+        malformed.insert(
+            header::CONNECTION,
+            HeaderValue::from_bytes(b"x-contour-origin-witness,\x80").unwrap(),
+        );
+        assert_eq!(
+            take_origin_witness(&mut malformed),
+            OriginWitness::Unattributed
+        );
+        assert!(!malformed.contains_key(ORIGIN_WITNESS));
+        let mut nominated = HeaderMap::new();
+        nominated.insert(ORIGIN_WITNESS, HeaderValue::from_str(&canonical).unwrap());
+        nominated.append(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        nominated.append(
+            header::CONNECTION,
+            HeaderValue::from_static("X-Contour-Origin-Witness"),
+        );
+        assert_eq!(
+            take_origin_witness(&mut nominated),
+            OriginWitness::Unattributed
+        );
+        prepare_request_headers(&mut nominated);
+        assert!(!nominated.contains_key(ORIGIN_WITNESS));
+    }
+    #[test]
+    fn witness_removal_preserves_application_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN_WITNESS, HeaderValue::from_static("invalid"));
+        headers.insert("x-application", HeaderValue::from_static("kept"));
+        assert_eq!(
+            take_origin_witness(&mut headers),
+            OriginWitness::Unattributed
+        );
+        prepare_request_capture(&mut headers);
+        assert!(!headers.contains_key(ORIGIN_WITNESS));
+        assert_eq!(headers["x-application"], "kept");
+    }
     #[test]
     fn configured_scope_is_one_literal_method_and_path() {
         let mut point = CapturePoint {
@@ -793,6 +938,34 @@ mod tests {
             Pin::new(&mut observed).poll_frame(&mut cx),
             Poll::Ready(None)
         ));
+    }
+    #[test]
+    fn request_trailers_strip_witness_without_capture() {
+        use std::collections::VecDeque;
+        struct Frames(VecDeque<Frame<Bytes>>);
+        impl Body for Frames {
+            type Data = Bytes;
+            type Error = hyper::Error;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+                Poll::Ready(self.0.pop_front().map(Ok))
+            }
+        }
+        let mut trailers = HeaderMap::new();
+        trailers.append(ORIGIN_WITNESS, HeaderValue::from_static("forged"));
+        trailers.append(ORIGIN_WITNESS, HeaderValue::from_static("duplicate"));
+        trailers.insert("x-application", HeaderValue::from_static("kept"));
+        let mut body =
+            ObservedBody::new_request(Frames(VecDeque::from([Frame::trailers(trailers)])), None);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut cx) else {
+            panic!("missing trailers")
+        };
+        let trailers = frame.into_trailers().unwrap();
+        assert!(!trailers.contains_key(ORIGIN_WITNESS));
+        assert_eq!(trailers["x-application"], "kept");
     }
     #[test]
     fn hop_headers_remove_nominated_fields() {

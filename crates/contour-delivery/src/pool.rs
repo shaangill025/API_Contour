@@ -23,6 +23,7 @@ pub struct PoolCapture {
 /// The pool owns all slots; no owner handle escapes to the forwarding adapter.
 pub struct CollectorPool {
     instance: u64,
+    origin_v2: bool,
     slots: Vec<Mutex<CollectorOwner>>,
     enabled: AtomicBool,
     epoch: AtomicU64,
@@ -67,9 +68,11 @@ impl CollectorPool {
                 value.checked_add(1)
             })
             .map_err(|_| OwnerError::Paused)?;
+        let origin_v2 = first.client.wire_mode == super::WireMode::V2;
         let cancelled = (0..owners.len()).map(|_| AtomicU64::new(0)).collect();
         Ok(Arc::new(Self {
             instance,
+            origin_v2,
             cancelled,
             slots: owners.into_iter().map(Mutex::new).collect(),
             enabled: AtomicBool::new(false),
@@ -83,6 +86,10 @@ impl CollectorPool {
             #[cfg(test)]
             blocked_sends: AtomicUsize::new(0),
         }))
+    }
+    /// The immutable wire profile shared by every owner in this pool.
+    pub fn is_origin_v2(&self) -> bool {
+        self.origin_v2
     }
     fn try_gate(&self) -> Result<PoolGate<'_>, OwnerError> {
         let guard = self.gate.try_lock().map_err(|_| OwnerError::Paused)?;
@@ -1011,8 +1018,14 @@ mod tests {
     #[test]
     fn v2_pool_rejects_mixed_modes_foreign_tokens_and_stale_epochs() {
         assert!(CollectorPool::new(vec![make_owner(), make_owner_v2()]).is_err());
+        assert!(
+            !CollectorPool::new(vec![make_owner()])
+                .unwrap()
+                .is_origin_v2()
+        );
         let a = CollectorPool::new(vec![make_owner_v2()]).unwrap();
         let b = CollectorPool::new(vec![make_owner_v2()]).unwrap();
+        assert!(a.is_origin_v2());
         a.enabled.store(true, Ordering::Release);
         b.enabled.store(true, Ordering::Release);
         assert!(a.try_begin(&scope()).is_err());

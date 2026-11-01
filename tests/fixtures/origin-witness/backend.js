@@ -4,7 +4,7 @@ const fs = require('fs');
 const https = require('https');
 const crypto = require('crypto');
 const classify = (values, expected) => {
-  const value = values.length === 1 ? values[0].toLowerCase() : '';
+  const value = values.length === 1 ? values[0] : '';
   const valid = /^[0-9a-f]{64}$/.test(value);
   return valid && value === expected.a ? 'a' : valid && value === expected.b ? 'b' : 'none';
 };
@@ -15,7 +15,7 @@ if (process.argv.includes('--self-test')) {
     ['c'.repeat(64)], ['a'.repeat(64), 'b'.repeat(64)], ['a'.repeat(64) + ', ' + 'b'.repeat(64)]]) {
     assert.strictEqual(classify(values, expected), 'none');
   }
-  assert.strictEqual(classify(['A'.repeat(64)], expected), 'a');
+  assert.strictEqual(classify(['A'.repeat(64)], expected), 'none');
   process.stdout.write('observer-classification: passed\n');
   process.exit(0);
 }

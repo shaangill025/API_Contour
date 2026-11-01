@@ -28,21 +28,27 @@ def load(name, path):
     return module
 
 gateway = load('gateway_config', 'deploy/gateway/config.py')
+native_envoy = load('native_envoy', 'deploy/pilot/native_envoy.py')
 pilot = load('pilot_bounded', 'scripts/test-native-pilot.py')
 HEADER = 'x-contour-origin-witness'
 
 
 def configuration():
-    cfg = gateway.config('observer', 9443, 'observer.test')
+    # Use the production V2 configuration; adapt only fixture addresses and TLS files.
+    cfg = native_envoy.config(origin_v2=True)
+    cfg['static_resources']['listeners'][0]['address']['socket_address']['port_value'] = 8443
     listener = cfg['static_resources']['listeners'][0]['filter_chains'][0]
-    down = listener['transport_socket']['typed_config']
-    down['require_client_certificate'] = True
-    down['common_tls_context']['validation_context'] = {'trusted_ca': {'filename': '/fixture/ca.pem'}}
-    hcm = listener['filters'][0]['typed_config']
-    hcm['route_config']['request_headers_to_add'] = [{
-        'header': {'key': HEADER, 'value': '%DOWNSTREAM_PEER_FINGERPRINT_256%'},
-        'append_action': 'OVERWRITE_IF_EXISTS_OR_ADD', 'keep_empty_value': True}]
-    upstream = cfg['static_resources']['clusters'][0]['transport_socket']['typed_config']['common_tls_context']
+    down = listener['transport_socket']['typed_config']['common_tls_context']
+    down['tls_certificates'] = [{'certificate_chain': {'filename': '/fixture/down.pem'},
+                                 'private_key': {'filename': '/fixture/down.key'}}]
+    down['validation_context'] = {'trusted_ca': {'filename': '/fixture/ca.pem'}}
+    cluster = cfg['static_resources']['clusters'][0]
+    cluster['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['socket_address']['address'] = 'observer'
+    transport = cluster['transport_socket']['typed_config']
+    transport['sni'] = 'observer.test'
+    upstream = transport['common_tls_context']
+    upstream['validation_context']['trusted_ca']['filename'] = '/fixture/ca.pem'
+    upstream['validation_context']['match_typed_subject_alt_names'][0]['matcher']['exact'] = 'observer.test'
     upstream['tls_certificates'] = [{'certificate_chain': {'filename': '/fixture/forwarder.pem'},
                                      'private_key': {'filename': '/fixture/forwarder.key'}}]
     return cfg
@@ -54,7 +60,7 @@ def cert_hash(path):
 
 def classify(values, expected):
     # Mirrors the observer's strict cardinality and syntax checks for offline tests.
-    value = values[0].lower() if len(values) == 1 else ''
+    value = values[0] if len(values) == 1 else ''
     return next((name for name, digest in expected.items()
                  if len(value) == 64 and all(c in '0123456789abcdef' for c in value)
                  and value == digest), 'none')
@@ -266,7 +272,7 @@ class OfflineTests(unittest.TestCase):
         expected = {'a': 'a'*64, 'b': 'b'*64}
         for values in ([], [''], ['x'*64], ['a'*63], ['c'*64], ['a'*64, 'b'*64], ['a'*64+', '+ 'b'*64]):
             self.assertEqual(classify(values, expected), 'none')
-        self.assertEqual(classify(['A'*64], expected), 'a')
+        self.assertEqual(classify(['A'*64], expected), 'none')
 
     def test_missing_certificate_requires_specific_tls_alert(self):
         driver = Driver(Path('/unused'))
