@@ -22,10 +22,10 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         body = copy.deepcopy(raw)
         body['wire_version'] = 2
         body['records'] = [dict(record=record, origin_witness={'kind': 'unattributed'}) for record in raw['records']]
-        check(body, status='accepted', v2=True)
-        return body
+        receipt = check(body, status='accepted', v2=True)
+        return body, receipt
 
-    before_17 = basic_body('catalog_basic_before_17')
+    before_17, before_receipt = basic_body('catalog_basic_before_17')
     v1_before_17, _, _ = setup('catalog_v1_before_17')
     check(v1_before_17, status='accepted')
     # Isolated component fixture only: this sparse order is not a deployment
@@ -34,7 +34,7 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         execute((ROOT / migration).read_text())
     if execute("SELECT string_agg(version::text,',' ORDER BY version) FROM contour.schema_migrations;") != '1,2,3,4,13,14,15,16,17' or execute("SELECT to_regprocedure('contour.verify_origin_batch_proofs(uuid,uuid,uuid,bytea)') IS NOT NULL;") != 't':
         raise AssertionError('origin fixture migration failed')
-    after_17 = basic_body('catalog_basic_after_17')
+    after_17, after_receipt = basic_body('catalog_basic_after_17')
     execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
     probe = Path(environment['CONTOUR_ORIGIN_PROBE'])
     if not probe.is_file():
@@ -61,6 +61,57 @@ def run_cases(container, execute, setup, check, port, directory, environment):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=3)
+
+    def scoped(candidate):
+        return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (candidate['tenant_id'],candidate['collector_id'],candidate['batch_id'])
+    def retained(candidate):
+        where = scoped(candidate)
+        return execute("SELECT b.receipt_id::text,floor(extract(epoch FROM b.accepted_at)*1000000)::bigint,b.record_count,encode(b.request_digest,'hex'),encode(sha256(p.checked_batch),'hex'),(SELECT count(*) FROM contour.ingestion_v2_metadata WHERE %s),(SELECT count(*) FROM contour.origin_proofs WHERE %s),(SELECT count(*) FROM contour.origin_batch_proof_completion WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s),COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id=b.tenant_id),0) FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.%s;" % (where,where,where,where,where.replace(' AND ',' AND b.')))
+
+    def quota(candidate):
+        return execute("SELECT COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'),0);" % candidate['tenant_id'])
+
+    # Both batches came from Basic ingress. Their immutable ordinary wire bytes
+    # intentionally differ from the origin canonical serialization.
+    for candidate, original_receipt in [(before_17,before_receipt),(after_17,after_receipt)]:
+        before = retained(candidate)
+        stored = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + scoped(candidate))
+        canonical = json.dumps(candidate,sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode().hex()
+        if stored == canonical:
+            raise AssertionError('Basic wire unexpectedly canonical; retry reproducer invalid')
+        if submit(candidate,status='duplicate') != original_receipt:
+            raise AssertionError('Basic to origin duplicate changed original receipt')
+        changed = copy.deepcopy(candidate); changed['records'][0]['record']['count'] += 1
+        submit(changed,'Conflict')
+        if retained(candidate) != before:
+            raise AssertionError('Basic to origin retries changed receipt, storage, metadata, or quota')
+
+    # Reverse interoperability: an unattributed origin admission can be retried
+    # by Basic ingress with the same receipt and no added proof charge.
+    raw_reverse, _, _ = setup('origin_unattributed_to_basic')
+    reverse = copy.deepcopy(raw_reverse); reverse['wire_version'] = 2
+    reverse['records'] = [dict(record=r,origin_witness={'kind':'unattributed'}) for r in raw_reverse['records']]
+    before_quota = quota(reverse)
+    original_receipt = submit(reverse,status='accepted'); before = retained(reverse)
+    if quota(reverse) != before_quota:
+        raise AssertionError('unattributed origin admission charged proof quota')
+    if check(reverse,status='duplicate',v2=True) != original_receipt:
+        raise AssertionError('origin to Basic duplicate changed original receipt')
+    changed = copy.deepcopy(reverse); changed['records'][0]['record']['count'] += 1
+    check(changed,'Conflict',v2=True)
+    if retained(reverse) != before:
+        raise AssertionError('origin to Basic retry changed retained history or quota')
+
+    # Rechecking an old Basic batch still requires current collector authority.
+    raw_revoked, _, _ = setup('basic_origin_retry_revoked')
+    revoked = copy.deepcopy(raw_revoked); revoked['wire_version'] = 2
+    revoked['records'] = [dict(record=r,origin_witness={'kind':'unattributed'}) for r in raw_revoked['records']]
+    check(revoked,status='accepted',v2=True); submit(revoked,status='duplicate')
+    before = retained(revoked)
+    execute("BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.lock_collector('%s','%s'); UPDATE contour.collector_authorization SET enabled=false,revoked_at=clock_timestamp() WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (revoked['tenant_id'],revoked['tenant_id'],revoked['collector_id'],revoked['tenant_id'],revoked['collector_id']))
+    submit(revoked,'Revoked')
+    if retained(revoked) != before:
+        raise AssertionError('revoked retry changed retained history or quota')
 
     raw, collector, source = setup('origin_facade')
     tenant = raw['tenant_id']
@@ -119,6 +170,30 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_cases'](execute, body, port, directory, environment, expected_origins)
     if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
         runpy.run_path(str(ROOT / 'scripts/test-human-origin.py'))['run_cases'](execute, submit, body, expected_origins, port, directory, environment)
+
+    # Deliberate owner-only corruption demonstrates the absence verifier fails
+    # closed on each retained history component, even before digest conflicts.
+    candidate = before_17; target_scope = scoped(candidate)
+    original_record = candidate['records'][0]['record']['record_id']
+    changed = copy.deepcopy(candidate); changed['records'][0]['record']['count'] += 1
+    for table in ('origin_proofs','origin_batch_proof_completion','catalog_origin_projection'):
+        before = retained(candidate)
+        overrides = "jsonb_build_object('collector_id','%s','batch_id','%s'" % (candidate['collector_id'],candidate['batch_id'])
+        if table in ('origin_proofs','catalog_origin_projection'):
+            overrides += ",'record_id','%s'" % original_record
+        if table == 'origin_proofs':
+            overrides += ",'proof_id','00000000-0000-4000-8000-00000000ff01'"
+        overrides += ')'
+        statement = "INSERT INTO contour.%s SELECT (jsonb_populate_record(NULL::contour.%s,to_jsonb(p) || %s)).* FROM contour.%s p WHERE p.%s LIMIT 1 RETURNING 1;" % (table,table,overrides,table,where.replace(' AND ',' AND p.'))
+        try:
+            if execute('BEGIN; SET LOCAL session_replication_role=replica; ' + statement + ' COMMIT;') != '1':
+                raise AssertionError('absence-corruption fixture did not insert exactly one row')
+            submit(candidate,'Corrupt')
+            submit(changed,'Corrupt')
+        finally:
+            execute('BEGIN; SET LOCAL session_replication_role=replica; DELETE FROM contour.' + table + ' WHERE ' + target_scope + '; COMMIT;')
+        if retained(candidate) != before:
+            raise AssertionError('absence-corruption fixture changed retained Basic batch')
     changed = copy.deepcopy(body)
     changed['records'][0]['record']['count'] += 1
     submit(changed, 'Conflict')
@@ -228,6 +303,26 @@ def run_cases(container, execute, setup, check, port, directory, environment):
             raise AssertionError('origin policy expiry timed out')
         time.sleep(0.1)
     submit(expired, 'Policy')
+
+    basic_expiry = []
+    def short_basic_policy(policy):
+        micros = int(execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;'))
+        basic_expiry.append(datetime.datetime.fromtimestamp(micros / 1000000, datetime.timezone.utc) + datetime.timedelta(seconds=5))
+        policy['expires_at'] = basic_expiry[-1].isoformat(timespec='microseconds').replace('+00:00', 'Z')
+    basic_expired, _, _ = setup('basic_origin_retry_expiry', short_basic_policy)
+    basic_expired['wire_version'] = 2
+    basic_expired['records'] = [dict(record=record, origin_witness={'kind':'unattributed'}) for record in basic_expired['records']]
+    check(basic_expired, status='accepted', v2=True)
+    submit(basic_expired, status='duplicate')
+    before_expiry = retained(basic_expired)
+    until = time.monotonic() + 20
+    while execute("SELECT clock_timestamp() >= '%s'::timestamptz;" % basic_expiry[0].isoformat()) != 't':
+        if time.monotonic() >= until:
+            raise AssertionError('Basic to origin policy expiry timed out')
+        time.sleep(0.1)
+    submit(basic_expired, 'Policy')
+    if retained(basic_expired) != before_expiry:
+        raise AssertionError('expired retry changed retained history or quota')
 
     # No current origin liveness is needed on exact retry, but collector authority
     # remains mandatory. Check revocation even after retained proof corruption.
