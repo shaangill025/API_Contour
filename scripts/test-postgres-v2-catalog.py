@@ -81,3 +81,199 @@ def run_cases(execute, accepted, check, counts):
     scope = seed('scope', wrong_scope=True)
     check(scope, 'Corrupt')
     counts(scope, 0, 0)
+
+
+def run_origin_cases(execute, body, port, directory, environment, expected_origins):
+    """Exercise committed proof history using the real restricted catalog login.
+
+    Called after origin admission and lifecycle closure, before proof damage in
+    the separate origin-ingress fixture. This function does not create proofs.
+    """
+    import subprocess
+
+    target = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--format-version', '1', '--no-deps', '--offline'],
+        text=True, timeout=15))['target_directory']
+    probe = str(Path(target) / 'debug/examples/catalog_probe')
+    scope = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (
+        body['tenant_id'], body['collector_id'], body['batch_id'])
+
+    def check(wanted):
+        process = subprocess.run([probe, str(port), str(directory / 'ca.crt'),
+            body['batch_id'], wanted, body['tenant_id'], body['collector_id'], '5000'],
+            input='\n', capture_output=True, text=True, env=environment, timeout=15)
+        if process.returncode or process.stderr or process.stdout.strip() != wanted:
+            raise AssertionError('restricted origin catalog result differs: ' + process.stdout + process.stderr)
+
+    def counts(wanted):
+        actual = execute("SELECT (SELECT count(*) FROM contour.catalog_processed_batches WHERE %s),(SELECT count(*) FROM contour.observation_windows WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s);" % (scope, scope, scope))
+        if actual != wanted:
+            raise AssertionError('origin catalog atomic counts differ: ' + actual)
+
+    if execute("SELECT has_table_privilege('contour_catalog_tls','contour.origin_proofs','SELECT'),has_function_privilege('contour_catalog_tls','contour.catalog_origin_mapping(uuid,uuid,uuid,bytea)','EXECUTE');") != 'f|t':
+        raise AssertionError('catalog proof privilege boundary differs')
+    marker = execute("SELECT encode(proof_set_digest,'hex') FROM contour.origin_batch_proof_completion WHERE %s;" % scope)
+    execute("BEGIN; ALTER TABLE contour.origin_batch_proof_completion DISABLE TRIGGER origin_batch_completion_immutable; UPDATE contour.origin_batch_proof_completion SET proof_set_digest=decode(repeat('00',32),'hex') WHERE %s; ALTER TABLE contour.origin_batch_proof_completion ENABLE TRIGGER origin_batch_completion_immutable; COMMIT;" % scope)
+    check('Corrupt')
+    counts('0|0|0')
+    execute("BEGIN; ALTER TABLE contour.origin_batch_proof_completion DISABLE TRIGGER origin_batch_completion_immutable; UPDATE contour.origin_batch_proof_completion SET proof_set_digest=decode('%s','hex') WHERE %s; ALTER TABLE contour.origin_batch_proof_completion ENABLE TRIGGER origin_batch_completion_immutable; COMMIT;" % (marker, scope))
+    execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_v2_metadata SET attribution_class='unattributed' WHERE %s AND attribution_class='verified_origin_v1'; COMMIT;" % scope)
+    check('Corrupt')
+    counts('0|0|0')
+    execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_v2_metadata SET attribution_class='verified_origin_v1' WHERE %s AND record_id IN (SELECT record_id FROM contour.origin_proofs WHERE %s); COMMIT;" % (scope, scope))
+    proof = execute("SELECT encode(canonical_proof,'hex') FROM contour.origin_proofs WHERE %s ORDER BY record_id LIMIT 1;" % scope)
+    execute("BEGIN; ALTER TABLE contour.origin_proofs DISABLE TRIGGER origin_proof_immutable; UPDATE contour.origin_proofs SET canonical_proof=canonical_proof || decode('00','hex') WHERE %s AND record_id=(SELECT min(record_id::text)::uuid FROM contour.origin_proofs WHERE %s); ALTER TABLE contour.origin_proofs ENABLE TRIGGER origin_proof_immutable; COMMIT;" % (scope, scope))
+    check('Corrupt')
+    counts('0|0|0')
+    execute("BEGIN; ALTER TABLE contour.origin_proofs DISABLE TRIGGER origin_proof_immutable; UPDATE contour.origin_proofs SET canonical_proof=decode('%s','hex') WHERE %s AND record_id=(SELECT min(record_id::text)::uuid FROM contour.origin_proofs WHERE %s); ALTER TABLE contour.origin_proofs ENABLE TRIGGER origin_proof_immutable; COMMIT;" % (proof, scope, scope))
+    execute("CREATE FUNCTION contour.catalog_origin_fixture_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture projection failure'; END $$; CREATE TRIGGER catalog_origin_fixture_fail BEFORE INSERT ON contour.catalog_origin_projection FOR EACH ROW EXECUTE FUNCTION contour.catalog_origin_fixture_fail();")
+    try:
+        check('Database')
+        counts('0|0|0')
+    finally:
+        execute('DROP TRIGGER catalog_origin_fixture_fail ON contour.catalog_origin_projection; DROP FUNCTION contour.catalog_origin_fixture_fail();')
+    check('Processed')
+    counts('1|3|2')
+    # Execute the attempted writes as the actual restricted catalog login. A
+    # missing privilege or a 23514/42501 verifier rejection is asserted in SQL.
+    execute("""BEGIN; SET LOCAL ROLE contour_catalog_tls;
+      SELECT set_config('apicontour.tenant_id','%(tenant)s',true);
+      DO $$ DECLARE payload bytea; rejected boolean; BEGIN
+        SELECT checked_batch INTO STRICT payload FROM contour.ingestion_payloads WHERE %(scope)s;
+        rejected := false;
+        BEGIN
+          INSERT INTO contour.catalog_origin_projection
+            SELECT tenant_id,collector_id,batch_id,record_id,
+              '00000000-0000-0000-0000-00000000ffff'::uuid,
+              project_id,service_id,environment_id,deployment_id,
+              '00000000-0000-0000-0000-00000000ffff'::uuid
+            FROM contour.observation_windows WHERE %(scope)s LIMIT 1;
+        EXCEPTION WHEN insufficient_privilege THEN rejected := true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'forged direct projection accepted'; END IF;
+        rejected := false;
+        BEGIN
+          PERFORM * FROM contour.catalog_origin_mapping('%(tenant)s','%(collector)s','%(batch)s',payload || decode('20','hex'));
+        EXCEPTION WHEN check_violation THEN rejected := true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'forged payload accepted'; END IF;
+        rejected := false;
+        BEGIN
+          PERFORM * FROM contour.catalog_origin_mapping('bbbbbbbb-0000-0000-0000-000000000000','%(collector)s','%(batch)s',payload);
+        EXCEPTION WHEN insufficient_privilege THEN rejected := true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'forged tenant accepted'; END IF;
+        rejected := false;
+        BEGIN
+          PERFORM contour.project_catalog_origins('%(tenant)s','%(collector)s','%(batch)s',
+            convert_to(replace(convert_from(payload,'UTF8'),'%(record)s','00000000-0000-0000-0000-00000000ffff'),'UTF8'));
+        EXCEPTION WHEN check_violation THEN rejected := true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'forged record accepted'; END IF;
+      END $$; ROLLBACK;""" % dict(tenant=body['tenant_id'], collector=body['collector_id'],
+                                 batch=body['batch_id'], record=body['records'][0]['record']['record_id'], scope=scope))
+    execute("BEGIN; SET LOCAL ROLE contour_catalog_tls; SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',true); DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.catalog_origin_projection WHERE %s) THEN RAISE EXCEPTION 'cross-tenant projection visible'; END IF; END $$; ROLLBACK;" % scope)
+    rows = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.%s ORDER BY p.record_id) x;" % scope.replace(' AND ', ' AND p.')))
+    target = body['records'][0]['record']
+    for row, origin in zip(rows, expected_origins):
+        for field, value in origin.items():
+            if row[field] != value:
+                raise AssertionError('origin projection mismatch: ' + field)
+        for field in ('project_id', 'service_id', 'environment_id', 'deployment_id'):
+            if row[field] != target[field]:
+                raise AssertionError('API target projection mismatch: ' + field)
+    if len(rows) != 2 or rows[0]['proof_id'] == rows[1]['proof_id']:
+        raise AssertionError('expected two distinct proof identities')
+    check('AlreadyProcessed')
+    execute("BEGIN; ALTER TABLE contour.catalog_origin_projection DISABLE TRIGGER catalog_origin_immutable; UPDATE contour.catalog_origin_projection SET instance_id='00000000-0000-0000-0000-00000000ffff' WHERE %s; ALTER TABLE contour.catalog_origin_projection ENABLE TRIGGER catalog_origin_immutable; COMMIT;" % scope)
+    check('Corrupt')
+    counts('1|3|2')
+    # The fixture is subsequently used by ingress corruption checks, not catalog.
+    # Restore the exact retained origin identities before continuing.
+    for row in rows:
+        execute("BEGIN; ALTER TABLE contour.catalog_origin_projection DISABLE TRIGGER catalog_origin_immutable; UPDATE contour.catalog_origin_projection SET instance_id='%s' WHERE %s AND record_id='%s'; ALTER TABLE contour.catalog_origin_projection ENABLE TRIGGER catalog_origin_immutable; COMMIT;" % (row['instance_id'], scope, row['record_id']))
+    check('AlreadyProcessed')
+    print('Restricted catalog origin projection, historical retry, corruption and rollback assertions passed', flush=True)
+
+
+def run_basic_compat_cases(execute, bodies, origin_body, port, directory, environment):
+    """Real Basic V2 admission before/after 17 retains ordinary wire encoding."""
+    import subprocess
+
+    target = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--format-version', '1', '--no-deps', '--offline'],
+        text=True, timeout=15))['target_directory']
+    probe = str(Path(target) / 'debug/examples/catalog_probe')
+
+    def scope(body):
+        return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (
+            body['tenant_id'], body['collector_id'], body['batch_id'])
+
+    def check(body, wanted):
+        process = subprocess.run([probe, str(port), str(directory / 'ca.crt'),
+            body['batch_id'], wanted, body['tenant_id'], body['collector_id'], '5000'],
+            input='\n', capture_output=True, text=True, env=environment, timeout=15)
+        if process.returncode or process.stderr or process.stdout.strip() != wanted:
+            raise AssertionError('basic V2 catalog result differs: ' + process.stdout + process.stderr)
+
+    for body in bodies:
+        where = scope(body)
+        row = execute("SELECT encode(p.checked_batch,'hex'),encode(b.request_digest,'hex') FROM contour.ingestion_payloads p JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE p." + where.replace(' AND ', ' AND p.'))
+        wire_hex, digest = row.split('|')
+        wire = bytes.fromhex(wire_hex)
+        canonical = json.dumps(json.loads(wire), sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+        if wire == canonical or hashlib.sha256(b'apicontour/batch/2\n' + canonical).hexdigest() != digest:
+            raise AssertionError('Basic V2 ordinary/canonical encoding fixture differs')
+        if hashlib.sha256(b'apicontour/batch/2\n' + wire).hexdigest() == digest:
+            raise AssertionError('ordinary wire unexpectedly has canonical digest')
+        for table in ('origin_proofs', 'origin_batch_proof_completion'):
+            # Preserve the source proof; manufacture only a damaged scoped key.
+            execute("BEGIN; SET LOCAL session_replication_role=replica; INSERT INTO contour.%s SELECT (jsonb_populate_record(NULL::contour.%s,to_jsonb(x) || jsonb_build_object('tenant_id','%s','collector_id','%s','batch_id','%s','proof_id','00000000-0000-0000-0000-00000000ffff'))).* FROM contour.%s x WHERE %s LIMIT 1; COMMIT;" % (table, table, body['tenant_id'], body['collector_id'], body['batch_id'], table, scope(origin_body)))
+            check(body, 'Corrupt')
+            if execute("SELECT (SELECT count(*) FROM contour.catalog_processed_batches WHERE %s),(SELECT count(*) FROM contour.observation_windows WHERE %s);" % (where, where)) != '0|0':
+                raise AssertionError('corrupt origin history claimed Basic V2 batch')
+            execute('BEGIN; SET LOCAL session_replication_role=replica; DELETE FROM contour.' + table + ' WHERE ' + where + '; COMMIT;')
+        check(body, 'Processed')
+        check(body, 'AlreadyProcessed')
+        # A fabricated projection on an already processed unattributed record
+        # must prevent the AlreadyProcessed success path.
+        record = body['records'][0]['record']['record_id']
+        values = (body['tenant_id'], body['collector_id'], body['batch_id'], record)
+        execute("BEGIN; SET LOCAL session_replication_role=replica; INSERT INTO contour.catalog_origin_projection VALUES ('%s','%s','%s','%s','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff'); COMMIT;" % values)
+        check(body, 'Corrupt')
+        execute('BEGIN; SET LOCAL session_replication_role=replica; DELETE FROM contour.catalog_origin_projection WHERE ' + where + '; COMMIT;')
+        check(body, 'AlreadyProcessed')
+    print('Basic V2 ordinary-wire compatibility before and after schema 17 passed', flush=True)
+
+
+def run_v1_origin_absence_cases(execute, body, origin_body, port, directory, environment):
+    """V1 never acquires origin history, including before its first claim."""
+    import subprocess
+
+    target = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--format-version', '1', '--no-deps', '--offline'],
+        text=True, timeout=15))['target_directory']
+    probe = str(Path(target) / 'debug/examples/catalog_probe')
+
+    def scope(item):
+        return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (
+            item['tenant_id'], item['collector_id'], item['batch_id'])
+
+    def check(wanted):
+        process = subprocess.run([probe, str(port), str(directory / 'ca.crt'),
+            body['batch_id'], wanted, body['tenant_id'], body['collector_id'], '5000'],
+            input='\n', capture_output=True, text=True, env=environment, timeout=15)
+        if process.returncode or process.stderr or process.stdout.strip() != wanted:
+            raise AssertionError('V1 origin absence result differs: ' + process.stdout + process.stderr)
+
+    where = scope(body)
+    for table in ('origin_proofs', 'origin_batch_proof_completion', 'catalog_origin_projection'):
+        if table == 'catalog_origin_projection':
+            values = (body['tenant_id'], body['collector_id'], body['batch_id'], body['records'][0]['record_id'])
+            statement = "INSERT INTO contour.catalog_origin_projection VALUES ('%s','%s','%s','%s','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff','00000000-0000-0000-0000-00000000ffff')" % values
+        else:
+            statement = "INSERT INTO contour.%s SELECT (jsonb_populate_record(NULL::contour.%s,to_jsonb(x) || jsonb_build_object('tenant_id','%s','collector_id','%s','batch_id','%s','proof_id','00000000-0000-0000-0000-00000000ffff'))).* FROM contour.%s x WHERE %s LIMIT 1" % (table, table, body['tenant_id'], body['collector_id'], body['batch_id'], table, scope(origin_body))
+        execute('BEGIN; SET LOCAL session_replication_role=replica; ' + statement + '; COMMIT;')
+        check('Corrupt')
+        if execute("SELECT (SELECT count(*) FROM contour.catalog_processed_batches WHERE %s),(SELECT count(*) FROM contour.observation_windows WHERE %s);" % (where, where)) != '0|0':
+            raise AssertionError('corrupt origin history claimed V1 batch')
+        execute('BEGIN; SET LOCAL session_replication_role=replica; DELETE FROM contour.' + table + ' WHERE ' + where + '; COMMIT;')
+    check('Processed')
+    check('AlreadyProcessed')
+    print('V1 origin absence before catalog claim passed', flush=True)

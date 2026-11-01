@@ -17,12 +17,24 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         raise AssertionError('unexpected origin fixture input ledger: ' + ledger)
     if execute("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='contour_origin_ingress');") != 'f':
         raise AssertionError('origin role already exists')
+    def basic_body(name):
+        raw, _, _ = setup(name)
+        body = copy.deepcopy(raw)
+        body['wire_version'] = 2
+        body['records'] = [dict(record=record, origin_witness={'kind': 'unattributed'}) for record in raw['records']]
+        check(body, status='accepted', v2=True)
+        return body
+
+    before_17 = basic_body('catalog_basic_before_17')
+    v1_before_17, _, _ = setup('catalog_v1_before_17')
+    check(v1_before_17, status='accepted')
     # Isolated component fixture only: this sparse order is not a deployment
     # sequence. Production applies 1..14, then 15, 16, and 17.
     for migration in ['db/migrations/0013_instance_registry.sql', 'db/migrations/0014_observation_evidence.sql', 'db/opt-in-migrations/0015_origin_lifecycle.sql', 'db/provision_origin_ingress.sql', 'db/opt-in-migrations/0017_origin_proofs.sql']:
         execute((ROOT / migration).read_text())
     if execute("SELECT string_agg(version::text,',' ORDER BY version) FROM contour.schema_migrations;") != '1,2,3,4,13,14,15,16,17' or execute("SELECT to_regprocedure('contour.verify_origin_batch_proofs(uuid,uuid,uuid,bytea)') IS NOT NULL;") != 't':
         raise AssertionError('origin fixture migration failed')
+    after_17 = basic_body('catalog_basic_after_17')
     execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
     probe = Path(environment['CONTOUR_ORIGIN_PROBE'])
     if not probe.is_file():
@@ -57,9 +69,11 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     credentials = ['00000000-0000-0000-0000-00000000a301', '00000000-0000-0000-0000-00000000a302']
     grants = ['00000000-0000-0000-0000-00000000a401', '00000000-0000-0000-0000-00000000a402']
     fingerprints = ['11'*32, '22'*32]
-    for instance, lifecycle, credential, grant, fingerprint in zip(instance_ids, lifecycle_ids, credentials, grants, fingerprints):
-        execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s');" % (tenant, tenant, ITEM, ITEM, ITEM, ITEM, instance))
-        execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex'));" % (tenant, tenant, lifecycle, ITEM, ITEM, ITEM, ITEM, instance))
+    origin_scopes = [["00000000-0000-0000-0000-%012x" % (0xb000 + i * 16 + j) for j in range(4)] for i in range(2)]
+    for instance, lifecycle, credential, grant, fingerprint, origin in zip(instance_ids, lifecycle_ids, credentials, grants, fingerprints, origin_scopes):
+        project, service, environment_id, deployment = origin
+        execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.projects VALUES ('%s','%s'); INSERT INTO contour.services VALUES ('%s','%s','%s'); INSERT INTO contour.environments VALUES ('%s','%s','%s'); INSERT INTO contour.deployments VALUES ('%s','%s','%s','%s','%s'); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s');" % (tenant, tenant, project, tenant, service, project, tenant, environment_id, project, tenant, deployment, project, service, environment_id, tenant, project, service, environment_id, deployment, instance))
+        execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex'));" % (tenant, tenant, lifecycle, project, service, environment_id, deployment, instance))
         execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex'));" % (tenant, tenant, credential, lifecycle, fingerprint))
         execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant, tenant, grant, lifecycle, collector, source, ITEM, ITEM, ITEM, ITEM))
     body = copy.deepcopy(raw)
@@ -73,6 +87,8 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         body['records'].append({'record': record, 'origin_witness': witness})
     where = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (tenant, collector, body['batch_id'])
     receipt = submit(body, status='accepted')
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_basic_compat_cases'](execute, [before_17, after_17], body, port, directory, environment)
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_v1_origin_absence_cases'](execute, v1_before_17, body, port, directory, environment)
     if execute("SELECT string_agg(attribution_class,',' ORDER BY record_id) FROM contour.ingestion_v2_metadata WHERE " + where) != 'verified_origin_v1,verified_origin_v1,unattributed':
         raise AssertionError('origin metadata classes differ')
     stored = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + where)
@@ -89,6 +105,8 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.end_origin('%s','lifecycle_closed','%s');" % (tenant, tenant, lifecycle_ids[0]))
     if submit(body, status='duplicate') != receipt or execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'" % tenant) != usage:
         raise AssertionError('closed-origin retry changed receipt or quota')
+    expected_origins = [dict(zip(('origin_project_id', 'origin_service_id', 'origin_environment_id', 'origin_deployment_id', 'instance_id'), origin + [instance])) for origin, instance in zip(origin_scopes, instance_ids)]
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_cases'](execute, body, port, directory, environment, expected_origins)
     changed = copy.deepcopy(body)
     changed['records'][0]['record']['count'] += 1
     submit(changed, 'Conflict')

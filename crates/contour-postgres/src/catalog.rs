@@ -144,6 +144,7 @@ impl ConnectedDatabase {
                     if row.try_get::<_, i16>(0).map_err(|_| CatalogError::Corrupt)? != 1 {
                         return Err(CatalogError::Corrupt);
                     }
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
                     return Ok(CatalogStatus::AlreadyProcessed);
                 }
                 // Processor version identifies the projection format, which remains
@@ -153,10 +154,19 @@ impl ConnectedDatabase {
                         check_deadline(deadline)?;
                         store(&transaction, batch_id, observation).await?;
                     },
-                    LoadedBatch::V2(batch) => for (observation, _) in batch.operation_observations() {
+                    LoadedBatch::V2(batch, _, _) => for (observation, _) in batch.operation_observations() {
                         check_deadline(deadline)?;
                         store(&transaction, batch_id, observation).await?;
                     },
+                }
+                if let LoadedBatch::V2(loaded, payload, true) = &batch {
+                    if has_origin_witness(loaded) {
+                    transaction.query_one("SELECT contour.project_catalog_origins($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+                    }
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
+                }
+                if matches!(&batch, LoadedBatch::V1(_)) {
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
                 }
                 transaction.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(database_error)?;
                 check_deadline(deadline)?;
@@ -210,7 +220,7 @@ fn uuid(value: &str) -> bool {
 }
 enum LoadedBatch {
     V1(Batch),
-    V2(BatchV2),
+    V2(BatchV2, Vec<u8>, bool),
 }
 
 async fn load(
@@ -253,7 +263,23 @@ async fn load(
             return Err(CatalogError::Corrupt);
         }
         validate_v2_metadata(transaction, &batch, expected, batch_id).await?;
-        return Ok(LoadedBatch::V2(batch));
+        let available: bool = transaction.query_one("SELECT to_regprocedure('contour.catalog_origin_mapping(uuid,uuid,uuid,bytea)') IS NOT NULL", &[]).await.map_err(database_error)?.try_get(0).map_err(|_| CatalogError::Corrupt)?;
+        let expected_proofs = batch
+            .operation_observations()
+            .filter(|(_, witness)| !matches!(witness, OriginWitness::Unattributed))
+            .count();
+        if available && expected_proofs == 0 {
+            verify_origin_absence(transaction, expected, batch_id).await?;
+        } else if available {
+            // Read-only verification of the entire immutable proof set precedes the claim.
+            let rows = transaction.query("SELECT record_id::text FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+            if rows.len() != expected_proofs {
+                return Err(CatalogError::Corrupt);
+            }
+        } else if expected_proofs != 0 {
+            return Err(CatalogError::Corrupt);
+        }
+        return Ok(LoadedBatch::V2(batch, payload.to_vec(), available));
     }
     let batch = Batch::from_wire_json(payload).map_err(|_| CatalogError::Corrupt)?;
     if batch.tenant_id() != expected[0]
@@ -268,6 +294,9 @@ async fn load(
     {
         return Err(CatalogError::Corrupt);
     }
+    if origin_schema_available(transaction).await? {
+        verify_origin_absence(transaction, expected, batch_id).await?;
+    }
     Ok(LoadedBatch::V1(batch))
 }
 
@@ -279,7 +308,7 @@ async fn validate_v2_metadata(
 ) -> Result<(), CatalogError> {
     // Inspect every row, including extras, and recheck bindings even if storage
     // constraints were bypassed by privileged repair.
-    let rows = transaction.query("SELECT m.record_id::text,m.source_id::text,m.project_id::text,m.service_id::text,m.environment_id::text,m.deployment_id::text,CASE WHEN m.policy_revision BETWEEN 1 AND 18446744073709551615 AND m.policy_revision=trunc(m.policy_revision) THEN trunc(m.policy_revision)::text END,CASE WHEN octet_length(m.parser_profile) BETWEEN 1 AND 64 THEN m.parser_profile END,CASE WHEN octet_length(m.attribution_class)=12 THEN m.attribution_class END,(m.digest_version=2 AND m.request_digest=b.request_digest AND m.accepted_at=b.accepted_at AND isfinite(m.accepted_at)) FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE m.tenant_id=$1::text::uuid AND m.collector_id=$2::text::uuid AND m.batch_id=$3::text::uuid LIMIT 501", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
+    let rows = transaction.query("SELECT m.record_id::text,m.source_id::text,m.project_id::text,m.service_id::text,m.environment_id::text,m.deployment_id::text,CASE WHEN m.policy_revision BETWEEN 1 AND 18446744073709551615 AND m.policy_revision=trunc(m.policy_revision) THEN trunc(m.policy_revision)::text END,CASE WHEN octet_length(m.parser_profile) BETWEEN 1 AND 64 THEN m.parser_profile END,CASE WHEN octet_length(m.attribution_class) IN (12,18) THEN m.attribution_class END,(m.digest_version=2 AND m.request_digest=b.request_digest AND m.accepted_at=b.accepted_at AND isfinite(m.accepted_at)) FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE m.tenant_id=$1::text::uuid AND m.collector_id=$2::text::uuid AND m.batch_id=$3::text::uuid LIMIT 501", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
     if rows.len() != batch.record_count() {
         return Err(CatalogError::Corrupt);
     }
@@ -291,9 +320,6 @@ async fn validate_v2_metadata(
         }
     }
     for (observation, witness) in batch.operation_observations() {
-        if !matches!(witness, OriginWitness::Unattributed) {
-            return Err(CatalogError::Corrupt);
-        }
         let row = by_record
             .remove(observation.record_id)
             .ok_or(CatalogError::Corrupt)?;
@@ -325,7 +351,10 @@ async fn validate_v2_metadata(
             || row
                 .try_get::<_, &str>(8)
                 .map_err(|_| CatalogError::Corrupt)?
-                != "unattributed"
+                != match witness {
+                    OriginWitness::Unattributed => "unattributed",
+                    OriginWitness::DownstreamMtlsLeafSha256V1 { .. } => "verified_origin_v1",
+                }
             || !row
                 .try_get::<_, bool>(9)
                 .map_err(|_| CatalogError::Corrupt)?
@@ -335,6 +364,69 @@ async fn validate_v2_metadata(
     }
     if !by_record.is_empty() {
         return Err(CatalogError::Corrupt);
+    }
+    Ok(())
+}
+fn origin_error(error: tokio_postgres::Error) -> CatalogError {
+    if error.code().is_some_and(|code| code.code() == "23514") {
+        CatalogError::Corrupt
+    } else {
+        database_error(error).into()
+    }
+}
+
+fn has_origin_witness(batch: &BatchV2) -> bool {
+    batch
+        .operation_observations()
+        .any(|(_, witness)| !matches!(witness, OriginWitness::Unattributed))
+}
+
+async fn origin_schema_available(transaction: &Transaction<'_>) -> Result<bool, CatalogError> {
+    transaction.query_one("SELECT to_regprocedure('contour.catalog_origin_mapping(uuid,uuid,uuid,bytea)') IS NOT NULL", &[]).await.map_err(database_error)?.try_get(0).map_err(|_| CatalogError::Corrupt)
+}
+
+async fn verify_origin_absence(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    batch_id: &str,
+) -> Result<(), CatalogError> {
+    transaction
+        .query_one(
+            "SELECT contour.catalog_origin_absent($1::text::uuid,$2::text::uuid,$3::text::uuid)",
+            &[&expected[0], &expected[1], &batch_id],
+        )
+        .await
+        .map_err(origin_error)?;
+    Ok(())
+}
+
+async fn verify_projection(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    batch_id: &str,
+    batch: &LoadedBatch,
+) -> Result<(), CatalogError> {
+    if let LoadedBatch::V2(loaded, payload, true) = batch {
+        if !has_origin_witness(loaded) {
+            return verify_origin_absence(transaction, expected, batch_id).await;
+        }
+        // Compare both directions so missing, extra, and altered projections fail closed.
+        let row = transaction.query_one("SELECT NOT EXISTS ((SELECT record_id,proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id FROM contour.catalog_origin_projection WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND batch_id=$3::text::uuid EXCEPT SELECT * FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)) UNION ALL (SELECT * FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4) EXCEPT SELECT record_id,proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id FROM contour.catalog_origin_projection WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND batch_id=$3::text::uuid))", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+        if !row
+            .try_get::<_, bool>(0)
+            .map_err(|_| CatalogError::Corrupt)?
+        {
+            return Err(CatalogError::Corrupt);
+        }
+        let orphan = transaction.query_one("SELECT EXISTS(SELECT 1 FROM contour.catalog_origin_projection p LEFT JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.tenant_id=$1::text::uuid AND p.collector_id=$2::text::uuid AND p.batch_id=$3::text::uuid AND w.record_id IS NULL)", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
+        if orphan
+            .try_get::<_, bool>(0)
+            .map_err(|_| CatalogError::Corrupt)?
+        {
+            return Err(CatalogError::Corrupt);
+        }
+    } else if matches!(batch, LoadedBatch::V1(_)) && origin_schema_available(transaction).await? {
+        verify_origin_absence(transaction, expected, batch_id).await?;
     }
     Ok(())
 }
