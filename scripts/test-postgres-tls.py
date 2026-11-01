@@ -133,7 +133,7 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
         if "--authority" in sys.argv:
-            run(["cargo", "build", "-p", "contour-postgres", "--example", "v2_submit_probe", "--locked", "--offline"], timeout=180)
+            run(["cargo", "build", "-p", "contour-postgres", "--example", "v2_submit_probe", "--example", "origin_submit_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
     elif "--service-import-store" in sys.argv or "--human-import" in sys.argv:
@@ -163,7 +163,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="contour-tls-") as folder:
         directory = Path(folder)
         password = secrets.token_hex(24)
-        environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password)
+        environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password, CONTOUR_ORIGIN_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_submit_probe'))
         try:
             (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
             for name in ["ca", "untrusted"]:
@@ -224,7 +224,7 @@ def main():
                 time.sleep(min(0.2,max(0,deadline-time.monotonic())))
             sql = ["docker", "exec", "-i", container, "psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "contour_fixture"]
             run(sql, "CREATE ROLE contour_tls LOGIN PASSWORD '"+password+"';")
-            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_v2_ingress_test,contour_human_reader_tls,contour_human_writer_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls,contour_approval_writer_tls,contour_comparison_writer_tls,contour_comparison_reader_tls,contour_review_writer_tls,contour_review_reader_tls all scram-sha-256\nhostssl all all all reject\n"
+            hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_v2_ingress_test,contour_origin_ingress_test,contour_human_reader_tls,contour_human_writer_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls,contour_approval_writer_tls,contour_comparison_writer_tls,contour_comparison_reader_tls,contour_review_writer_tls,contour_review_reader_tls all scram-sha-256\nhostssl all all all reject\n"
             run(["docker", "exec", "-i", container, "sh", "-c", "cat > /var/lib/postgresql/data/pg_hba.conf"], hba)
             run(sql, "SELECT pg_reload_conf();")
             bindings = json.loads(run(["docker", "inspect", container]))[0]["NetworkSettings"]["Ports"]["5432/tcp"]

@@ -50,7 +50,7 @@ fn probe() -> Result<(), &'static str> {
         .map_err(|_| "runtime failed")?
         .block_on(async {
             let mut connection = settings.connect(&trust).await.map_err(|_| "TLS failed")?;
-            if args[4] == "Contaminated" || args[4] == "RoleDenied" {
+            if args[4] == "Contaminated" || args[4] == "RoleDenied" || args[4] == "CrossRole" {
                 let expected_error = if args[4] == "Contaminated" { AuthorityError::Invalidated } else { AuthorityError::Identity };
                 if !matches!(connection.v2_ingress().await, Err(SubmitError::Authority(error)) if error == expected_error) {
                     return Err("contaminated role accepted");

@@ -160,3 +160,5 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         if mode == 'cleanup' and result != receipt:
             raise AssertionError('known COMMIT receipt lost during cleanup')
     print('Restricted TLS V2 session, metadata, retry, rejection, rollback and COMMIT fault assertions passed')
+
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
