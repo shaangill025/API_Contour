@@ -9,6 +9,7 @@ export function App() {
   const [knownOrigins, setKnownOrigins] = useState<Origin[]>([]);
   const [originFilter, setOriginFilter] = useState<Origin | null>(null);
   const originKey = (o: Origin) => [o.project_id,o.service_id,o.environment_id,o.deployment_id,o.instance_id].join('/');
+  const shortId = (id: string) => `${id.slice(0,8)}…${id.slice(-8)}`;
   const [loaded, setLoaded] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [left, setLeft] = useState('');
@@ -160,7 +161,7 @@ export function App() {
       {pending.length > 0 && <section className="panel" aria-labelledby="recovery-title"><h2 id="recovery-title">Pending recovery</h2><p>A response was not confirmed. Load the exact item to check it; no request is retried automatically.</p><ul>{pending.map(item => <li key={item.id}><strong>{item.type}</strong> <code>{item.id}</code> {item.type === 'review' ? <button className="secondary" disabled={locked} onClick={() => void reloadReview(undefined, item.id)}>Load exact review</button> : item.type === 'comparison' ? <button className="secondary" disabled={locked} onClick={() => void recoverComparison(item.id)}>Load exact comparison</button> : <span>Reselect the same file and scope to retry the exact import.</span>}</li>)}</ul></section>}
       <div className="grid">
         <section className="panel" aria-labelledby="scope-title"><p className="step">01 / SCOPE</p><h2 id="scope-title">Select an operation</h2><p>Choose the operation and direction explicitly. IDs are assigned by the server.</p>
-          {knownOrigins.length > 0 && <><p>Origin choices come from the most recently loaded page. Additional origins may exist.</p><label htmlFor="origin-filter">Origin instance filter</label><select id="origin-filter" value={originFilter ? originKey(originFilter) : ''} disabled={locked} onChange={e => { const selected = knownOrigins.find(o => originKey(o) === e.target.value) ?? null; setOriginFilter(selected); selectOperation(''); setOperations([]); setCursor(null); setLoaded(false); void loadCatalog(false, selected); }}><option value="">All origins</option>{knownOrigins.map(o => <option key={originKey(o)} value={originKey(o)}>{o.instance_id} · service {o.service_id} · project {o.project_id} · environment {o.environment_id} · deployment {o.deployment_id}</option>)}</select></>}
+          {knownOrigins.length > 0 && <><p>Origin choices come from the most recently loaded page. Additional origins may exist.</p><label htmlFor="origin-filter">Origin instance filter</label><select id="origin-filter" value={originFilter ? originKey(originFilter) : ''} disabled={locked} onChange={e => { const selected = knownOrigins.find(o => originKey(o) === e.target.value) ?? null; setOriginFilter(selected); selectOperation(''); setOperations([]); setCursor(null); setLoaded(false); void loadCatalog(false, selected); }}><option value="">All origins</option>{knownOrigins.map(o => <option key={originKey(o)} value={originKey(o)} title={originKey(o)}>{shortId(o.instance_id)} · service {shortId(o.service_id)}</option>)}</select></>}
           <label htmlFor="operation">Authorized operation</label>
           <select id="operation" value={operation?.id ?? ''} disabled={locked} onChange={e => selectOperation(e.target.value)}>
             <option value="">Select an operation…</option>
