@@ -700,6 +700,29 @@ GRANT INSERT (tenant_id,collector_id,batch_id,request_digest,digest_version,reco
     ON contour.ingestion_batches TO contour_origin_ingress;
 GRANT INSERT ON contour.ingestion_payloads,contour.ingestion_v2_metadata TO contour_origin_ingress;
 
+-- Internal writer provenance: pre-17 payloads are necessarily Basic/V1. The
+-- private transaction capability, never a caller-supplied value, determines new
+-- rows. The existing immutable_inbox trigger protects this column on update.
+ALTER TABLE contour.ingestion_payloads ADD COLUMN origin_writer_provenance boolean NOT NULL DEFAULT false;
+REVOKE INSERT ON contour.ingestion_payloads FROM contour_ingestion,contour_v2_ingress,contour_origin_ingress;
+GRANT INSERT (tenant_id,collector_id,batch_id,payload_format,checked_batch)
+    ON contour.ingestion_payloads TO contour_ingestion,contour_v2_ingress,contour_origin_ingress;
+CREATE FUNCTION contour.mark_origin_payload_provenance() RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    NEW.origin_writer_provenance:=false;
+    IF NEW.payload_format=2 AND EXISTS (SELECT 1 FROM contour.origin_ingress_context c
+      WHERE c.transaction_id=pg_catalog.txid_current() AND c.backend_pid=pg_catalog.pg_backend_pid()
+        AND c.tenant_id=NEW.tenant_id AND c.collector_id=NEW.collector_id) THEN
+        PERFORM contour.require_origin_ingress(NEW.tenant_id,NEW.collector_id);
+        NEW.origin_writer_provenance:=true;
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION contour.mark_origin_payload_provenance() FROM PUBLIC;
+CREATE TRIGGER mark_origin_payload_provenance BEFORE INSERT ON contour.ingestion_payloads
+    FOR EACH ROW EXECUTE FUNCTION contour.mark_origin_payload_provenance();
+
 -- One owner-only deferred event per transaction/batch. The event survives
 -- cleanup of the admission context and verifies the retained immutable set.
 CREATE TABLE contour.origin_pending_batch (
@@ -811,6 +834,40 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION contour.catalog_origin_absent(uuid,uuid,uuid) FROM PUBLIC,contour_origin_ingress;
 GRANT EXECUTE ON FUNCTION contour.catalog_origin_absent(uuid,uuid,uuid) TO contour_catalog_worker;
+
+-- Callers first strict-decode the retained batch and verify its digest and
+-- metadata. This returns only trusted writer provenance and confirms that an
+-- unattributed batch has no proof, completion marker or catalog projection.
+CREATE FUNCTION contour.catalog_origin_requires_canonical(tenant uuid, collector uuid, batch uuid)
+RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE origin_writer boolean;
+BEGIN
+    IF tenant IS NULL OR collector IS NULL OR batch IS NULL OR tenant IS DISTINCT FROM contour.tenant_context() THEN
+        RAISE EXCEPTION 'origin context mismatch' USING ERRCODE='42501';
+    END IF;
+    SELECT p.origin_writer_provenance INTO STRICT origin_writer FROM contour.ingestion_payloads p
+      WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,collector,batch) AND p.payload_format=2;
+    PERFORM contour.catalog_origin_absent(tenant,collector,batch);
+    RETURN origin_writer;
+EXCEPTION WHEN no_data_found OR too_many_rows THEN
+    RAISE EXCEPTION 'origin history unavailable' USING ERRCODE='23514';
+END $$;
+REVOKE ALL ON FUNCTION contour.catalog_origin_requires_canonical(uuid,uuid,uuid) FROM PUBLIC,contour_origin_ingress;
+GRANT EXECUTE ON FUNCTION contour.catalog_origin_requires_canonical(uuid,uuid,uuid) TO contour_catalog_worker;
+
+-- Origin ingress may use the check only while its private transaction-bound
+-- capability and locks are held. It receives no direct catalog-helper grant.
+CREATE FUNCTION contour.origin_retry_requires_canonical(tenant uuid, collector uuid, batch uuid)
+RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    IF tenant IS NULL OR collector IS NULL OR batch IS NULL OR tenant IS DISTINCT FROM contour.tenant_context() THEN
+        RAISE EXCEPTION 'origin context mismatch' USING ERRCODE='42501';
+    END IF;
+    PERFORM contour.require_origin_ingress(tenant,collector);
+    RETURN contour.catalog_origin_requires_canonical(tenant,collector,batch);
+END $$;
+REVOKE ALL ON FUNCTION contour.origin_retry_requires_canonical(uuid,uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contour.origin_retry_requires_canonical(uuid,uuid,uuid) TO contour_origin_ingress;
 
 -- A derived latest observation per operation and complete historical origin scope.
 -- Only the owner-executed projection function can maintain this index.
@@ -938,7 +995,6 @@ BEGIN
        AND p.payload_format=2 AND pg_catalog.octet_length(p.checked_batch) BETWEEN 1 AND 1048576;
    envelope:=pg_catalog.convert_from(payload,'UTF8')::jsonb;
    IF NOT (batch_key=ANY(seen_batches)) THEN
-     PERFORM contour.verify_origin_batch_proofs(tenant,h.collector_id,h.batch_id,payload);
      -- The ingress verifier preserves historical seeding behavior; human reads
      -- additionally require a bidirectional attribution/witness match throughout
      -- the retained checked batch before disclosing any verified identity.
@@ -948,12 +1004,15 @@ BEGIN
        WHERE (item.value->'origin_witness'->>'kind'='downstream_mtls_leaf_sha256_v1' AND m.attribution_class IS DISTINCT FROM 'verified_origin_v1')
           OR (item.value->'origin_witness'->>'kind'='unattributed' AND m.attribution_class IS DISTINCT FROM 'unattributed')) THEN
        RAISE EXCEPTION 'origin attribution mismatch' USING ERRCODE='23514'; END IF;
-     IF EXISTS ((SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id
+     IF EXISTS (WITH verified AS MATERIALIZED (
+         SELECT * FROM contour.catalog_origin_mapping(tenant,h.collector_id,h.batch_id,payload)
+       )
+       SELECT 1 FROM ((SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id
          FROM contour.catalog_origin_projection p WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id)
-       EXCEPT SELECT * FROM contour.catalog_origin_mapping(tenant,h.collector_id,h.batch_id,payload))
-       UNION ALL (SELECT * FROM contour.catalog_origin_mapping(tenant,h.collector_id,h.batch_id,payload)
+       EXCEPT SELECT * FROM verified)
+       UNION ALL (SELECT * FROM verified
        EXCEPT SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id
-         FROM contour.catalog_origin_projection p WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id))) THEN
+         FROM contour.catalog_origin_projection p WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id))) AS differences) THEN
        RAISE EXCEPTION 'origin projection mismatch' USING ERRCODE='23514'; END IF;
      seen_batches:=pg_catalog.array_append(seen_batches,batch_key);
    END IF;

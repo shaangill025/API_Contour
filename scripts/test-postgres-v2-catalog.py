@@ -290,6 +290,9 @@ def run_basic_compat_cases(execute, bodies, origin_body, port, directory, enviro
 
     for body in bodies:
         where = scope(body)
+        result = execute("BEGIN; SET LOCAL ROLE contour_catalog_tls; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.catalog_origin_requires_canonical('%s','%s','%s'); ROLLBACK;" % (body['tenant_id'],body['tenant_id'],body['collector_id'],body['batch_id']))
+        if result.splitlines()[-1] != 'f':
+            raise AssertionError('Basic wire provenance was not retained')
         row = execute("SELECT encode(p.checked_batch,'hex'),encode(b.request_digest,'hex') FROM contour.ingestion_payloads p JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE p." + where.replace(' AND ', ' AND p.'))
         wire_hex, digest = row.split('|')
         wire = bytes.fromhex(wire_hex)
@@ -353,3 +356,66 @@ def run_v1_origin_absence_cases(execute, body, origin_body, port, directory, env
     check('Processed')
     check('AlreadyProcessed')
     print('V1 origin absence before catalog claim passed', flush=True)
+
+
+def run_origin_zero_canonical_cases(execute, body, port, directory, environment):
+    """Origin-created unattributed bytes stay canonical on claim and replay."""
+    import subprocess
+
+    target = json.loads(subprocess.check_output(
+        ['cargo','metadata','--format-version','1','--no-deps','--offline'],
+        text=True,timeout=15))['target_directory']
+    probe = str(Path(target)/'debug/examples/catalog_probe')
+    where = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (
+        body['tenant_id'],body['collector_id'],body['batch_id'])
+    acl = execute("SELECT has_function_privilege('contour_catalog_tls','contour.catalog_origin_requires_canonical(uuid,uuid,uuid)','EXECUTE'),has_function_privilege('contour_origin_ingress_test','contour.catalog_origin_requires_canonical(uuid,uuid,uuid)','EXECUTE'),has_function_privilege('contour_v2_ingress','contour.catalog_origin_requires_canonical(uuid,uuid,uuid)','EXECUTE');")
+    if acl != 't|f|f':
+        raise AssertionError('catalog provenance helper role boundary differs')
+    result = execute("BEGIN; SET LOCAL ROLE contour_catalog_tls; SELECT set_config('apicontour.tenant_id','%s',true); SELECT contour.catalog_origin_requires_canonical('%s','%s','%s'); ROLLBACK;" % (body['tenant_id'],body['tenant_id'],body['collector_id'],body['batch_id']))
+    if result.splitlines()[-1] != 't':
+        raise AssertionError('Origin wire provenance was not retained')
+    other = 'bbbbbbbb-0000-0000-0000-000000000000' if body['tenant_id'] != 'bbbbbbbb-0000-0000-0000-000000000000' else 'aaaaaaaa-0000-0000-0000-000000000000'
+    execute("""BEGIN; SET LOCAL ROLE contour_catalog_tls;
+      SELECT set_config('apicontour.tenant_id','%s',true);
+      DO $$ DECLARE rejected boolean:=false; BEGIN
+        BEGIN PERFORM contour.catalog_origin_requires_canonical('%s','%s','%s');
+        EXCEPTION WHEN insufficient_privilege THEN rejected:=true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'cross-tenant provenance read accepted'; END IF;
+      END $$; ROLLBACK;""" % (body['tenant_id'],other,body['collector_id'],body['batch_id']))
+    row = execute("SELECT encode(p.checked_batch,'hex'),encode(b.request_digest,'hex'),p.origin_writer_provenance FROM contour.ingestion_payloads p JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE p." + where.replace(' AND ',' AND p.'))
+    original_hex,digest,provenance = row.split('|')
+    original = bytes.fromhex(original_hex)
+    wire = json.dumps(body,indent=2,ensure_ascii=False).encode()
+    canonical = json.dumps(body,sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode()
+    if provenance != 't' or original != canonical or wire == canonical or json.loads(wire) != body:
+        raise AssertionError('origin zero canonical corruption reproducer invalid')
+    if hashlib.sha256(b'apicontour/batch/2\n'+canonical).hexdigest() != digest:
+        raise AssertionError('origin zero semantic digest mismatch')
+
+    def check(expected):
+        process = subprocess.run([probe,str(port),str(directory/'ca.crt'),body['batch_id'],expected,
+            body['tenant_id'],body['collector_id'],'5000'],input='\n',capture_output=True,text=True,env=environment,timeout=15)
+        if process.returncode or process.stderr or process.stdout.strip() != expected:
+            raise AssertionError('origin zero catalog outcome mismatch: ' + process.stdout + process.stderr)
+    def counts(expected):
+        actual = execute("SELECT (SELECT count(*) FROM contour.catalog_processed_batches WHERE %s),(SELECT count(*) FROM contour.observation_windows WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s);" % (where,where,where))
+        if actual != expected:
+            raise AssertionError('origin zero catalog atomic counts differ')
+    def rewrite(value):
+        execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (value.hex(),where))
+
+    counts('0|0|0')
+    rewrite(wire)
+    try:
+        check('Corrupt'); counts('0|0|0')
+    finally:
+        rewrite(original)
+    check('Processed'); counts('1|%d|0' % len(body['records']))
+    check('AlreadyProcessed')
+    rewrite(wire)
+    try:
+        check('Corrupt'); counts('1|%d|0' % len(body['records']))
+    finally:
+        rewrite(original)
+    check('AlreadyProcessed')
+    print('Origin zero-witness canonical integrity before claim and on replay passed',flush=True)

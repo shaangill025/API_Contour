@@ -589,16 +589,29 @@ async fn duplicate_v2(
     }
     validate_submit_v2_metadata(transaction, &old, expected, batch.batch_id()).await?;
     if capability == IngressCapability::Origin {
-        let canonical = old
-            .to_canonical_wire_json()
-            .map_err(|_| SubmitError::Corrupt)?;
-        let proof = transaction.query_one("SELECT contour.verify_origin_batch_proofs($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch.batch_id(), &canonical]).await.map_err(origin_verify_error)?;
-        if proof
-            .try_get::<_, i32>(0)
-            .map_err(|_| SubmitError::Corrupt)?
-            != expected_proof_count(&old)?
-        {
-            return Err(SubmitError::Corrupt);
+        let expected_proofs = expected_proof_count(&old)?;
+        let requires_canonical = if expected_proofs == 0 {
+            // Provenance is set by an owner trigger from the private ingress
+            // capability, never from supplied input. The helper checks that an
+            // unattributed batch has no retained proof, marker or projection.
+            let row = transaction.query_one("SELECT contour.origin_retry_requires_canonical($1::text::uuid,$2::text::uuid,$3::text::uuid)", &[&expected[0], &expected[1], &batch.batch_id()]).await.map_err(origin_verify_error)?;
+            row.try_get::<_, bool>(0)
+                .map_err(|_| SubmitError::Corrupt)?
+        } else {
+            true
+        };
+        if requires_canonical {
+            let canonical = old
+                .to_canonical_wire_json()
+                .map_err(|_| SubmitError::Corrupt)?;
+            let proof = transaction.query_one("SELECT contour.verify_origin_batch_proofs($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch.batch_id(), &canonical]).await.map_err(origin_verify_error)?;
+            if proof
+                .try_get::<_, i32>(0)
+                .map_err(|_| SubmitError::Corrupt)?
+                != expected_proofs
+            {
+                return Err(SubmitError::Corrupt);
+            }
         }
     }
     if stored_digest != digest {

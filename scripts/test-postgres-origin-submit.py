@@ -66,19 +66,50 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (candidate['tenant_id'],candidate['collector_id'],candidate['batch_id'])
     def retained(candidate):
         where = scoped(candidate)
-        return execute("SELECT b.receipt_id::text,floor(extract(epoch FROM b.accepted_at)*1000000)::bigint,b.record_count,encode(b.request_digest,'hex'),encode(sha256(p.checked_batch),'hex'),(SELECT count(*) FROM contour.ingestion_v2_metadata WHERE %s),(SELECT count(*) FROM contour.origin_proofs WHERE %s),(SELECT count(*) FROM contour.origin_batch_proof_completion WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s),COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id=b.tenant_id),0) FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.%s;" % (where,where,where,where,where.replace(' AND ',' AND b.')))
+        return execute("SELECT b.receipt_id::text,floor(extract(epoch FROM b.accepted_at)*1000000)::bigint,b.record_count,encode(b.request_digest,'hex'),encode(sha256(p.checked_batch),'hex'),p.origin_writer_provenance,(SELECT count(*) FROM contour.ingestion_v2_metadata WHERE %s),(SELECT count(*) FROM contour.origin_proofs WHERE %s),(SELECT count(*) FROM contour.origin_batch_proof_completion WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s),COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id=b.tenant_id),0) FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.%s;" % (where,where,where,where,where.replace(' AND ',' AND b.')))
 
     def quota(candidate):
         return execute("SELECT COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'),0);" % candidate['tenant_id'])
+    def provenance(candidate):
+        return execute("SELECT origin_writer_provenance FROM contour.ingestion_payloads WHERE " + scoped(candidate))
 
-    # RED checkpoint only: establish the exact closed error before retrying.
-    if submit(before_17, 'Corrupt') != 'Corrupt':
-        raise AssertionError('cross-profile failure was not the intended Corrupt outcome')
+    # Table-level INSERT was narrowed to the original five columns. Ordinary
+    # callers cannot submit the marker; even a privileged fixture caller cannot
+    # forge it because the owner trigger overwrites both supplied values.
+    for role in ('contour_ingestion','contour_v2_ingress','contour_origin_ingress'):
+        if execute("SELECT has_column_privilege('%s','contour.ingestion_payloads','origin_writer_provenance','INSERT');" % role) != 'f':
+            raise AssertionError('writer can supply provenance column')
+    for selected_origin in (False,True):
+        source = before_17; where_source = scoped(source)
+        new_batch = '00000000-0000-4000-8000-00000000ff1%d' % int(selected_origin)
+        gate = "SELECT contour.begin_origin_ingress('%s','%s');" % (source['tenant_id'],source['collector_id']) if selected_origin else "SELECT contour.lock_collector('%s','%s');" % (source['tenant_id'],source['collector_id'])
+        # Inverse supplied value is deliberately ignored by the trigger.
+        sql = "BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); %s INSERT INTO contour.ingestion_batches (tenant_id,collector_id,batch_id,request_digest,digest_version,record_count) SELECT tenant_id,collector_id,'%s',request_digest,digest_version,record_count FROM contour.ingestion_batches WHERE %s; INSERT INTO contour.ingestion_payloads (tenant_id,collector_id,batch_id,payload_format,checked_batch,origin_writer_provenance) SELECT tenant_id,collector_id,'%s',payload_format,checked_batch,%s FROM contour.ingestion_payloads WHERE %s; SELECT origin_writer_provenance FROM contour.ingestion_payloads WHERE tenant_id='%s' AND collector_id='%s' AND batch_id='%s'; ROLLBACK;" % (source['tenant_id'],gate,new_batch,where_source,new_batch,'false' if selected_origin else 'true',where_source,source['tenant_id'],source['collector_id'],new_batch)
+        if execute(sql).splitlines()[-1] != ('t' if selected_origin else 'f'):
+            raise AssertionError('provenance trigger trusted the caller supplied value')
+
+    # Explicit spoof attempts are rejected before a restricted Basic writer can
+    # use the marker column (the origin role is tested in origin_proofs.sql).
+    execute("""BEGIN; SET LOCAL ROLE contour_v2_ingress_test;
+      DO $$ DECLARE rejected boolean:=false; BEGIN
+        BEGIN INSERT INTO contour.ingestion_payloads (tenant_id,collector_id,batch_id,payload_format,checked_batch,origin_writer_provenance)
+          VALUES ('%s','%s','00000000-0000-4000-8000-00000000ff20',2,decode('7b7d','hex'),true);
+        EXCEPTION WHEN insufficient_privilege THEN rejected:=true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'Basic writer supplied provenance'; END IF;
+      END $$; ROLLBACK;""" % (before_17['tenant_id'],before_17['collector_id']))
 
     # Both batches came from Basic ingress. Their immutable ordinary wire bytes
     # intentionally differ from the origin canonical serialization.
+    execute("""DO $$ DECLARE rejected boolean:=false; BEGIN
+      BEGIN UPDATE contour.ingestion_payloads SET origin_writer_provenance=NOT origin_writer_provenance WHERE %s;
+      EXCEPTION WHEN check_violation THEN rejected:=true; END;
+      IF NOT rejected THEN RAISE EXCEPTION 'payload provenance is mutable'; END IF;
+    END $$;""" % scoped(before_17))
+
     for candidate, original_receipt in [(before_17,before_receipt),(after_17,after_receipt)]:
         before = retained(candidate)
+        if provenance(candidate) != 'f':
+            raise AssertionError('Basic payload was not marked Basic')
         stored = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + scoped(candidate))
         canonical = json.dumps(candidate,sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode().hex()
         if stored == canonical:
@@ -97,6 +128,8 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     reverse['records'] = [dict(record=r,origin_witness={'kind':'unattributed'}) for r in raw_reverse['records']]
     before_quota = quota(reverse)
     original_receipt = submit(reverse,status='accepted'); before = retained(reverse)
+    if provenance(reverse) != 't':
+        raise AssertionError('Origin payload provenance missing')
     if quota(reverse) != before_quota:
         raise AssertionError('unattributed origin admission charged proof quota')
     if check(reverse,status='duplicate',v2=True) != original_receipt:
@@ -105,6 +138,21 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     check(changed,'Conflict',v2=True)
     if retained(reverse) != before:
         raise AssertionError('origin to Basic retry changed retained history or quota')
+
+    # Re-encoding preserves the V2 semantic digest but violates the immutable
+    # canonical bytes required of Origin-created payloads, even with no witness.
+    original_wire = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + scoped(reverse))
+    rewritten_wire = json.dumps(reverse,indent=2,ensure_ascii=False).encode().hex()
+    if rewritten_wire == original_wire:
+        raise AssertionError('canonical corruption reproducer did not alter bytes')
+    execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (rewritten_wire,scoped(reverse)))
+    try:
+        submit(reverse,'Corrupt')
+    finally:
+        execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (original_wire,scoped(reverse)))
+    if retained(reverse) != before or submit(reverse,status='duplicate') != original_receipt:
+        raise AssertionError('restored canonical origin retry changed retained receipt')
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_zero_canonical_cases'](execute, reverse, port, directory, environment)
 
     # Rechecking an old Basic batch still requires current collector authority.
     raw_revoked, _, _ = setup('basic_origin_retry_revoked')
@@ -149,6 +197,8 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         body['records'].append({'record': record, 'origin_witness': witness})
     where = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (tenant, collector, body['batch_id'])
     receipt = submit(body, status='accepted')
+    if provenance(body) != 't':
+        raise AssertionError('fingerprint origin payload provenance missing')
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_basic_compat_cases'](execute, [before_17, after_17], body, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_v1_origin_absence_cases'](execute, v1_before_17, body, port, directory, environment)
     if execute("SELECT string_agg(attribution_class,',' ORDER BY record_id) FROM contour.ingestion_v2_metadata WHERE " + where) != 'verified_origin_v1,verified_origin_v1,unattributed':
@@ -165,7 +215,7 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     check(basic_candidate, 'Corrupt', v2=True)
     usage = execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'" % tenant)
     execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.end_origin('%s','lifecycle_closed','%s');" % (tenant, tenant, lifecycle_ids[0]))
-    if submit(body, status='duplicate') != receipt or execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'" % tenant) != usage:
+    if submit(body, status='duplicate') != receipt or provenance(body) != 't' or execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'" % tenant) != usage:
         raise AssertionError('closed-origin retry changed receipt or quota')
     expected_origins = [dict(zip(('origin_project_id', 'origin_service_id', 'origin_environment_id', 'origin_deployment_id', 'instance_id'), origin + [instance])) for origin, instance in zip(origin_scopes, instance_ids)]
     if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
