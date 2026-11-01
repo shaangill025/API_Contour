@@ -5,6 +5,8 @@ COPY crates/ crates/
 RUN cargo build --release --locked -p contour-ingress --example origin_https_probe --example origin_sensor_probe
 RUN mkdir /runtime-libs && cp /usr/lib/*-linux-gnu/libssl.so.3 /usr/lib/*-linux-gnu/libcrypto.so.3 /runtime-libs/
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+ARG SOURCE_HEAD
+LABEL org.apicontour.fixture.source=$SOURCE_HEAD
 COPY --from=build /runtime-libs/ /usr/local/lib/
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /src/target/release/examples/origin_https_probe /usr/local/bin/origin_https_probe

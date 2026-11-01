@@ -680,7 +680,8 @@ GRANT EXECUTE ON FUNCTION contour.origin_insert_authorized(uuid,uuid), contour.t
     contour.guard_collector(uuid,uuid), contour.collector_lock_key(uuid,uuid),
     contour.lock_collector(uuid,uuid) TO contour_origin_ingress;
 DO $$ DECLARE relation text; BEGIN
-    FOREACH relation IN ARRAY ARRAY['sources','policy_revisions','collector_authorization','source_authorization'] LOOP
+    -- Signed refresh joins the full target assignment as well as source facts.
+    FOREACH relation IN ARRAY ARRAY['sources','workload_assignments','policy_revisions','collector_authorization','source_authorization'] LOOP
         EXECUTE pg_catalog.format('CREATE POLICY origin_authority_read ON contour.%I FOR SELECT TO contour_origin_ingress USING (tenant_id=contour.tenant_context())', relation);
         EXECUTE pg_catalog.format('GRANT SELECT ON contour.%I TO contour_origin_ingress', relation);
     END LOOP;

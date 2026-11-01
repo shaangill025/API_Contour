@@ -1,7 +1,11 @@
 """Offline assertions on generated origin sensor fixture, without Docker or listeners."""
 import importlib.util
+import os
 from pathlib import Path
+import runpy
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('sensor_fixture', ROOT/'scripts/test-postgres-origin-sensor.py')
@@ -9,6 +13,26 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 class Fixture(unittest.TestCase):
+    def test_source_check_uses_the_fixture_checkout_from_another_cwd(self):
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as other:
+            try:
+                os.chdir(other)
+                with mock.patch.object(fixture.subprocess, 'check_output', side_effect=['', 'a'*40]) as call:
+                    self.assertEqual(fixture.checked_source_head(), 'a'*40)
+                    self.assertEqual(call.call_count, 2)
+                    for invocation in call.call_args_list:
+                        self.assertEqual(invocation.kwargs['cwd'], fixture.ROOT)
+            finally:
+                os.chdir(previous)
+    def test_inherited_image_cannot_activate_the_sensor_mode(self):
+        environment = runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
+        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale'}):
+            ordinary = environment('inert', '/tmp/unused-target')
+            self.assertNotIn('CONTOUR_ORIGIN_SENSOR_IMAGE', ordinary)
+            selected = environment('inert', '/tmp/unused-target', 'contour-origin-sensor-fixture:selected')
+            self.assertEqual(selected['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:selected')
+            self.assertEqual(os.environ['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:stale')
     def test_generated_production_envoy_keeps_exact_overwrite(self):
         cfg = fixture.generated_edge(12345)
         listener = cfg['static_resources']['listeners'][0]['filter_chains'][0]

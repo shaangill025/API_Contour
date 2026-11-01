@@ -163,3 +163,5 @@ def run_cases(container, execute, setup, check, port, directory, environment):
 
     runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-https.py'))['run_cases'](execute, setup, port, directory, environment, environment['CONTOUR_ORIGIN_HTTPS_PROBE'])
+    if environment.get('CONTOUR_ORIGIN_SENSOR_IMAGE'):
+        runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-sensor.py'))['run_cases'](container, execute, setup, directory, environment)

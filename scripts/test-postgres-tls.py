@@ -20,6 +20,17 @@ IMAGE = "postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a6449
 SSL_REQUEST = struct.pack("!II", 8, 80877103)
 
 
+def fixture_environment(password, target, sensor_image=None):
+    environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password,
+        CONTOUR_ORIGIN_PROBE=str(Path(target)/'debug/examples/origin_submit_probe'),
+        CONTOUR_ORIGIN_HTTPS_PROBE=str(Path(target)/'debug/examples/origin_https_probe'))
+    # Only the explicit fixture mode can activate the separately bounded pilot.
+    environment.pop('CONTOUR_ORIGIN_SENSOR_IMAGE', None)
+    if sensor_image is not None:
+        environment['CONTOUR_ORIGIN_SENSOR_IMAGE'] = sensor_image
+    return environment
+
+
 def run(argv, input=None, timeout=30, env=None):
     result = subprocess.run(argv, input=input, capture_output=True, text=True,
                             timeout=timeout, env=env, cwd=ROOT)
@@ -122,17 +133,31 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
+    origin_sensor = flags == ['--origin-sensor']
+    if origin_sensor:
+        sys.dont_write_bytecode = True
+    authority_mode = '--authority' in flags or origin_sensor
+    fixture_image = None
     for tool in ["docker", "openssl", "cargo"]:
         if not shutil.which(tool):
             raise RuntimeError("required fixture tool missing")
     run(["docker", "image", "inspect", IMAGE])  # Never download images here.
     run(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
-    if "--authority" in sys.argv or "--refresh-only" in sys.argv:
+    if origin_sensor:
+        # Separate opt-in qualification: never add image builds or Node-RED to
+        # the existing authority check's 240-second command budget.
+        if run(['git','status','--porcelain','--untracked-files=all']):
+            raise AssertionError('origin fixture build requires a frozen clean checkout')
+        source = run(['git','rev-parse','HEAD'])
+        fixture_image = 'contour-origin-sensor-fixture:' + source[:12]
+        run(['docker','build','--pull=false','--build-arg','SOURCE_HEAD='+source,
+             '-f','tests/fixtures/origin-sensor/Dockerfile','-t',fixture_image,'.'], timeout=600)
+    if authority_mode or "--refresh-only" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "authority_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
-        if "--authority" in sys.argv:
+        if authority_mode:
             run(["cargo", "build", "-p", "contour-postgres", "--example", "v2_submit_probe", "--example", "origin_submit_probe", "--locked", "--offline"], timeout=180)
             run(["cargo", "build", "-p", "contour-ingress", "--example", "origin_https_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
@@ -165,7 +190,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="contour-tls-") as folder:
         directory = Path(folder)
         password = secrets.token_hex(24)
-        environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password, CONTOUR_ORIGIN_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_submit_probe'), CONTOUR_ORIGIN_HTTPS_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_https_probe'))
+        environment = fixture_environment(password, metadata['target_directory'], fixture_image)
         try:
             (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
             for name in ["ca", "untrusted"]:
@@ -178,13 +203,15 @@ def main():
             (directory/"extensions").write_text("subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n")
             run(["openssl", "x509", "-req", "-in", str(directory/"server.csr"), "-CA", str(directory/"ca.crt"),
                  "-CAkey", str(directory/"ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(directory/"extensions"), "-out", str(directory/"server.crt")])
-            network = run(["docker", "network", "create", "--driver", "bridge", "--opt",
+            network = run(["docker", "network", "create", *(['--internal'] if origin_sensor else []), "--driver", "bridge", "--opt",
                            "com.docker.network.bridge.enable_ip_masquerade=false", "contour-tls-"+secrets.token_hex(6)])
             network_settings = json.loads(run(["docker", "network", "inspect", network]))[0]
             if network_settings["Driver"] != "bridge" or network_settings["Options"].get("com.docker.network.bridge.enable_ip_masquerade") != "false":
                 raise AssertionError("fixture bridge configuration mismatch")
+            if origin_sensor and not network_settings['Internal']:
+                raise AssertionError('origin fixture network must be internal')
             data_mount = ["--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m"]
-            if "--authority" in sys.argv or "--https-only" in sys.argv or "--delivery-only" in sys.argv or "--refresh-only" in sys.argv or "--catalog-reader" in sys.argv or "--comparison-store" in sys.argv or "--service-import-store" in sys.argv or "--review-store" in sys.argv:
+            if authority_mode or "--https-only" in sys.argv or "--delivery-only" in sys.argv or "--refresh-only" in sys.argv or "--catalog-reader" in sys.argv or "--comparison-store" in sys.argv or "--service-import-store" in sys.argv or "--review-store" in sys.argv:
                 volume = "contour-recovery-" + secrets.token_hex(12)
                 run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
@@ -298,7 +325,7 @@ def main():
             elif "--refresh-only" in sys.argv:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment,refresh_only=True)
-            elif "--authority" in sys.argv:
+            elif authority_mode:
                 authority_probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"authority_probe")
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment)
                 server = ProtocolServer("begin", directory)

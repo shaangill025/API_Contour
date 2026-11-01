@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 NODE = 'docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963'
 ENVOY = 'envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4'
@@ -21,6 +22,13 @@ ITEM = '00000000-0000-0000-0000-000000000001'
 HEADER = 'x-contour-origin-witness'
 sys.path.insert(0, str(ROOT))
 from deploy.pilot import native_envoy
+
+
+def checked_source_head():
+    options = dict(cwd=ROOT, text=True, timeout=15)
+    if subprocess.check_output(['git','status','--porcelain','--untracked-files=all'], **options).strip():
+        raise AssertionError('origin fixture run requires a frozen clean checkout')
+    return subprocess.check_output(['git','rev-parse','HEAD'], **options).strip()
 
 
 def flows(other_fingerprint):
@@ -96,7 +104,7 @@ def run_cases(container, execute, setup, directory, environment):
     def run(args, seconds=30):
         nonlocal count
         count += 1
-        p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=seconds, env=environment)
+        p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=seconds, env=environment, cwd=ROOT)
         if p.returncode:
             raise RuntimeError('fixture command failed: ' + args[0])
         return p.stdout.decode().strip()
@@ -110,7 +118,7 @@ def run_cases(container, execute, setup, directory, environment):
         path.chmod(0o644)
         return path
     def start(args, env=None):
-        p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env or environment)
+        p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env or environment, cwd=ROOT)
         processes.append(p)
         lines = queue.Queue()
         outputs[p] = lines
@@ -146,6 +154,13 @@ def run_cases(container, execute, setup, directory, environment):
         return ['-v', str(source)+':'+target+':ro']
     try:
         for image in [NODE, ENVOY, fixture_image]: docker('image','inspect',image)
+        source = checked_source_head()
+        image_info = json.loads(docker('image','inspect',fixture_image))[0]
+        if image_info['Config']['Labels'].get('org.apicontour.fixture.source') != source:
+            raise AssertionError('origin fixture image source mismatch')
+        network_info = json.loads(docker('inspect',container))[0]['NetworkSettings']['Networks']
+        if len(network_info) != 1 or not all(json.loads(docker('network','inspect',name))[0]['Internal'] for name in network_info):
+            raise AssertionError('origin fixture requires its owned internal PostgreSQL namespace')
         for name, san, usage in [('edge','pilot-destination','serverAuth'),('server','native-gateway.test','serverAuth'),('destination','pilot-destination','serverAuth'),('forwarder','envoy-forwarder','clientAuth'),('upstream','observer-upstream','clientAuth'),('http-client','collector','clientAuth'),('a','instance-a','clientAuth'),('b','instance-b','clientAuth')]:
             certificate(name, san, usage)
         for name in ['ca.crt','signer.raw']:
