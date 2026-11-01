@@ -1,6 +1,8 @@
 //! Owned local runtime; configuration contains paths, never key bytes.
 use contour_core::PolicyKeys;
-use contour_ingress::{CollectorTls, HttpLimits, IngestionServer, PrincipalRegistry};
+use contour_ingress::{
+    CollectorTls, HttpLimits, IngestionProfile, IngestionServer, PrincipalRegistry,
+};
 use contour_postgres::{DatabaseSettings, TrustedCa};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -86,6 +88,13 @@ struct Config {
     collector_certificate_der: Option<String>,
     policy_key_file: Option<String>,
     listen: Option<String>,
+    ingestion_profile: Option<IngestionProfileConfig>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IngestionProfileConfig {
+    V1,
+    OriginV2,
 }
 fn read(path: &str, max: usize) -> Result<Vec<u8>, &'static str> {
     let mut bytes = Vec::new();
@@ -152,13 +161,18 @@ fn run() -> Result<(), &'static str> {
                     .map_err(|_| "principal invalid")?;
                 let keys =
                     PolicyKeys::new(&[("local", policy)]).map_err(|_| "policy key invalid")?;
-                let server = IngestionServer::new(
+                let profile = match c.ingestion_profile.unwrap_or(IngestionProfileConfig::V1) {
+                    IngestionProfileConfig::V1 => IngestionProfile::V1,
+                    IngestionProfileConfig::OriginV2 => IngestionProfile::OriginV2,
+                };
+                let server = IngestionServer::with_profile(
                     tls,
                     registry,
                     settings,
                     trust,
                     keys,
                     HttpLimits::new(8, timeout).map_err(|_| "limits invalid")?,
+                    profile,
                 );
                 let listen = required(&c.listen)?
                     .parse::<std::net::SocketAddr>()

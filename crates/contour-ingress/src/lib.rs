@@ -9,7 +9,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
-pub use service::{HttpLimits, IngestionServer, IngressError, PrincipalRegistry};
+pub use service::{HttpLimits, IngestionProfile, IngestionServer, IngressError, PrincipalRegistry};
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, time::timeout};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
