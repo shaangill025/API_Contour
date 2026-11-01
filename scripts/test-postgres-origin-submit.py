@@ -71,6 +71,10 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     def quota(candidate):
         return execute("SELECT COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'),0);" % candidate['tenant_id'])
 
+    # RED checkpoint only: establish the exact closed error before retrying.
+    if submit(before_17, 'Corrupt') != 'Corrupt':
+        raise AssertionError('cross-profile failure was not the intended Corrupt outcome')
+
     # Both batches came from Basic ingress. Their immutable ordinary wire bytes
     # intentionally differ from the origin canonical serialization.
     for candidate, original_receipt in [(before_17,before_receipt),(after_17,after_receipt)]:
