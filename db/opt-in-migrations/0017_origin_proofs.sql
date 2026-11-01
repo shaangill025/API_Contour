@@ -284,6 +284,155 @@ REVOKE ALL ON FUNCTION contour.resolve_origin_record_checked(uuid,uuid,contour.i
     contour.resolve_origin_record(uuid,uuid,uuid,uuid,bytea) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION contour.resolve_origin_record(uuid,uuid,uuid,uuid,bytea) TO contour_origin_ingress;
 
+-- Historical proof profile 1 is a compact PostgreSQL JSON array of typed
+-- UUID strings, lowercase hex digests, integral numbers and UTC epoch
+-- microseconds. Field order is fixed below. It contains no request values.
+CREATE TABLE contour.origin_proofs (
+    tenant_id uuid NOT NULL, proof_id uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
+    collector_id uuid NOT NULL, batch_id uuid NOT NULL, record_id uuid NOT NULL,
+    request_digest bytea NOT NULL CHECK (pg_catalog.octet_length(request_digest)=32),
+    accepted_at timestamptz NOT NULL CHECK (pg_catalog.isfinite(accepted_at)),
+    proof_accepted_at timestamptz NOT NULL CHECK (pg_catalog.isfinite(proof_accepted_at)),
+    source_id uuid NOT NULL, project_id uuid NOT NULL, service_id uuid NOT NULL,
+    environment_id uuid NOT NULL, deployment_id uuid NOT NULL,
+    policy_revision numeric NOT NULL CHECK (policy_revision BETWEEN 1 AND 18446744073709551615 AND policy_revision=pg_catalog.trunc(policy_revision)),
+    parser_profile text NOT NULL CHECK (parser_profile COLLATE "C" ~ '^[A-Za-z_][A-Za-z0-9_.-]{0,63}$'),
+    lifecycle_id uuid NOT NULL, credential_id uuid NOT NULL, grant_id uuid NOT NULL,
+    origin_project_id uuid NOT NULL, origin_service_id uuid NOT NULL, origin_environment_id uuid NOT NULL,
+    origin_deployment_id uuid NOT NULL, instance_id uuid NOT NULL,
+    leaf_sha256 bytea NOT NULL CHECK (pg_catalog.octet_length(leaf_sha256)=32),
+    platform_evidence_sha256 bytea NOT NULL CHECK (pg_catalog.octet_length(platform_evidence_sha256)=32),
+    lifecycle_epoch bigint NOT NULL CHECK (lifecycle_epoch>=0), credential_epoch bigint NOT NULL CHECK (credential_epoch>=0),
+    grant_epoch bigint NOT NULL CHECK (grant_epoch>=0), context_epoch bigint NOT NULL CHECK (context_epoch>=0),
+    context_time timestamptz NOT NULL CHECK (pg_catalog.isfinite(context_time)),
+    canonical_proof bytea NOT NULL CHECK (pg_catalog.octet_length(canonical_proof) BETWEEN 1 AND 4096),
+    PRIMARY KEY (tenant_id,proof_id), UNIQUE (tenant_id,collector_id,batch_id,record_id),
+    FOREIGN KEY (tenant_id,collector_id,batch_id,record_id) REFERENCES contour.ingestion_v2_metadata,
+    FOREIGN KEY (tenant_id,lifecycle_id) REFERENCES contour.origin_lifecycles,
+    FOREIGN KEY (tenant_id,credential_id) REFERENCES contour.origin_credentials,
+    FOREIGN KEY (tenant_id,grant_id) REFERENCES contour.origin_observer_grants
+);
+ALTER TABLE contour.origin_proofs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contour.origin_proofs FORCE ROW LEVEL SECURITY;
+CREATE POLICY origin_proofs_owner ON contour.origin_proofs TO contour_owner
+    USING (tenant_id=contour.tenant_context()) WITH CHECK (tenant_id=contour.tenant_context());
+REVOKE ALL ON contour.origin_proofs FROM PUBLIC, contour_origin_ingress, contour_catalog_worker;
+CREATE TRIGGER origin_proof_immutable BEFORE UPDATE OR DELETE ON contour.origin_proofs
+    FOR EACH ROW EXECUTE FUNCTION contour.immutable_row();
+CREATE TRIGGER origin_proof_no_truncate BEFORE TRUNCATE ON contour.origin_proofs
+    FOR EACH STATEMENT EXECUTE FUNCTION contour.immutable_row();
+
+CREATE FUNCTION contour.encode_origin_proof(p contour.origin_proofs) RETURNS bytea
+LANGUAGE sql IMMUTABLE STRICT SECURITY INVOKER SET search_path=pg_catalog AS $$
+ SELECT pg_catalog.convert_to(pg_catalog.jsonb_build_array(
+   1,p.proof_id,p.tenant_id,p.collector_id,p.batch_id,p.record_id,2,pg_catalog.encode(p.request_digest,'hex'),
+   (extract(epoch FROM p.accepted_at)*1000000)::numeric(30,0),
+   (extract(epoch FROM p.proof_accepted_at)*1000000)::numeric(30,0),
+   p.source_id,p.project_id,p.service_id,p.environment_id,p.deployment_id,
+   pg_catalog.trunc(p.policy_revision),p.parser_profile,p.lifecycle_id,p.credential_id,p.grant_id,
+   p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,
+   pg_catalog.encode(p.leaf_sha256,'hex'),pg_catalog.encode(p.platform_evidence_sha256,'hex'),
+   p.lifecycle_epoch,p.credential_epoch,p.grant_epoch,p.context_epoch,
+   (extract(epoch FROM p.context_time)*1000000)::numeric(30,0))::text,'UTF8')
+$$;
+
+-- Internal consistency of trusted, immutably admitted proof data only. A forged
+-- privileged seed or context cannot be authenticated by this verifier; there is
+-- no proof authority or writer in this slice. No current-liveness check is used.
+-- Checked payload bytes originate in the trusted strict Rust decoder; this is
+-- not an independent strict JSON decoder or an authorization decision.
+CREATE FUNCTION contour.verify_origin_proof(tenant uuid, proof uuid) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE p contour.origin_proofs; b contour.ingestion_batches; m contour.ingestion_v2_metadata;
+    payload bytea; envelope jsonb; wrapper jsonb; l contour.origin_lifecycles;
+    c contour.origin_credentials; g contour.origin_observer_grants;
+BEGIN
+    IF tenant IS NULL OR tenant IS DISTINCT FROM contour.tenant_context() THEN
+        RAISE EXCEPTION 'origin context mismatch' USING ERRCODE='42501';
+    END IF;
+    SELECT x.* INTO STRICT p FROM contour.origin_proofs x WHERE x.tenant_id=tenant AND x.proof_id=proof
+      AND pg_catalog.octet_length(x.canonical_proof) BETWEEN 1 AND 4096
+      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.leaf_sha256)=32
+      AND pg_catalog.octet_length(x.platform_evidence_sha256)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64;
+    SELECT x.* INTO STRICT b FROM contour.ingestion_batches x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND pg_catalog.octet_length(x.request_digest)=32;
+    SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND x.record_id=p.record_id
+      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64
+      AND x.attribution_class='unattributed';
+    SELECT x.checked_batch INTO STRICT payload FROM contour.ingestion_payloads x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND x.payload_format=2 AND pg_catalog.octet_length(x.checked_batch) BETWEEN 1 AND 1048576;
+    IF b.record_count NOT BETWEEN 1 AND 500 THEN
+        RAISE EXCEPTION 'origin proof mismatch' USING ERRCODE='23514';
+    END IF;
+    SELECT x.* INTO STRICT l FROM contour.origin_lifecycles x WHERE x.tenant_id=tenant AND x.lifecycle_id=p.lifecycle_id AND pg_catalog.octet_length(x.platform_evidence_sha256)=32 AND x.platform_kind='trusted_platform_v1';
+    SELECT x.* INTO STRICT c FROM contour.origin_credentials x WHERE x.tenant_id=tenant AND x.credential_id=p.credential_id AND pg_catalog.octet_length(x.leaf_sha256)=32;
+    SELECT x.* INTO STRICT g FROM contour.origin_observer_grants x WHERE x.tenant_id=tenant AND x.grant_id=p.grant_id;
+    IF p.policy_revision < 1 OR p.policy_revision > 18446744073709551615
+       OR p.policy_revision <> pg_catalog.trunc(p.policy_revision)
+       OR p.lifecycle_epoch<0 OR p.credential_epoch<0 OR p.grant_epoch<0 OR p.context_epoch<0
+       OR l.fact_epoch<0 OR c.fact_epoch<0 OR g.fact_epoch<0
+       OR NOT pg_catalog.isfinite(p.accepted_at) OR NOT pg_catalog.isfinite(p.proof_accepted_at)
+       OR NOT pg_catalog.isfinite(p.context_time) OR NOT pg_catalog.isfinite(b.accepted_at)
+       OR NOT pg_catalog.isfinite(m.accepted_at) OR NOT pg_catalog.isfinite(l.enrolled_at)
+       OR NOT pg_catalog.isfinite(c.enrolled_at) OR NOT pg_catalog.isfinite(g.granted_at) THEN
+        RAISE EXCEPTION 'origin proof mismatch' USING ERRCODE='23514';
+    END IF;
+    IF p.canonical_proof IS DISTINCT FROM contour.encode_origin_proof(p)
+       OR b.digest_version IS DISTINCT FROM 2 OR p.request_digest IS DISTINCT FROM b.request_digest
+       OR m.digest_version IS DISTINCT FROM 2 OR m.request_digest IS DISTINCT FROM p.request_digest
+       OR m.accepted_at IS DISTINCT FROM p.accepted_at OR b.accepted_at IS DISTINCT FROM p.accepted_at
+       OR m.source_id IS DISTINCT FROM p.source_id OR m.project_id IS DISTINCT FROM p.project_id
+       OR m.service_id IS DISTINCT FROM p.service_id OR m.environment_id IS DISTINCT FROM p.environment_id
+       OR m.deployment_id IS DISTINCT FROM p.deployment_id OR m.policy_revision IS DISTINCT FROM p.policy_revision
+       OR m.parser_profile IS DISTINCT FROM p.parser_profile OR m.attribution_class IS DISTINCT FROM 'unattributed'
+       OR pg_catalog.sha256(pg_catalog.convert_to(E'apicontour/batch/2\n','UTF8') || payload) IS DISTINCT FROM p.request_digest
+       OR c.lifecycle_id IS DISTINCT FROM p.lifecycle_id OR g.lifecycle_id IS DISTINCT FROM p.lifecycle_id
+       OR c.leaf_sha256 IS DISTINCT FROM p.leaf_sha256 OR l.platform_evidence_sha256 IS DISTINCT FROM p.platform_evidence_sha256
+       OR l.project_id IS DISTINCT FROM p.origin_project_id OR l.service_id IS DISTINCT FROM p.origin_service_id
+       OR l.environment_id IS DISTINCT FROM p.origin_environment_id OR l.deployment_id IS DISTINCT FROM p.origin_deployment_id
+       OR l.instance_id IS DISTINCT FROM p.instance_id OR g.collector_id IS DISTINCT FROM p.collector_id
+       OR g.source_id IS DISTINCT FROM p.source_id OR g.project_id IS DISTINCT FROM p.project_id
+       OR g.service_id IS DISTINCT FROM p.service_id OR g.environment_id IS DISTINCT FROM p.environment_id
+       OR g.deployment_id IS DISTINCT FROM p.deployment_id OR l.fact_epoch IS DISTINCT FROM p.lifecycle_epoch
+       OR c.fact_epoch IS DISTINCT FROM p.credential_epoch OR g.fact_epoch IS DISTINCT FROM p.grant_epoch
+       OR greatest(p.lifecycle_epoch,p.credential_epoch,p.grant_epoch)>p.context_epoch
+       OR greatest(l.enrolled_at,c.enrolled_at,g.granted_at)>p.accepted_at
+       OR greatest(l.enrolled_at,c.enrolled_at,g.granted_at)>p.context_time
+       OR p.accepted_at>p.proof_accepted_at OR p.context_time>p.proof_accepted_at
+       OR EXISTS (SELECT 1 FROM contour.origin_terminal_events e WHERE e.tenant_id=tenant
+          AND ((e.event_kind='lifecycle_closed' AND e.lifecycle_id=p.lifecycle_id)
+            OR (e.event_kind='credential_revoked' AND e.credential_id=p.credential_id)
+            OR (e.event_kind='grant_revoked' AND e.grant_id=p.grant_id))
+          AND (NOT pg_catalog.isfinite(e.event_at) OR e.fact_epoch=0
+            OR e.fact_epoch<=p.context_epoch OR e.event_at<=p.context_time)) THEN
+        RAISE EXCEPTION 'origin proof mismatch' USING ERRCODE='23514';
+    END IF;
+    envelope := pg_catalog.convert_from(payload,'UTF8')::jsonb;
+    IF envelope->>'wire_version' IS DISTINCT FROM '2' OR envelope->>'tenant_id' IS DISTINCT FROM tenant::text
+       OR envelope->>'collector_id' IS DISTINCT FROM p.collector_id::text OR envelope->>'batch_id' IS DISTINCT FROM p.batch_id::text
+       OR pg_catalog.jsonb_typeof(envelope->'records') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_array_length(envelope->'records') IS DISTINCT FROM b.record_count THEN
+        RAISE EXCEPTION 'origin proof mismatch' USING ERRCODE='23514';
+    END IF;
+    SELECT x.value INTO STRICT wrapper FROM pg_catalog.jsonb_array_elements(envelope->'records') x(value)
+      WHERE x.value->'record'->>'record_id'=p.record_id::text;
+    IF wrapper->'record'->>'source_id' IS DISTINCT FROM p.source_id::text
+       OR wrapper->'record'->>'project_id' IS DISTINCT FROM p.project_id::text
+       OR wrapper->'record'->>'service_id' IS DISTINCT FROM p.service_id::text
+       OR wrapper->'record'->>'environment_id' IS DISTINCT FROM p.environment_id::text
+       OR wrapper->'record'->>'deployment_id' IS DISTINCT FROM p.deployment_id::text
+       OR wrapper->'record'->>'parser_profile' IS DISTINCT FROM p.parser_profile
+       OR pg_catalog.jsonb_typeof(wrapper->'record'->'policy_revision') IS DISTINCT FROM 'number'
+       OR (wrapper->'record'->>'policy_revision')::numeric IS DISTINCT FROM p.policy_revision
+       OR wrapper->'origin_witness'->>'kind' IS DISTINCT FROM 'downstream_mtls_leaf_sha256_v1'
+       OR wrapper->'origin_witness'->>'leaf_sha256' IS DISTINCT FROM pg_catalog.encode(p.leaf_sha256,'hex') THEN
+        RAISE EXCEPTION 'origin proof mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN true;
+EXCEPTION WHEN no_data_found OR too_many_rows OR invalid_text_representation OR character_not_in_repertoire THEN
+    RAISE EXCEPTION 'origin proof unavailable' USING ERRCODE='23514';
+END $$;
+REVOKE ALL ON FUNCTION contour.encode_origin_proof(contour.origin_proofs), contour.verify_origin_proof(uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contour.verify_origin_proof(uuid,uuid) TO contour_origin_ingress, contour_catalog_worker;
+
 -- transaction failure probe
 INSERT INTO contour.schema_migrations(version) VALUES (17);
 COMMIT;

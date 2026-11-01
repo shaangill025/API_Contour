@@ -1115,6 +1115,109 @@ DO $$ DECLARE mutation text; BEGIN
 END $$;
 ROLLBACK;
 SQL
+# Fixture-only proof seeding; no application proof writer exists in this slice.
+admin_sql <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SET LOCAL ROLE contour_owner;
+DO $$ DECLARE p contour.origin_proofs; m contour.ingestion_v2_metadata; l contour.origin_lifecycles;
+ c contour.origin_credentials; g contour.origin_observer_grants; BEGIN
+ SELECT * INTO STRICT m FROM contour.ingestion_v2_metadata WHERE batch_id='00000000-0000-4000-8000-000000001831' AND record_id='00000000-0000-4000-8000-000000001841';
+ SELECT * INTO STRICT l FROM contour.origin_lifecycles WHERE lifecycle_id='00000000-0000-0000-0000-000000001801';
+ SELECT * INTO STRICT c FROM contour.origin_credentials WHERE credential_id='00000000-0000-0000-0000-000000001811';
+ SELECT * INTO STRICT g FROM contour.origin_observer_grants WHERE grant_id='00000000-0000-0000-0000-000000001821';
+ p.tenant_id:=m.tenant_id; p.proof_id:='00000000-0000-4000-8000-000000001851';
+ p.collector_id:=m.collector_id; p.batch_id:=m.batch_id; p.record_id:=m.record_id; p.request_digest:=m.request_digest;
+ p.accepted_at:=m.accepted_at; p.proof_accepted_at:=clock_timestamp();
+ p.source_id:=m.source_id; p.project_id:=m.project_id; p.service_id:=m.service_id; p.environment_id:=m.environment_id; p.deployment_id:=m.deployment_id;
+ p.policy_revision:=m.policy_revision; p.parser_profile:=m.parser_profile;
+ p.lifecycle_id:=l.lifecycle_id; p.credential_id:=c.credential_id; p.grant_id:=g.grant_id;
+ p.origin_project_id:=l.project_id; p.origin_service_id:=l.service_id; p.origin_environment_id:=l.environment_id; p.origin_deployment_id:=l.deployment_id; p.instance_id:=l.instance_id;
+ p.leaf_sha256:=c.leaf_sha256; p.platform_evidence_sha256:=l.platform_evidence_sha256;
+ p.lifecycle_epoch:=l.fact_epoch; p.credential_epoch:=c.fact_epoch; p.grant_epoch:=g.fact_epoch;
+ SELECT epoch INTO p.context_epoch FROM contour.origin_tenant_state WHERE tenant_id=m.tenant_id;
+ p.context_time:=m.accepted_at; p.canonical_proof:=contour.encode_origin_proof(p);
+ INSERT INTO contour.origin_proofs SELECT (p).*;
+END $$;
+RESET ROLE;
+SELECT fixture.assert(contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851'), 'historical proof verified');
+SELECT fixture.expect_state($q$UPDATE contour.origin_proofs SET source_id=source_id$q$,'23514');
+SELECT fixture.expect_state($q$DELETE FROM contour.origin_proofs$q$,'23514');
+SELECT fixture.expect_state($q$SELECT contour.verify_origin_proof('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851')$q$,'42501');
+SET LOCAL ROLE contour_origin_ingress_test;
+SELECT fixture.assert(contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851'), 'restricted historical verifier');
+SELECT fixture.expect_state($q$SELECT * FROM contour.origin_proofs$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_proofs DEFAULT VALUES$q$,'42501');
+RESET ROLE;
+SET LOCAL ROLE contour_catalog_worker_test;
+SELECT fixture.assert(contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851'), 'catalog historical verifier');
+SELECT fixture.expect_state($q$SELECT contour.verify_origin_proof('bbbbbbbb-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851')$q$,'42501');
+RESET ROLE;
+-- Fixture-only malformed timestamps and historical ordering are rolled back.
+ALTER TABLE contour.origin_proofs DROP CONSTRAINT origin_proofs_context_time_check;
+DO $$ DECLARE p contour.origin_proofs; kind text; scenario text; event_epoch bigint; event_time timestamptz; BEGIN
+ SELECT * INTO STRICT p FROM contour.origin_proofs WHERE proof_id='00000000-0000-4000-8000-000000001851';
+ FOREACH kind IN ARRAY ARRAY['lifecycle_closed','credential_revoked','grant_revoked'] LOOP
+  FOREACH scenario IN ARRAY ARRAY['before','equal_time','equal_epoch','legacy','after'] LOOP
+   BEGIN
+    event_epoch := CASE WHEN scenario='legacy' THEN 0 WHEN scenario IN ('before','equal_epoch') THEN p.context_epoch ELSE p.context_epoch+1 END;
+    event_time := CASE WHEN scenario='before' THEN p.context_time-interval '1 second' WHEN scenario='equal_time' THEN p.context_time ELSE p.context_time+interval '1 second' END;
+    PERFORM set_config('session_replication_role','replica',true);
+    INSERT INTO contour.origin_terminal_events (tenant_id,event_kind,lifecycle_id,credential_id,grant_id,event_at,fact_epoch)
+     VALUES (p.tenant_id,kind,CASE WHEN kind='lifecycle_closed' THEN p.lifecycle_id END,
+      CASE WHEN kind='credential_revoked' THEN p.credential_id END,CASE WHEN kind='grant_revoked' THEN p.grant_id END,event_time,event_epoch);
+    PERFORM set_config('session_replication_role','origin',true);
+    IF scenario='after' THEN
+     PERFORM fixture.assert(contour.verify_origin_proof(p.tenant_id,p.proof_id), 'strictly later terminal event retains proof');
+    ELSE
+     PERFORM fixture.expect_state($q$SELECT contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851')$q$,'23514');
+    END IF;
+    RAISE EXCEPTION 'fixture rollback' USING ERRCODE='P9001';
+   EXCEPTION WHEN SQLSTATE 'P9001' THEN NULL; END;
+  END LOOP;
+ END LOOP;
+ BEGIN
+  PERFORM set_config('session_replication_role','replica',true);
+  UPDATE contour.ingestion_batches SET accepted_at=p.context_time+interval '1 second' WHERE batch_id=p.batch_id;
+  UPDATE contour.ingestion_v2_metadata SET accepted_at=p.context_time+interval '1 second' WHERE batch_id=p.batch_id AND record_id=p.record_id;
+  UPDATE contour.origin_proofs SET accepted_at=p.context_time+interval '1 second',proof_accepted_at=p.context_time+interval '2 seconds' WHERE proof_id=p.proof_id;
+  UPDATE contour.origin_proofs x SET canonical_proof=contour.encode_origin_proof(x) WHERE proof_id=p.proof_id;
+  PERFORM set_config('session_replication_role','origin',true);
+  PERFORM fixture.assert(contour.verify_origin_proof(p.tenant_id,p.proof_id), 'inbox acceptance may follow context start');
+  RAISE EXCEPTION 'fixture rollback' USING ERRCODE='P9001';
+ EXCEPTION WHEN SQLSTATE 'P9001' THEN NULL; END;
+END $$;
+ALTER TABLE contour.ingestion_v2_metadata DROP CONSTRAINT ingestion_v2_metadata_attribution_class_check;
+ALTER TABLE contour.origin_lifecycles DROP CONSTRAINT origin_lifecycles_platform_kind_check;
+ALTER TABLE contour.ingestion_payloads DROP CONSTRAINT ingestion_payloads_checked_batch_check;
+ALTER TABLE contour.ingestion_batches DROP CONSTRAINT ingestion_batches_record_count_check;
+DO $$ DECLARE mutation text; BEGIN
+ FOREACH mutation IN ARRAY ARRAY[
+  $m$UPDATE contour.origin_proofs SET canonical_proof=decode('00','hex')$m$,
+  $m$UPDATE contour.origin_proofs SET context_time='infinity'$m$,
+  $m$UPDATE contour.origin_proofs SET source_id='00000000-0000-0000-0000-000000000002'$m$,
+  $m$UPDATE contour.origin_proofs SET credential_id='00000000-0000-0000-0000-000000001812'$m$,
+  $m$UPDATE contour.ingestion_v2_metadata SET parser_profile='other' WHERE record_id='00000000-0000-4000-8000-000000001841'$m$,
+  $m$UPDATE contour.ingestion_v2_metadata SET attribution_class=repeat('x',5000) WHERE record_id='00000000-0000-4000-8000-000000001841'$m$,
+  $m$UPDATE contour.origin_lifecycles SET platform_kind=repeat('x',5000) WHERE lifecycle_id='00000000-0000-0000-0000-000000001801'$m$,
+  $m$UPDATE contour.ingestion_payloads SET checked_batch=decode(repeat('20',1048577),'hex') WHERE batch_id='00000000-0000-4000-8000-000000001831'$m$,
+  $m$UPDATE contour.ingestion_batches SET record_count=501 WHERE batch_id='00000000-0000-4000-8000-000000001831'$m$
+ ] LOOP
+  BEGIN
+   PERFORM set_config('session_replication_role','replica',true); EXECUTE mutation;
+   IF mutation LIKE '%SET source_id=%' OR mutation LIKE '%SET credential_id=%' THEN
+    UPDATE contour.origin_proofs p SET canonical_proof=contour.encode_origin_proof(p);
+   END IF;
+   PERFORM set_config('session_replication_role','origin',true);
+   PERFORM fixture.expect_state($q$SELECT contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851')$q$,'23514');
+   RAISE EXCEPTION 'fixture rollback' USING ERRCODE='P9001';
+  EXCEPTION WHEN SQLSTATE 'P9001' THEN NULL; END;
+ END LOOP;
+END $$;
+SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','lifecycle_closed','00000000-0000-0000-0000-000000001801');
+SELECT fixture.assert(contour.verify_origin_proof('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-4000-8000-000000001851'), 'closed lifecycle retains historical proof');
+ROLLBACK;
+SQL
 admin_sql <<'SQL'
 SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',false);
 SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','grant_revoked','00000000-0000-0000-0000-000000001821');
