@@ -16,3 +16,7 @@ const server = https.createServer({key:fs.readFileSync('/fixture/destination.key
   });
 });
 server.listen(9444,'127.0.0.1',()=>{process.stdout.write('READY 9444\n');});
+// PID 1 must explicitly handle Docker's proxied termination signal.
+const stop = () => { server.close(() => process.exit(0)); server.closeAllConnections(); };
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
