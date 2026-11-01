@@ -261,7 +261,7 @@ BEGIN
         SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x
           WHERE x.tenant_id=tenant AND x.collector_id=collector AND x.batch_id=batch AND x.record_id::text=rec->>'record_id'
             AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64
-            AND x.attribution_class='unattributed';
+            AND x.attribution_class IN ('unattributed','verified_origin_v1');
         revision := (rec->>'policy_revision')::numeric;
         IF revision < 1 OR revision > 18446744073709551615 OR revision <> pg_catalog.trunc(revision)
            OR m.policy_revision < 1 OR m.policy_revision > 18446744073709551615
@@ -271,7 +271,8 @@ BEGIN
            OR rec->>'deployment_id' IS DISTINCT FROM m.deployment_id::text OR rec->>'parser_profile' IS DISTINCT FROM m.parser_profile
            OR m.digest_version IS DISTINCT FROM 2 OR m.request_digest IS DISTINCT FROM b.request_digest
            OR m.accepted_at IS DISTINCT FROM b.accepted_at OR NOT pg_catalog.isfinite(m.accepted_at)
-           OR m.attribution_class IS DISTINCT FROM 'unattributed' THEN
+           OR (m.attribution_class = 'verified_origin_v1' AND
+               (rec IS NULL OR wrapper->'origin_witness'->>'kind' IS DISTINCT FROM 'downstream_mtls_leaf_sha256_v1')) THEN
             RAISE EXCEPTION 'metadata mismatch' USING ERRCODE='23514';
         END IF;
     END LOOP;
@@ -289,7 +290,7 @@ BEGIN
     SELECT x.value INTO STRICT wrapper FROM pg_catalog.jsonb_array_elements(envelope->'records') x(value)
       WHERE x.value->'record'->>'record_id'=record::text;
     SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x WHERE x.tenant_id=tenant AND x.collector_id=collector AND x.batch_id=batch AND x.record_id=record
-      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class='unattributed';
+      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class IN ('unattributed','verified_origin_v1');
     RETURN contour.resolve_origin_record_checked(tenant,collector,m,wrapper->'origin_witness');
 EXCEPTION WHEN no_data_found OR too_many_rows OR invalid_text_representation OR character_not_in_repertoire THEN
     RAISE EXCEPTION 'checked record unavailable' USING ERRCODE='23514';
@@ -388,7 +389,7 @@ BEGIN
        OR m.source_id IS DISTINCT FROM p.source_id OR m.project_id IS DISTINCT FROM p.project_id
        OR m.service_id IS DISTINCT FROM p.service_id OR m.environment_id IS DISTINCT FROM p.environment_id
        OR m.deployment_id IS DISTINCT FROM p.deployment_id OR m.policy_revision IS DISTINCT FROM p.policy_revision
-       OR m.parser_profile IS DISTINCT FROM p.parser_profile OR m.attribution_class IS DISTINCT FROM 'unattributed'
+       OR m.parser_profile IS DISTINCT FROM p.parser_profile OR m.attribution_class NOT IN ('unattributed','verified_origin_v1')
        OR c.lifecycle_id IS DISTINCT FROM p.lifecycle_id OR g.lifecycle_id IS DISTINCT FROM p.lifecycle_id
        OR c.leaf_sha256 IS DISTINCT FROM p.leaf_sha256 OR l.platform_evidence_sha256 IS DISTINCT FROM p.platform_evidence_sha256
        OR l.project_id IS DISTINCT FROM p.origin_project_id OR l.service_id IS DISTINCT FROM p.origin_service_id
@@ -441,7 +442,7 @@ BEGIN
       AND pg_catalog.octet_length(x.platform_evidence_sha256)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64;
     SELECT x.* INTO STRICT b FROM contour.ingestion_batches x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND pg_catalog.octet_length(x.request_digest)=32;
     SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND x.record_id=p.record_id
-      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class='unattributed';
+      AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class IN ('unattributed','verified_origin_v1');
     SELECT x.checked_batch INTO STRICT payload FROM contour.ingestion_payloads x WHERE x.tenant_id=tenant AND x.collector_id=p.collector_id AND x.batch_id=p.batch_id AND x.payload_format=2 AND pg_catalog.octet_length(x.checked_batch) BETWEEN 1 AND 1048576;
     envelope := contour.parse_origin_batch(tenant,p.collector_id,p.batch_id,payload);
     SELECT x.value INTO STRICT wrapper FROM pg_catalog.jsonb_array_elements(envelope->'records') x(value)
@@ -558,7 +559,7 @@ BEGIN
         END IF;
         SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x
           WHERE x.tenant_id=tenant AND x.collector_id=collector AND x.batch_id=batch AND x.record_id::text=wrapper->'record'->>'record_id'
-            AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class='unattributed';
+            AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class IN ('unattributed','verified_origin_v1');
         SELECT x.* INTO STRICT p FROM contour.origin_proofs x
           WHERE x.tenant_id=tenant AND x.collector_id=collector AND x.batch_id=batch AND x.record_id=m.record_id
             AND pg_catalog.octet_length(x.canonical_proof) BETWEEN 1 AND 4096
@@ -604,7 +605,7 @@ BEGIN
         witness := wrapper->'origin_witness';
         SELECT x.* INTO STRICT m FROM contour.ingestion_v2_metadata x
           WHERE x.tenant_id=tenant AND x.collector_id=collector AND x.batch_id=batch AND x.record_id::text=wrapper->'record'->>'record_id'
-            AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class='unattributed';
+            AND pg_catalog.octet_length(x.request_digest)=32 AND pg_catalog.octet_length(x.parser_profile) BETWEEN 1 AND 64 AND x.attribution_class IN ('unattributed','verified_origin_v1');
         IF witness = '{"kind":"unattributed"}'::jsonb THEN CONTINUE; END IF;
         resolution := contour.resolve_origin_record_checked(tenant,collector,m,witness);
         SELECT s.clock_floor INTO STRICT floor_time FROM contour.origin_tenant_state s WHERE s.tenant_id=tenant FOR UPDATE;
@@ -654,6 +655,100 @@ EXCEPTION WHEN no_data_found OR too_many_rows OR invalid_text_representation OR 
 END $$;
 REVOKE ALL ON FUNCTION contour.write_origin_batch_proofs(uuid,uuid,uuid,bytea) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION contour.write_origin_batch_proofs(uuid,uuid,uuid,bytea) TO contour_origin_ingress;
+
+-- The basic V2 writer retains its original unattributed-only contract even if
+-- another permissive policy is added for an independently provisioned role.
+ALTER TABLE contour.ingestion_v2_metadata DROP CONSTRAINT ingestion_v2_metadata_attribution_class_check;
+ALTER TABLE contour.ingestion_v2_metadata ADD CONSTRAINT ingestion_v2_metadata_attribution_class_check
+    CHECK (attribution_class IN ('unattributed','verified_origin_v1'));
+CREATE POLICY v2_metadata_unattributed_only ON contour.ingestion_v2_metadata
+    AS RESTRICTIVE FOR INSERT TO contour_v2_ingress WITH CHECK (attribution_class='unattributed');
+
+-- This function checks the private transaction capability and actual Q+C locks;
+-- no caller-provided flag, tenant setting, or advisory lock alone suffices.
+CREATE FUNCTION contour.origin_insert_authorized(tenant uuid, collector uuid) RETURNS boolean
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    IF tenant IS DISTINCT FROM contour.tenant_context() THEN
+        RAISE EXCEPTION 'origin context mismatch' USING ERRCODE='42501';
+    END IF;
+    PERFORM contour.require_origin_ingress(tenant,collector);
+    RETURN true;
+END $$;
+REVOKE ALL ON FUNCTION contour.origin_insert_authorized(uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contour.origin_insert_authorized(uuid,uuid), contour.tenant_context(),
+    contour.guard_collector(uuid,uuid), contour.collector_lock_key(uuid,uuid) TO contour_origin_ingress;
+DO $$ DECLARE relation text; BEGIN
+    FOREACH relation IN ARRAY ARRAY['sources','policy_revisions','collector_authorization','source_authorization'] LOOP
+        EXECUTE pg_catalog.format('CREATE POLICY origin_authority_read ON contour.%I FOR SELECT TO contour_origin_ingress USING (tenant_id=contour.tenant_context())', relation);
+        EXECUTE pg_catalog.format('GRANT SELECT ON contour.%I TO contour_origin_ingress', relation);
+    END LOOP;
+END $$;
+CREATE POLICY origin_batches_read ON contour.ingestion_batches FOR SELECT TO contour_origin_ingress USING (tenant_id=contour.tenant_context());
+CREATE POLICY origin_batches_insert ON contour.ingestion_batches FOR INSERT TO contour_origin_ingress
+    WITH CHECK (digest_version=2 AND contour.origin_insert_authorized(tenant_id,collector_id));
+CREATE POLICY origin_payloads_read ON contour.ingestion_payloads FOR SELECT TO contour_origin_ingress USING (tenant_id=contour.tenant_context());
+CREATE POLICY origin_payloads_insert ON contour.ingestion_payloads FOR INSERT TO contour_origin_ingress
+    WITH CHECK (payload_format=2 AND contour.origin_insert_authorized(tenant_id,collector_id));
+CREATE POLICY origin_metadata_read ON contour.ingestion_v2_metadata FOR SELECT TO contour_origin_ingress USING (tenant_id=contour.tenant_context());
+CREATE POLICY origin_metadata_insert ON contour.ingestion_v2_metadata FOR INSERT TO contour_origin_ingress
+    WITH CHECK (contour.origin_insert_authorized(tenant_id,collector_id));
+GRANT SELECT ON contour.ingestion_batches,contour.ingestion_payloads,contour.ingestion_v2_metadata TO contour_origin_ingress;
+GRANT INSERT (tenant_id,collector_id,batch_id,request_digest,digest_version,record_count)
+    ON contour.ingestion_batches TO contour_origin_ingress;
+GRANT INSERT ON contour.ingestion_payloads,contour.ingestion_v2_metadata TO contour_origin_ingress;
+
+-- One owner-only deferred event per transaction/batch. The event survives
+-- cleanup of the admission context and verifies the retained immutable set.
+CREATE TABLE contour.origin_pending_batch (
+    transaction_id bigint NOT NULL, backend_pid integer NOT NULL,
+    tenant_id uuid NOT NULL, collector_id uuid NOT NULL, batch_id uuid NOT NULL,
+    PRIMARY KEY (transaction_id,backend_pid,tenant_id,collector_id,batch_id)
+);
+ALTER TABLE contour.origin_pending_batch ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contour.origin_pending_batch FORCE ROW LEVEL SECURITY;
+CREATE POLICY origin_pending_owner ON contour.origin_pending_batch TO contour_owner
+    USING (tenant_id=contour.tenant_context()) WITH CHECK (tenant_id=contour.tenant_context());
+REVOKE ALL ON contour.origin_pending_batch FROM PUBLIC,contour_origin_ingress,contour_v2_ingress;
+CREATE FUNCTION contour.enqueue_origin_pending_batch() RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    -- A named early flush can consume an earlier pending event while the
+    -- admission context remains live. Any later metadata row in a verified
+    -- batch must queue another whole-batch verification.
+    IF NEW.attribution_class='verified_origin_v1' OR EXISTS (
+        SELECT 1 FROM contour.ingestion_v2_metadata m
+        WHERE m.tenant_id=NEW.tenant_id AND m.collector_id=NEW.collector_id
+          AND m.batch_id=NEW.batch_id AND m.attribution_class='verified_origin_v1'
+    ) THEN
+        PERFORM contour.origin_insert_authorized(NEW.tenant_id,NEW.collector_id);
+        INSERT INTO contour.origin_pending_batch VALUES
+          (pg_catalog.txid_current(),pg_catalog.pg_backend_pid(),NEW.tenant_id,NEW.collector_id,NEW.batch_id)
+          ON CONFLICT DO NOTHING;
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER enqueue_origin_pending_batch AFTER INSERT ON contour.ingestion_v2_metadata
+    FOR EACH ROW EXECUTE FUNCTION contour.enqueue_origin_pending_batch();
+CREATE FUNCTION contour.check_origin_pending_batch() RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE prior text; payload bytea;
+BEGIN
+    prior := pg_catalog.current_setting('apicontour.tenant_id',true);
+    PERFORM pg_catalog.set_config('apicontour.tenant_id',NEW.tenant_id::text,true);
+    SELECT p.checked_batch INTO STRICT payload FROM contour.ingestion_payloads p
+      WHERE p.tenant_id=NEW.tenant_id AND p.collector_id=NEW.collector_id AND p.batch_id=NEW.batch_id
+        AND p.payload_format=2 AND pg_catalog.octet_length(p.checked_batch) BETWEEN 1 AND 1048576;
+    PERFORM contour.verify_origin_batch_proofs(NEW.tenant_id,NEW.collector_id,NEW.batch_id,payload);
+    DELETE FROM contour.origin_pending_batch p WHERE p.transaction_id=NEW.transaction_id
+      AND p.backend_pid=NEW.backend_pid AND p.tenant_id=NEW.tenant_id
+      AND p.collector_id=NEW.collector_id AND p.batch_id=NEW.batch_id;
+    PERFORM pg_catalog.set_config('apicontour.tenant_id',coalesce(prior,''),true);
+    RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER check_origin_pending_batch AFTER INSERT ON contour.origin_pending_batch
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.check_origin_pending_batch();
+REVOKE ALL ON FUNCTION contour.enqueue_origin_pending_batch(),contour.check_origin_pending_batch() FROM PUBLIC;
 
 -- transaction failure probe
 INSERT INTO contour.schema_migrations(version) VALUES (17);

@@ -1006,11 +1006,16 @@ CREATE TABLE fixture.origin_zero_payload AS SELECT decode('$zero_fixture_hex','h
 SQL
 admin_sql <<'SQL'
 SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',false);
+-- The caller workload has a different complete scope from the API target.
+INSERT INTO contour.projects VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001800');
+INSERT INTO contour.services VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800');
+INSERT INTO contour.environments VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800');
+INSERT INTO contour.deployments VALUES ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800');
 INSERT INTO contour.workload_instances VALUES
- ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001803'),
+ ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001803'),
  ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001804'),
  ('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001805');
-SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001801','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001803','trusted_platform_v1',decode(repeat('a1',32),'hex'));
+SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001801','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001800','00000000-0000-0000-0000-000000001803','trusted_platform_v1',decode(repeat('a1',32),'hex'));
 SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001802','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001804','trusted_platform_v1',decode(repeat('a2',32),'hex'));
 SELECT contour.enroll_origin('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001806','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000001805','trusted_platform_v1',decode(repeat('a3',32),'hex'));
 SELECT contour.enroll_origin_credential('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000001811','00000000-0000-0000-0000-000000001801',decode(repeat('a1',32),'hex'));
@@ -1039,6 +1044,220 @@ INSERT INTO contour.ingestion_v2_metadata
  '00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',1,'http_json_v1','unattributed'
  FROM contour.ingestion_batches b CROSS JOIN (VALUES ('00000000-0000-4000-8000-000000001841'),('00000000-0000-4000-8000-000000001842'),('00000000-0000-4000-8000-000000001843')) r(id)
  WHERE b.batch_id='00000000-0000-4000-8000-000000001859';
+SQL
+# A mixed batch for real restricted-role writes. Canonical bytes are checked by
+# the SQL digest contract; strict SDK admission is exercised by the Rust suite.
+admin_sql <<'SQL'
+CREATE TABLE fixture.origin_binding_floor AS SELECT epoch,clock_floor FROM contour.origin_tenant_state WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+CREATE TABLE fixture.origin_binding_payload AS
+WITH source AS (
+ SELECT jsonb_set(jsonb_set(convert_from(canonical,'UTF8')::jsonb,
+   '{batch_id}',to_jsonb('00000000-0000-4000-8000-000000001860'::text)),
+   '{records,2,origin_witness}','{"kind":"unattributed"}'::jsonb) AS body
+ FROM fixture.origin_resolver_payload
+), encoded AS (SELECT convert_to(body::text,'UTF8') AS canonical FROM source)
+SELECT canonical,sha256(convert_to(E'apicontour/batch/2\n','UTF8') || canonical) AS digest FROM encoded;
+GRANT SELECT ON fixture.origin_binding_payload TO contour_origin_ingress_test;
+CREATE FUNCTION fixture.origin_binding_insert(metadata_count integer DEFAULT 3) RETURNS void
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+ INSERT INTO contour.ingestion_batches(tenant_id,collector_id,batch_id,request_digest,digest_version,record_count)
+ SELECT 'aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',digest,2,3 FROM fixture.origin_binding_payload;
+ INSERT INTO contour.ingestion_payloads SELECT 'aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',2,canonical FROM fixture.origin_binding_payload;
+ INSERT INTO contour.ingestion_v2_metadata
+ SELECT b.tenant_id,b.collector_id,b.batch_id,r.id::uuid,2,b.request_digest,b.accepted_at,
+ '00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',
+ '00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',1,'http_json_v1',
+ CASE WHEN r.n<3 OR metadata_count=4 THEN 'verified_origin_v1' ELSE 'unattributed' END
+ FROM contour.ingestion_batches b CROSS JOIN (VALUES (1,'00000000-0000-4000-8000-000000001841'),(2,'00000000-0000-4000-8000-000000001842'),(3,'00000000-0000-4000-8000-000000001843')) r(n,id)
+ WHERE b.batch_id='00000000-0000-4000-8000-000000001860' AND r.n<=metadata_count;
+END $$;
+GRANT EXECUTE ON FUNCTION fixture.origin_binding_insert(integer) TO contour_origin_ingress_test;
+SQL
+# Exercise an actual COMMIT failure, and require the intended integrity SQLSTATE.
+if binding_commit_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_origin_ingress_test -d contour_fixture 2>&1 <<'SQL'
+\set VERBOSITY verbose
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(3);
+CREATE TEMP TABLE origin_pending_batch (transaction_id bigint, backend_pid integer, tenant_id uuid, collector_id uuid, batch_id uuid);
+INSERT INTO origin_pending_batch VALUES (txid_current(),pg_backend_pid(),'aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860');
+SELECT 'pending temp forgery prepared';
+COMMIT;
+SQL
+); then
+    printf '%s\n' "$binding_commit_output"
+    echo 'missing proof unexpectedly committed' >&2
+    exit 1
+fi
+printf '%s\n' "$binding_commit_output"
+if [[ "$binding_commit_output" != *'23514'* || "$binding_commit_output" != *'pending temp forgery prepared'* ]]; then
+    echo 'missing proof failed for an unexpected reason' >&2
+    exit 1
+fi
+# Fault injection is isolated in transactions that must fail at COMMIT. All
+# writes before the injection use the real restricted ingress role and writer.
+for binding_fault in missing_proof extra_proof corrupt_proof missing_marker corrupt_marker; do
+    if binding_fault_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 -v binding_fault="$binding_fault" \
+        -h /var/run/postgresql -U postgres -d contour_fixture 2>&1 <<'SQL'
+\set VERBOSITY verbose
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT set_config('fixture.binding_fault', :'binding_fault', true);
+SET LOCAL ROLE contour_origin_ingress_test;
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(3);
+SELECT fixture.assert((SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',canonical)=2 FROM fixture.origin_binding_payload), 'fault fixture starts with complete proofs');
+RESET ROLE;
+SET LOCAL session_replication_role=replica;
+DO $$ DECLARE p contour.origin_proofs; changed integer; fault text := current_setting('fixture.binding_fault'); BEGIN
+ IF fault='missing_proof' THEN
+  DELETE FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841';
+ ELSIF fault='extra_proof' THEN
+  SELECT * INTO STRICT p FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841';
+  p.proof_id:=pg_catalog.gen_random_uuid(); p.record_id:='00000000-0000-4000-8000-000000001843';
+  INSERT INTO contour.origin_proofs SELECT (p).*;
+ ELSIF fault='corrupt_proof' THEN
+  UPDATE contour.origin_proofs SET canonical_proof=decode('00','hex') WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841';
+ ELSIF fault='missing_marker' THEN
+  DELETE FROM contour.origin_batch_proof_completion WHERE batch_id='00000000-0000-4000-8000-000000001860';
+ ELSIF fault='corrupt_marker' THEN
+  UPDATE contour.origin_batch_proof_completion SET proof_set_digest=decode(repeat('00',32),'hex') WHERE batch_id='00000000-0000-4000-8000-000000001860';
+ ELSE RAISE EXCEPTION 'unknown fixture fault'; END IF;
+ GET DIAGNOSTICS changed = ROW_COUNT;
+ IF changed<>1 THEN RAISE EXCEPTION 'fixture fault did not alter one row'; END IF;
+END $$;
+SET LOCAL session_replication_role=origin;
+SELECT 'binding mutation ready';
+COMMIT;
+SQL
+    ); then
+        printf '%s\n' "$binding_fault_output"
+        echo "$binding_fault unexpectedly committed" >&2
+        exit 1
+    fi
+    printf '%s\n' "$binding_fault_output"
+    if [[ "$binding_fault_output" != *'binding mutation ready'* || "$binding_fault_output" != *'23514'* ]]; then
+        echo "$binding_fault failed before COMMIT or with an unexpected SQLSTATE" >&2
+        exit 1
+    fi
+done
+# Flushing only the proof guard must not let a later unattributed metadata row
+# escape the final integrity check while the real Q+C capability is still live.
+if binding_late_metadata_output=$(docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_origin_ingress_test -d contour_fixture 2>&1 <<'SQL'
+\set VERBOSITY verbose
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(3);
+SELECT fixture.assert((SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',canonical)=2 FROM fixture.origin_binding_payload), 'late metadata fixture starts with complete verified batch');
+SET CONSTRAINTS contour.check_origin_pending_batch IMMEDIATE;
+SELECT contour.require_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SET CONSTRAINTS contour.check_origin_pending_batch DEFERRED;
+INSERT INTO contour.ingestion_v2_metadata
+ SELECT tenant_id,collector_id,batch_id,'00000000-0000-4000-8000-000000001849',digest_version,request_digest,accepted_at,
+ source_id,project_id,service_id,environment_id,deployment_id,policy_revision,parser_profile,'unattributed'
+ FROM contour.ingestion_v2_metadata WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841';
+SELECT 'late metadata inserted after named guard';
+COMMIT;
+SQL
+); then
+    printf '%s\n' "$binding_late_metadata_output"
+    echo 'extra metadata unexpectedly committed after named guard' >&2
+    exit 1
+fi
+printf '%s\n' "$binding_late_metadata_output"
+if [[ "$binding_late_metadata_output" != *'late metadata inserted after named guard'* || "$binding_late_metadata_output" != *'23514'* ]]; then
+    echo 'late metadata failed before COMMIT or with an unexpected SQLSTATE' >&2
+    exit 1
+fi
+docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
+    -h /var/run/postgresql -U contour_origin_ingress_test -d contour_fixture <<'SQL'
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.expect_state($q$SELECT * FROM contour.origin_pending_batch$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.origin_pending_batch DEFAULT VALUES$q$,'42501');
+SELECT fixture.expect_state($q$SELECT fixture.origin_binding_insert(3)$q$,'42501');
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.expect_state($q$SELECT contour.origin_insert_authorized('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000002')$q$,'42501');
+SELECT fixture.origin_binding_insert(3);
+SELECT fixture.expect_state($q$SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',(SELECT canonical || decode('20','hex') FROM fixture.origin_binding_payload))$q$,'23514');
+-- A missing proof set must fail even when deferred checks are forced early.
+SELECT fixture.expect_state($q$SET CONSTRAINTS contour.check_origin_pending_batch IMMEDIATE$q$,'23514');
+ROLLBACK;
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(2);
+SELECT fixture.expect_state($q$SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',(SELECT canonical FROM fixture.origin_binding_payload))$q$,'23514');
+SELECT fixture.expect_state($q$SET CONSTRAINTS contour.check_origin_pending_batch IMMEDIATE$q$,'23514');
+ROLLBACK;
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(4);
+SELECT fixture.expect_state($q$SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',(SELECT canonical FROM fixture.origin_binding_payload))$q$,'23514');
+SELECT fixture.expect_state($q$SET CONSTRAINTS contour.check_origin_pending_batch IMMEDIATE$q$,'23514');
+ROLLBACK;
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
+SELECT fixture.origin_binding_insert(3);
+SELECT fixture.assert((SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',canonical)=2 FROM fixture.origin_binding_payload), 'mixed verified proof set');
+-- Context cleanup is queued first; changed caller GUC must not hide the batch.
+SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',true);
+COMMIT;
+BEGIN;
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',true);
+SELECT fixture.assert((SELECT contour.verify_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',canonical)=2 FROM fixture.origin_binding_payload), 'mixed batch historical verification');
+ROLLBACK;
+SQL
+admin_sql <<'SQL'
+SELECT set_config('apicontour.tenant_id','aaaaaaaa-0000-0000-0000-000000000000',false);
+SELECT fixture.assert(NOT EXISTS (SELECT 1 FROM contour.origin_pending_batch), 'deferred queue cleared after commit and abort');
+SET ROLE contour_v2_ingress_test;
+-- Basic V2 cannot append even an unattributed row to a verified batch.
+SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_v2_metadata
+ SELECT tenant_id,collector_id,batch_id,'00000000-0000-4000-8000-000000001849',digest_version,request_digest,accepted_at,
+ source_id,project_id,service_id,environment_id,deployment_id,policy_revision,parser_profile,'unattributed'
+ FROM contour.ingestion_v2_metadata WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841'$q$,'42501');
+SELECT fixture.expect_state($q$INSERT INTO contour.ingestion_v2_metadata
+ SELECT tenant_id,collector_id,batch_id,'00000000-0000-4000-8000-000000001849',digest_version,request_digest,accepted_at,
+ source_id,project_id,service_id,environment_id,deployment_id,policy_revision,parser_profile,'verified_origin_v1'
+ FROM contour.ingestion_v2_metadata WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841'$q$,'42501');
+RESET ROLE;
+SELECT fixture.assert((SELECT count(*)=2 FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860'), 'mixed batch retained exact proofs');
+SELECT fixture.assert((SELECT origin_project_id='00000000-0000-0000-0000-000000001800' AND project_id='00000000-0000-0000-0000-000000000001' FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860' AND record_id='00000000-0000-4000-8000-000000001841'), 'origin and API scopes remain distinct');
+-- Close a real lifecycle after commit. The restricted historical retry must be
+-- read-only and retain the original receipt, all proof bytes, and quota usage.
+CREATE TEMP TABLE origin_binding_receipt_before AS
+ SELECT receipt_id,accepted_at,request_digest FROM contour.ingestion_batches WHERE batch_id='00000000-0000-4000-8000-000000001860';
+CREATE TEMP TABLE origin_binding_proofs_before AS
+ SELECT * FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860';
+CREATE TEMP TABLE origin_binding_usage_before AS
+ SELECT * FROM contour.origin_logical_usage WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+SELECT contour.end_origin('aaaaaaaa-0000-0000-0000-000000000000','lifecycle_closed','00000000-0000-0000-0000-000000001801');
+SET ROLE contour_origin_ingress_test;
+SELECT fixture.assert((SELECT contour.verify_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001860',canonical)=2 FROM fixture.origin_binding_payload), 'verified historical retry after closure');
+RESET ROLE;
+SELECT fixture.assert(NOT EXISTS ((SELECT receipt_id,accepted_at,request_digest FROM contour.ingestion_batches WHERE batch_id='00000000-0000-4000-8000-000000001860' EXCEPT ALL SELECT * FROM origin_binding_receipt_before) UNION ALL (SELECT * FROM origin_binding_receipt_before EXCEPT ALL SELECT receipt_id,accepted_at,request_digest FROM contour.ingestion_batches WHERE batch_id='00000000-0000-4000-8000-000000001860')), 'historical retry preserves receipt');
+SELECT fixture.assert(NOT EXISTS ((SELECT * FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860' EXCEPT ALL SELECT * FROM origin_binding_proofs_before) UNION ALL (SELECT * FROM origin_binding_proofs_before EXCEPT ALL SELECT * FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860')), 'historical retry preserves proofs');
+SELECT fixture.assert(NOT EXISTS ((SELECT * FROM contour.origin_logical_usage WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000' EXCEPT ALL SELECT * FROM origin_binding_usage_before) UNION ALL (SELECT * FROM origin_binding_usage_before EXCEPT ALL SELECT * FROM contour.origin_logical_usage WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000')), 'historical retry preserves usage');
+-- Restore the isolated fixture state for the pre-existing B2 quota tests.
+BEGIN;
+SET LOCAL session_replication_role=replica;
+DELETE FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001860';
+DELETE FROM contour.origin_batch_proof_completion WHERE batch_id='00000000-0000-4000-8000-000000001860';
+DELETE FROM contour.ingestion_v2_metadata WHERE batch_id='00000000-0000-4000-8000-000000001860';
+DELETE FROM contour.ingestion_payloads WHERE batch_id='00000000-0000-4000-8000-000000001860';
+DELETE FROM contour.ingestion_batches WHERE batch_id='00000000-0000-4000-8000-000000001860';
+DELETE FROM contour.origin_logical_usage WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+DELETE FROM contour.origin_terminal_events WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000' AND event_kind='lifecycle_closed' AND lifecycle_id='00000000-0000-0000-0000-000000001801';
+UPDATE contour.origin_tenant_state SET epoch=(SELECT epoch FROM fixture.origin_binding_floor),clock_floor=(SELECT clock_floor FROM fixture.origin_binding_floor) WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000';
+COMMIT;
 SQL
 docker exec -i "$container_id" psql -X -v ON_ERROR_STOP=1 \
     -h /var/run/postgresql -U contour_origin_ingress_test -d contour_fixture <<'SQL'
@@ -1198,6 +1417,17 @@ INSERT INTO contour.origin_logical_usage VALUES ('aaaaaaaa-0000-0000-0000-000000
 SET LOCAL ROLE contour_origin_ingress_test;
 SELECT contour.begin_origin_ingress('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001');
 SELECT fixture.expect_state($q$SELECT contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001831',(SELECT canonical FROM fixture.origin_resolver_payload))$q$,'54000');
+DO $$ DECLARE constraint_name text; BEGIN
+ BEGIN
+  PERFORM contour.write_origin_batch_proofs('aaaaaaaa-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000001','00000000-0000-4000-8000-000000001831',(SELECT canonical FROM fixture.origin_resolver_payload));
+  RAISE EXCEPTION 'quota unexpectedly accepted';
+ EXCEPTION WHEN SQLSTATE '54000' THEN
+  GET STACKED DIAGNOSTICS constraint_name = CONSTRAINT_NAME;
+  IF constraint_name IS DISTINCT FROM 'origin_logical_quota_exhausted' THEN
+   RAISE EXCEPTION 'incorrect quota constraint tag';
+  END IF;
+ END;
+END $$;
 RESET ROLE;
 SELECT fixture.assert((SELECT count(*)=0 FROM contour.origin_proofs WHERE batch_id='00000000-0000-4000-8000-000000001831'), 'quota failure rolls back earlier proof inserts');
 SELECT fixture.assert((SELECT used_bytes=1073741825-:'origin_proof_total'::bigint FROM contour.origin_logical_usage WHERE tenant_id='aaaaaaaa-0000-0000-0000-000000000000'), 'quota failure rolls back charges');
