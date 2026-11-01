@@ -6,11 +6,11 @@ use std::{
     pin::pin,
     sync::{
         Arc, Mutex as Gate, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::Poll,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore, SemaphorePermit};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoolCapture {
@@ -27,10 +27,14 @@ pub struct CollectorPool {
     enabled: AtomicBool,
     epoch: AtomicU64,
     sync: Mutex<()>,
+    background: Semaphore,
     cancel: Notify,
     gate: Gate<()>,
     losses: AtomicU64,
     cancelled: Vec<AtomicU64>,
+    next_slot: AtomicUsize,
+    #[cfg(test)]
+    blocked_sends: AtomicUsize,
 }
 
 // Cancellation stays durable even when forwarding cannot acquire the gate.
@@ -70,9 +74,13 @@ impl CollectorPool {
             enabled: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             sync: Mutex::new(()),
+            background: Semaphore::new(1),
             cancel: Notify::new(),
             gate: Gate::new(()),
             losses: AtomicU64::new(0),
+            next_slot: AtomicUsize::new(0),
+            #[cfg(test)]
+            blocked_sends: AtomicUsize::new(0),
         }))
     }
     fn try_gate(&self) -> Result<PoolGate<'_>, OwnerError> {
@@ -123,6 +131,25 @@ impl CollectorPool {
     }
     fn current(&self, epoch: u64) -> bool {
         self.enabled.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch
+    }
+    // Wait outside every owner/raw lock. Tokio's semaphore queues waiters fairly;
+    // cancellation must also wake an old waiter before it can use a new grant.
+    async fn background_permit(&self, epoch: u64) -> Result<SemaphorePermit<'_>, OwnerError> {
+        let acquire = self.background.acquire();
+        let mut acquire = pin!(acquire);
+        let notify = self.cancel.notified();
+        let mut notify = pin!(notify);
+        poll_fn(|cx| {
+            if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() || !self.current(epoch) {
+                return Poll::Ready(Err(OwnerError::Paused));
+            }
+            match acquire.as_mut().poll(cx) {
+                Poll::Ready(Ok(permit)) if self.current(epoch) => Poll::Ready(Ok(permit)),
+                Poll::Ready(_) => Poll::Ready(Err(OwnerError::Paused)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
     // Called with the coordinator gate held. A slot held by send has no raw
     // stream; every other slot can be examined and reclaimed without waiting.
@@ -225,8 +252,21 @@ impl CollectorPool {
             return Err(OwnerError::Paused);
         }
         self.check_live()?;
-        for (slot, mutex) in self.slots.iter().enumerate() {
-            if let Ok(mut owner) = mutex.try_lock() {
+        // The gate serializes this bounded scheduling cursor; it is not an
+        // authority generation and advances only after a reservation succeeds.
+        let start = self.next_slot.load(Ordering::Relaxed);
+        let mut tried = 0u8;
+        loop {
+            let mut chosen: Option<(usize, tokio::sync::MutexGuard<'_, CollectorOwner>)> = None;
+            let mut full = 0;
+            for offset in 0..self.slots.len() {
+                let slot = (start + offset) % self.slots.len();
+                if tried & (1 << slot) != 0 {
+                    continue;
+                }
+                let Ok(mut owner) = self.slots[slot].try_lock() else {
+                    continue;
+                };
                 if !self.current(epoch) {
                     self.lose();
                     return Err(OwnerError::Paused);
@@ -236,18 +276,53 @@ impl CollectorPool {
                 if !owner.streams.is_empty() {
                     continue;
                 }
-                if let Ok(id) = owner.begin_capture(scope) {
-                    return Ok(PoolCapture {
-                        pool: self.instance,
-                        slot,
-                        epoch,
-                        id,
-                    });
+                // Expired retained entries must not make a live owner appear
+                // permanently full. Maintenance only deletes; it grants no
+                // authority and errors cannot fall through to another slot.
+                owner.expire_retained().inspect_err(|_| self.lose())?;
+                if owner.guard().is_err() {
+                    drop(owner);
+                    let _ = self.check_live();
+                    self.lose();
+                    return Err(OwnerError::Paused);
+                }
+                let stats = owner.stats();
+                if stats.records >= owner.configured_queue_records
+                    || stats.bytes >= owner.configured_queue_bytes
+                {
+                    full += 1;
+                    continue;
+                }
+                // Compare charged fractions without rounding; iteration order
+                // provides the rotating tie-breaker. The next charge is unknown.
+                let replace = chosen.as_ref().is_none_or(|(_, best)| {
+                    (stats.bytes as u128) * (best.configured_queue_bytes as u128)
+                        < (best.stats().bytes as u128) * (owner.configured_queue_bytes as u128)
+                });
+                if replace {
+                    chosen = Some((slot, owner));
                 }
             }
+            let Some((slot, mut owner)) = chosen else {
+                self.lose();
+                return if full == self.slots.len() {
+                    Err(OwnerError::Queue(contour_core::QueueError::Full))
+                } else {
+                    Err(OwnerError::Paused)
+                };
+            };
+            if let Ok(id) = owner.begin_capture(scope) {
+                self.next_slot
+                    .store((slot + 1) % self.slots.len(), Ordering::Relaxed);
+                return Ok(PoolCapture {
+                    pool: self.instance,
+                    slot,
+                    epoch,
+                    id,
+                });
+            }
+            tried |= 1 << slot;
         }
-        self.lose();
-        Err(OwnerError::Paused)
     }
     pub fn try_fragment(&self, token: PoolCapture, bytes: &[u8]) -> Result<(), OwnerError> {
         if token.pool != self.instance {
@@ -366,6 +441,7 @@ impl CollectorPool {
         if !self.current(epoch) {
             return Err(OwnerError::Paused);
         }
+        let _permit = self.background_permit(epoch).await?;
         let mut owner = {
             let _gate = self.try_gate().map_err(|_| OwnerError::Paused)?;
             let owner = self
@@ -381,6 +457,16 @@ impl CollectorPool {
         };
         let notify = self.cancel.notified();
         let mut notify = pin!(notify);
+        #[cfg(test)]
+        let send = async {
+            if self.blocked_sends.load(Ordering::Acquire) != 0 {
+                self.blocked_sends.fetch_add(1, Ordering::AcqRel);
+                std::future::pending().await
+            } else {
+                owner.send_once().await
+            }
+        };
+        #[cfg(not(test))]
         let send = owner.send_once();
         let mut send = pin!(send);
         poll_fn(|cx| {
@@ -398,6 +484,7 @@ impl CollectorPool {
         if !self.current(epoch) {
             return Err(OwnerError::Paused);
         }
+        let _permit = self.background_permit(epoch).await?;
         let mut owner = {
             let _gate = self.try_gate().map_err(|_| OwnerError::Paused)?;
             let owner = self
@@ -430,8 +517,475 @@ impl CollectorPool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::capture_tests::{make_owner, scope};
+    use super::super::capture_tests::{make_owner, make_owner_at, make_owner_at_with_ttl, scope};
     use super::*;
+
+    #[test]
+    fn pending_background_sends_leave_capture_owner_available() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            let limits = contour_core::QueueLimits::new(2, 4000).unwrap();
+            owner.queue = contour_core::MemoryQueue::new(
+                owner.client.identity.each_ref().map(String::as_str),
+                limits,
+            )
+            .unwrap();
+            owner.configured_queue_bytes = limits.byte_limit();
+            owner.configured_queue_records = limits.record_limit();
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        {
+            let guards = pool
+                .slots
+                .iter()
+                .map(|slot| slot.try_lock().unwrap())
+                .collect::<Vec<_>>();
+            assert!(CollectorPool::validate_common(&guards).is_ok());
+        }
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut first = pin!(pool.send(0));
+                let mut second = pin!(pool.send(1));
+                poll_fn(|cx| {
+                    assert!(first.as_mut().poll(cx).is_pending());
+                    assert!(second.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(
+                    pool.blocked_sends.load(Ordering::Acquire) > 1,
+                    "a transport is actually pending while holding an owner"
+                );
+                let s = scope();
+                let capture = pool
+                    .try_begin(&s)
+                    .expect("background network waits must leave another owner available");
+                pool.try_fragment(capture, br#"{"id":1}"#).unwrap();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                pool.try_finish(
+                    capture,
+                    RecordMetadata {
+                        record_id: "00000000-0000-4000-8000-000000000002",
+                        source_id: s.source_id,
+                        workload: s.workload,
+                        protocol: "http",
+                        direction: "request",
+                        visibility: "structure",
+                        operation: s.operation,
+                        route_template: s.route_template,
+                        route_uncertain: false,
+                        parser_profile: s.parser_profile,
+                        policy_revision: 1,
+                        count: 1,
+                        first_seen: timestamp.clone(),
+                        last_seen: timestamp,
+                        sample_numerator: 1,
+                        sample_denominator: 1,
+                        status_code: None,
+                        request_header_names: &[],
+                        response_header_names: &[],
+                        query_parameter_names: &[],
+                    },
+                )
+                .expect("reserved owner must admit the actual captured record");
+                assert_eq!(pool.losses(), 0);
+            });
+    }
+
+    #[test]
+    fn synchronize_cancels_permit_waiter_and_inflight_send_clears_raw() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sync_lock = pool.sync.lock().await;
+                let mut sending = pin!(pool.send(0));
+                let mut waiting = pin!(pool.send(1));
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    assert!(waiting.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let capture = pool.try_begin(&scope()).unwrap();
+                assert_eq!(capture.slot, 1);
+                pool.try_fragment(capture, b"private raw bytes").unwrap();
+                let mut sync = Box::pin(pool.synchronize());
+                poll_fn(|cx| {
+                    assert!(sync.as_mut().poll(cx).is_pending());
+                    assert!(!pool.enabled.load(Ordering::Acquire));
+                    assert!(pool.slots[1].try_lock().unwrap().streams.is_empty());
+                    assert!(matches!(
+                        waiting.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    // The waiter returned without acquiring a permit or owner;
+                    // the active transport remains owned until its future polls cancellation.
+                    assert!(pool.slots[0].try_lock().is_err());
+                    assert!(matches!(
+                        sending.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(pool.slots[0].try_lock().is_ok());
+                assert_eq!(pool.blocked_sends.load(Ordering::Acquire), 2);
+                drop(sync);
+                drop(sync_lock);
+            });
+    }
+
+    #[test]
+    fn waiter_cannot_use_authority_from_a_later_epoch() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut sending = pin!(pool.send(0));
+                let mut waiting = pin!(pool.wait_retry(1));
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    assert!(waiting.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                // Model an authority generation being replaced while the old
+                // future is queued; it must not use the later live generation.
+                pool.enabled.store(false, Ordering::Release);
+                pool.advance_epoch().unwrap();
+                pool.enabled.store(true, Ordering::Release);
+                pool.cancel.notify_waiters();
+                poll_fn(|cx| {
+                    assert!(matches!(
+                        waiting.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    assert!(matches!(
+                        sending.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(pool.blocked_sends.load(Ordering::Acquire), 2);
+                assert!(pool.slots[1].try_lock().unwrap().streams.is_empty());
+            });
+    }
+
+    #[test]
+    fn expired_retention_is_reclaimed_before_full_queue_selection() {
+        let owner = make_owner_at_with_ttl(time::OffsetDateTime::now_utc(), 1);
+        let pool = CollectorPool::new(vec![owner]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let s = scope();
+        let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+        let metadata = |record_id| RecordMetadata {
+            record_id,
+            source_id: s.source_id,
+            workload: s.workload,
+            protocol: "http",
+            direction: "request",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: timestamp.clone(),
+            last_seen: timestamp.clone(),
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: None,
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        let first = pool.try_begin(&s).unwrap();
+        pool.try_fragment(first, br#"{"id":1}"#).unwrap();
+        pool.try_finish(first, metadata("00000000-0000-4000-8000-000000000002"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        {
+            let owner = pool.slots[0].try_lock().unwrap();
+            assert!(
+                owner.is_live(),
+                "authority must remain live after retention expires"
+            );
+            assert_eq!(owner.stats().records, 1, "no external maintenance occurred");
+        }
+        let next = pool
+            .try_begin(&s)
+            .expect("expired retention must not block a live capture");
+        pool.try_fragment(next, br#"{"id":1}"#).unwrap();
+        pool.try_finish(next, metadata("00000000-0000-4000-8000-000000000003"))
+            .unwrap();
+        let stats = pool.slots[0].try_lock().unwrap().stats();
+        assert_eq!(stats.expired, 1);
+        assert_eq!(stats.records, 1);
+    }
+
+    #[test]
+    fn failed_reservation_does_not_advance_rotation() {
+        let now = time::OffsetDateTime::now_utc();
+        let pool = CollectorPool::new(vec![make_owner_at(now), make_owner_at(now)]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let first = pool.try_begin(&scope()).unwrap();
+        let second = pool.try_begin(&scope()).unwrap();
+        assert_eq!((first.slot, second.slot), (0, 1));
+        assert!(pool.try_begin(&scope()).is_err());
+        assert_eq!(pool.next_slot.load(Ordering::Relaxed), 0);
+        pool.try_cancel(first);
+        let next = pool.try_begin(&scope()).unwrap();
+        assert_eq!(next.slot, 0);
+        pool.try_cancel(next);
+        pool.try_cancel(second);
+    }
+
+    #[test]
+    fn chooses_lower_fraction_of_charged_queue_budget() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for (owner, bytes) in owners.iter_mut().zip([4000, 6000]) {
+            let limits = contour_core::QueueLimits::new(2, bytes).unwrap();
+            owner.queue = contour_core::MemoryQueue::new(
+                owner.client.identity.each_ref().map(String::as_str),
+                limits,
+            )
+            .unwrap();
+            owner.configured_queue_bytes = limits.byte_limit();
+            owner.configured_queue_records = limits.record_limit();
+            let s = scope();
+            let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+            let token = owner.begin_capture(&s).unwrap();
+            owner.capture_fragment(token, br#"{"id":1}"#).unwrap();
+            owner
+                .finish_and_admit(
+                    token,
+                    RecordMetadata {
+                        record_id: "00000000-0000-4000-8000-000000000002",
+                        source_id: s.source_id,
+                        workload: s.workload,
+                        protocol: "http",
+                        direction: "request",
+                        visibility: "structure",
+                        operation: s.operation,
+                        route_template: s.route_template,
+                        route_uncertain: false,
+                        parser_profile: s.parser_profile,
+                        policy_revision: 1,
+                        count: 1,
+                        first_seen: timestamp.clone(),
+                        last_seen: timestamp,
+                        sample_numerator: 1,
+                        sample_denominator: 1,
+                        status_code: None,
+                        request_header_names: &[],
+                        response_header_names: &[],
+                        query_parameter_names: &[],
+                    },
+                )
+                .unwrap();
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        {
+            let guards = pool
+                .slots
+                .iter()
+                .map(|slot| slot.try_lock().unwrap())
+                .collect::<Vec<_>>();
+            assert!(CollectorPool::validate_common(&guards).is_ok());
+            assert_eq!(guards[0].stats().bytes, guards[1].stats().bytes);
+        }
+        pool.enabled.store(true, Ordering::Release);
+        let token = pool.try_begin(&scope()).unwrap();
+        assert_eq!(token.slot, 1);
+        pool.try_cancel(token);
+    }
+
+    #[test]
+    fn rotating_capture_reservations_use_both_record_and_byte_capacity() {
+        for (record_limit, byte_limit) in [(1, 5000), (16, 5000), (16, 3936)] {
+            let now = time::OffsetDateTime::now_utc();
+            let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+            for owner in &mut owners {
+                let limits = contour_core::QueueLimits::new(record_limit, byte_limit).unwrap();
+                owner.queue = contour_core::MemoryQueue::new(
+                    owner.client.identity.each_ref().map(String::as_str),
+                    limits,
+                )
+                .unwrap();
+                owner.configured_queue_bytes = limits.byte_limit();
+                owner.configured_queue_records = limits.record_limit();
+                assert!(owner.is_live());
+            }
+            let pool = CollectorPool::new(owners).unwrap();
+            {
+                let guards = pool
+                    .slots
+                    .iter()
+                    .map(|slot| slot.try_lock().unwrap())
+                    .collect::<Vec<_>>();
+                assert!(CollectorPool::validate_common(&guards).is_ok());
+            }
+            pool.enabled.store(true, Ordering::Release);
+            let metadata = |record_id| {
+                let s = scope();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                RecordMetadata {
+                    record_id,
+                    source_id: s.source_id,
+                    workload: s.workload,
+                    protocol: "http",
+                    direction: "request",
+                    visibility: "structure",
+                    operation: s.operation,
+                    route_template: s.route_template,
+                    route_uncertain: false,
+                    parser_profile: s.parser_profile,
+                    policy_revision: 1,
+                    count: 1,
+                    first_seen: timestamp.clone(),
+                    last_seen: timestamp,
+                    sample_numerator: 1,
+                    sample_denominator: 1,
+                    status_code: None,
+                    request_header_names: &[],
+                    response_header_names: &[],
+                    query_parameter_names: &[],
+                }
+            };
+            for (expected_slot, id) in [
+                (0, "00000000-0000-4000-8000-000000000002"),
+                (1, "00000000-0000-4000-8000-000000000003"),
+            ] {
+                let token = pool.try_begin(&scope()).unwrap();
+                assert_eq!(token.slot, expected_slot);
+                pool.try_fragment(token, br#"{"id":1}"#).unwrap();
+                pool.try_finish(token, metadata(id)).unwrap();
+            }
+            for slot in &pool.slots {
+                let stats = slot.try_lock().unwrap().stats();
+                assert_eq!(stats.records, 1);
+                assert!(stats.bytes > 2500 && stats.bytes <= byte_limit, "{stats:?}");
+            }
+            let before = pool.losses();
+            if record_limit == 1 || byte_limit == 3936 {
+                assert!(matches!(
+                    pool.try_begin(&scope()),
+                    Err(OwnerError::Queue(contour_core::QueueError::Full))
+                ));
+            } else {
+                let token = pool.try_begin(&scope()).unwrap();
+                pool.try_fragment(token, br#"{"id":1}"#).unwrap();
+                assert!(matches!(
+                    pool.try_finish(token, metadata("00000000-0000-4000-8000-000000000004")),
+                    Err(OwnerError::Queue(contour_core::QueueError::Full))
+                ));
+            }
+            assert_eq!(pool.losses(), before + 1);
+            for slot in &pool.slots {
+                let owner = slot.try_lock().unwrap();
+                assert_eq!(owner.stats().records, 1);
+                assert!(owner.streams.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn capture_uses_available_owner_when_first_owner_queue_is_full() {
+        for record_limit in [1, 16] {
+            let now = time::OffsetDateTime::now_utc();
+            let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+            for owner in &mut owners {
+                let limits = contour_core::QueueLimits::new(record_limit, 5000).unwrap();
+                owner.queue = contour_core::MemoryQueue::new(
+                    owner.client.identity.each_ref().map(String::as_str),
+                    limits,
+                )
+                .unwrap();
+                owner.configured_queue_bytes = limits.byte_limit();
+                owner.configured_queue_records = limits.record_limit();
+                assert!(owner.is_live());
+            }
+            let pool = CollectorPool::new(owners).unwrap();
+            {
+                let guards = pool
+                    .slots
+                    .iter()
+                    .map(|slot| slot.try_lock().unwrap())
+                    .collect::<Vec<_>>();
+                assert!(CollectorPool::validate_common(&guards).is_ok());
+            }
+            pool.enabled.store(true, Ordering::Release);
+            let metadata = |record_id| {
+                let s = scope();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                RecordMetadata {
+                    record_id,
+                    source_id: s.source_id,
+                    workload: s.workload,
+                    protocol: "http",
+                    direction: "request",
+                    visibility: "structure",
+                    operation: s.operation,
+                    route_template: s.route_template,
+                    route_uncertain: false,
+                    parser_profile: s.parser_profile,
+                    policy_revision: 1,
+                    count: 1,
+                    first_seen: timestamp.clone(),
+                    last_seen: timestamp,
+                    sample_numerator: 1,
+                    sample_denominator: 1,
+                    status_code: None,
+                    request_header_names: &[],
+                    response_header_names: &[],
+                    query_parameter_names: &[],
+                }
+            };
+            {
+                let mut first = pool.slots[0].try_lock().unwrap();
+                let token = first.begin_capture(&scope()).unwrap();
+                first.capture_fragment(token, br#"{"id":1}"#).unwrap();
+                first
+                    .finish_and_admit(token, metadata("00000000-0000-4000-8000-000000000002"))
+                    .unwrap();
+            }
+            assert_eq!(pool.slots[0].try_lock().unwrap().stats().records, 1);
+            assert_eq!(pool.slots[1].try_lock().unwrap().stats().records, 0);
+            let token = pool.try_begin(&scope()).unwrap();
+            pool.try_fragment(token, br#"{"id":1}"#).unwrap();
+            let result = pool.try_finish(token, metadata("00000000-0000-4000-8000-000000000003"));
+            if result.is_err() {
+                let mut other = pool.slots[1].try_lock().unwrap();
+                let available = other.begin_capture(&scope()).unwrap();
+                other.capture_fragment(available, br#"{"id":1}"#).unwrap();
+                other
+                    .finish_and_admit(available, metadata("00000000-0000-4000-8000-000000000004"))
+                    .expect("other owner must have actual capacity");
+            }
+            assert!(
+                result.is_ok(),
+                "available owner should accept capture: {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn active_capture_is_not_displaced_by_send_or_another_stream() {
@@ -470,8 +1024,9 @@ mod tests {
     }
     #[test]
     fn common_policy_cannot_resume_with_different_source_authorizations() {
-        let a = make_owner();
-        let b = make_owner();
+        let now = time::OffsetDateTime::now_utc();
+        let a = make_owner_at(now);
+        let b = make_owner_at(now);
         let pool = CollectorPool::new(vec![a, b]).unwrap();
         let mut guards = pool
             .slots
@@ -486,6 +1041,31 @@ mod tests {
         guards[1].live.as_mut().unwrap().sources = vec![
             contour_core::SourceAssignment::new(id, [id; 6], "runtime", &["http_text_v1"]).unwrap(),
         ];
+        assert!(CollectorPool::validate_common(&guards).is_err());
+    }
+    #[test]
+    fn common_policy_rejects_same_revision_different_signed_content() {
+        let now = time::OffsetDateTime::now_utc();
+        let a = make_owner_at(now - time::Duration::seconds(1));
+        let b = make_owner_at(now);
+        let pool = CollectorPool::new(vec![a, b]).unwrap();
+        let mut guards = pool
+            .slots
+            .iter()
+            .map(|slot| slot.try_lock().unwrap())
+            .collect::<Vec<_>>();
+        for owner in &mut guards {
+            owner.configured_queue_bytes = 5000;
+            assert!(owner.is_live());
+        }
+        assert_eq!(
+            guards[0].policies.last().unwrap().policy.revision(),
+            guards[1].policies.last().unwrap().policy.revision()
+        );
+        assert_ne!(
+            guards[0].policies.last().unwrap().policy.expires_at(),
+            guards[1].policies.last().unwrap().policy.expires_at()
+        );
         assert!(CollectorPool::validate_common(&guards).is_err());
     }
     #[test]

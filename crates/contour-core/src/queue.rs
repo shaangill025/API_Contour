@@ -45,6 +45,10 @@ impl QueueLimits {
     pub fn byte_limit(&self) -> usize {
         self.bytes
     }
+    /// Configured maximum retained records; not a policy grant.
+    pub fn record_limit(&self) -> usize {
+        self.records
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueStats {

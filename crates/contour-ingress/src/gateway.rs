@@ -1,5 +1,6 @@
 //! Fixed-target HTTP/1 application-stream observer.
 use crate::CollectorTls;
+mod upstream;
 use bytes::Bytes;
 use contour_core::{CaptureScope, RecordMetadata, Timestamp};
 use contour_delivery::{CollectorPool, PoolCapture};
@@ -7,7 +8,6 @@ use http_body_util::{BodyExt, Empty, combinators::UnsyncBoxBody};
 use hyper::{
     Request, Response,
     body::{Body, Frame, Incoming},
-    client::conn::http1,
     header::{self, HeaderMap, HeaderName, HeaderValue},
     server::conn::http1 as server_http1,
     service::service_fn,
@@ -30,13 +30,9 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-    task::JoinHandle,
-    time::timeout,
-};
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinHandle, time::timeout};
 use tokio_rustls::TlsConnector;
+use upstream::Upstream;
 
 type ForwardBody = UnsyncBoxBody<Bytes, hyper::Error>;
 
@@ -95,9 +91,7 @@ impl CapturePoint {
 pub struct Gateway {
     tls: CollectorTls,
     peer_leaf: Vec<u8>,
-    upstream: SocketAddr,
-    upstream_name: String,
-    upstream_tls: TlsConnector,
+    upstream: Upstream,
     authority: HeaderValue,
     point: Arc<CapturePoint>,
     pool: Arc<CollectorPool>,
@@ -177,9 +171,11 @@ impl Gateway {
         Ok(Arc::new(Self {
             tls,
             peer_leaf: peer_leaf.to_vec(),
-            upstream,
-            upstream_name: upstream_name.to_owned(),
-            upstream_tls: TlsConnector::from(Arc::new(config)),
+            upstream: Upstream::new(
+                upstream,
+                upstream_name.to_owned(),
+                TlsConnector::from(Arc::new(config)),
+            ),
             authority,
             point: Arc::new(point),
             pool,
@@ -189,6 +185,9 @@ impl Gateway {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<(), &'static str> {
         loop {
             let (socket, _) = listener.accept().await.map_err(|_| "accept failed")?;
+            if socket.set_nodelay(true).is_err() {
+                continue;
+            }
             let Ok(permit) = self.connections.clone().try_acquire_owned() else {
                 drop(socket);
                 continue;
@@ -266,7 +265,13 @@ impl Gateway {
             .path_and_query()
             .map(|p| p.as_str())
             .unwrap_or("/");
-        parts.uri = path.parse().map_err(|_| ())?;
+        parts.uri = format!(
+            "http://{}{}",
+            self.authority.to_str().map_err(|_| ())?,
+            path
+        )
+        .parse()
+        .map_err(|_| ())?;
         let eligible = prepare_request_capture(&mut parts.headers) && eligible;
         parts.headers.insert(header::HOST, self.authority.clone());
         let req_capture = if eligible {
@@ -276,50 +281,7 @@ impl Gateway {
         };
         let body = ObservedBody::new(incoming, req_capture, None).boxed_unsync();
         let request = Request::from_parts(parts, body);
-        let work = async {
-            let socket = TcpStream::connect(self.upstream).await.map_err(|_| ())?;
-            let stream = self
-                .upstream_tls
-                .connect(
-                    ServerName::try_from(self.upstream_name.clone()).map_err(|_| ())?,
-                    socket,
-                )
-                .await
-                .map_err(|error| {
-                    if certificate_failure(&error) {
-                        report_rejection(Rejection::UpstreamCertificate);
-                    }
-                })?;
-            let cert = stream
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|c| c.first())
-                .ok_or(())?;
-            if !exact_dns_san(cert, &self.upstream_name) {
-                report_rejection(Rejection::UpstreamCertificate);
-                return Err(());
-            }
-            if stream
-                .get_ref()
-                .1
-                .alpn_protocol()
-                .is_some_and(|a| a != b"http/1.1")
-            {
-                return Err(());
-            }
-            let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
-                .await
-                .map_err(|_| ())?;
-            let driver = AbortTask(tokio::spawn(async move {
-                let _ = connection.await;
-            }));
-            match sender.send_request(request).await {
-                Ok(response) => Ok((response, driver)),
-                Err(_) => Err(()),
-            }
-        };
-        let (response, driver) = timeout(Duration::from_secs(15), work)
+        let response = timeout(Duration::from_secs(15), self.upstream.request(request))
             .await
             .map_err(|_| ())??;
         let (mut parts, incoming) = response.into_parts();
@@ -336,7 +298,7 @@ impl Gateway {
         };
         Ok(Response::from_parts(
             parts,
-            ObservedBody::new(incoming, capture, Some(driver)).boxed_unsync(),
+            ObservedBody::new(incoming, capture, None).boxed_unsync(),
         ))
     }
 }
@@ -647,6 +609,7 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for ObservedBody<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::client::conn::http1;
     #[test]
     fn configured_scope_is_one_literal_method_and_path() {
         let mut point = CapturePoint {

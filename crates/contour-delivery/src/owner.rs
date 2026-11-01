@@ -75,6 +75,7 @@ pub struct CollectorOwner {
     retry: Option<RetryState>,
     streams: stream_capture::Streams,
     configured_queue_bytes: usize,
+    configured_queue_records: usize,
 }
 impl CollectorOwner {
     pub fn new(
@@ -101,6 +102,7 @@ impl CollectorOwner {
             retry: None,
             streams: stream_capture::Streams::new()?,
             configured_queue_bytes: limits.byte_limit(),
+            configured_queue_records: limits.record_limit(),
         })
     }
     pub fn stats(&self) -> QueueStats {
@@ -439,11 +441,16 @@ mod capture_tests {
         )
     }
     pub(super) fn make_owner() -> CollectorOwner {
+        make_owner_at(OffsetDateTime::now_utc())
+    }
+    pub(super) fn make_owner_at(now: OffsetDateTime) -> CollectorOwner {
+        make_owner_at_with_ttl(now, 60)
+    }
+    pub(super) fn make_owner_at_with_ttl(now: OffsetDateTime, ttl: u64) -> CollectorOwner {
         let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
         let keys = PolicyKeys::new(&[("test", public)]).unwrap();
-        let now = OffsetDateTime::now_utc();
-        let payload = serde_json::to_vec(&json!({"tenant_id":ID,"collector_id":ID,"revision":1,"issued_at":stamp(now - time::Duration::minutes(1)),"expires_at":stamp(now + time::Duration::minutes(1)),"enabled":true,"service_ids":[ID],"techniques":["runtime"],"approved_names":["GET","id"],"denied_templates":[],"inspection_bytes":65536,"depth_limit":32,"queue_bytes":10000,"queue_ttl_seconds":60,"durable_queue_enabled":false,"approved_route_segments":["orders"],"parser_profiles":["http_json_v1"]})).unwrap();
+        let payload = serde_json::to_vec(&json!({"tenant_id":ID,"collector_id":ID,"revision":1,"issued_at":stamp(now - time::Duration::minutes(1)),"expires_at":stamp(now + time::Duration::minutes(1)),"enabled":true,"service_ids":[ID],"techniques":["runtime"],"approved_names":["GET","id"],"denied_templates":[],"inspection_bytes":65536,"depth_limit":32,"queue_bytes":10000,"queue_ttl_seconds":ttl,"durable_queue_enabled":false,"approved_route_segments":["orders"],"parser_profiles":["http_json_v1"]})).unwrap();
         let signature = key.sign(&[b"apicontour/policy/1\n".as_slice(), &payload].concat());
         let envelope = serde_json::to_vec(&json!({"payload_base64url":base64url(&payload),"signature_base64url":base64url(signature.as_ref()),"key_id":"test","signature_profile":"ed25519-v1"})).unwrap();
         let policy = VerifiedPolicy::from_signed_json(&envelope, &keys, ID, ID, now).unwrap();
@@ -470,7 +477,7 @@ mod capture_tests {
             sources: vec![
                 SourceAssignment::new(ID, [ID; 6], "runtime", &["http_json_v1"]).unwrap(),
             ],
-            deadline: Instant::now() + Duration::from_secs(1),
+            deadline: Instant::now() + Duration::from_secs(if ttl == 1 { 10 } else { 1 }),
         });
         owner
     }
