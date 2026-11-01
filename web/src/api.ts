@@ -1,4 +1,4 @@
-import type {ComparisonRequest, ImportRequest, Review, ReviewRequest} from './domain.ts';
+import type {ComparisonRequest, ImportRequest, Origin, Review, ReviewRequest} from './domain.ts';
 import * as validate from './validate.ts';
 import {decisionBody, safeFailure, validUuid} from './domain.ts';
 export class ApiError extends Error {
@@ -117,8 +117,13 @@ export async function request<T>(path: string, body?: unknown, deadlineMs = 30_0
   finally { finishCreate(entry); clearTimeout(deadline); }
 }
 export const api = {
-  operations: (cursor?: string) => request<unknown>(`operations?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`).then(validate.catalog),
-  operation: (id: string) => request<unknown>(`operations/${encodeURIComponent(id)}`).then(validate.operation),
+  operations: (cursor?: string, origin?: Origin | null) => {
+    const params = new URLSearchParams({limit:'50',include_origin:'true'});
+    if (cursor) params.set('cursor',cursor);
+    if (origin) for (const key of ['project_id','service_id','environment_id','deployment_id','instance_id'] as const) params.set(`origin_${key}`,origin[key]);
+    return request<unknown>(`operations?${params}`).then(validate.catalog);
+  },
+  operation: (id: string) => request<unknown>(`operations/${encodeURIComponent(id)}?include_origin=true`).then(validate.operation),
   import: (body: ImportRequest) => request('contracts/import', body, 30_000, validate.contract),
   compare: (body: ComparisonRequest) => request('comparisons', body, 30_000, validate.comparison),
   comparison: (id: string) => request<unknown>(`comparisons/${encodeURIComponent(id)}`).then(validate.comparison),

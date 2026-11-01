@@ -83,6 +83,13 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     for i in range(3):
         record = copy.deepcopy(template)
         record['record_id'] = '00000000-0000-0000-0000-%012x' % (0xa501+i)
+        if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1' and i < 2:
+            queued = datetime.datetime.fromisoformat(record['queued_at'].replace('Z','+00:00'))
+            seen = queued - datetime.timedelta(seconds=2-i)
+            record['first_seen'] = record['last_seen'] = seen.isoformat(timespec='microseconds').replace('+00:00','Z')
+            if i == 1:
+                record['visibility'] = 'operation'; record['completeness'] = 'partial'
+                record['structure'] = {'kind':'unknown','reason':'unsupported'}; record['reasons'] = ['unsupported']
         witness = {'kind': 'unattributed'} if i == 2 else {'kind': 'downstream_mtls_leaf_sha256_v1', 'leaf_sha256': fingerprints[i]}
         body['records'].append({'record': record, 'origin_witness': witness})
     where = "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (tenant, collector, body['batch_id'])
@@ -106,7 +113,12 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     if submit(body, status='duplicate') != receipt or execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'" % tenant) != usage:
         raise AssertionError('closed-origin retry changed receipt or quota')
     expected_origins = [dict(zip(('origin_project_id', 'origin_service_id', 'origin_environment_id', 'origin_deployment_id', 'instance_id'), origin + [instance])) for origin, instance in zip(origin_scopes, instance_ids)]
+    if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
+        execute("CREATE ROLE contour_catalog_reader_tls LOGIN PASSWORD '%s'; GRANT contour_catalog_reader TO contour_catalog_reader_tls;" % environment['CONTOUR_FIXTURE_PASSWORD'])
+        runpy.run_path(str(ROOT / 'scripts/test-human-origin.py'))['run_smoke'](execute, body)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_cases'](execute, body, port, directory, environment, expected_origins)
+    if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
+        runpy.run_path(str(ROOT / 'scripts/test-human-origin.py'))['run_cases'](execute, submit, body, expected_origins, port, directory, environment)
     changed = copy.deepcopy(body)
     changed['records'][0]['record']['count'] += 1
     submit(changed, 'Conflict')

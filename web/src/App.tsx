@@ -1,11 +1,14 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {api, ApiError, pendingRecovery, acknowledgeRecovery} from './api.ts';
 import {comparisonMatches, reviewMatches, reviewEligibility, failureStale, uuidPattern, validUuid} from './domain.ts';
-import type {Comparison, Contract, ImportFormat, Kind, Operation, Review} from './domain.ts';
+import type {Comparison, Contract, ImportFormat, Kind, Operation, Origin, Review} from './domain.ts';
 
 export function App() {
   const [operations, setOperations] = useState<Operation[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [knownOrigins, setKnownOrigins] = useState<Origin[]>([]);
+  const [originFilter, setOriginFilter] = useState<Origin | null>(null);
+  const originKey = (o: Origin) => [o.project_id,o.service_id,o.environment_id,o.deployment_id,o.instance_id].join('/');
   const [loaded, setLoaded] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [left, setLeft] = useState('');
@@ -46,9 +49,10 @@ export function App() {
       setRetryCreate(null); setStale(false);
     });
   }
-  async function loadCatalog(more = false) {
+  async function loadCatalog(more = false, selectedOrigin = originFilter) {
     await run('Loading authorized operations…', async () => {
-      const page = await api.operations(more && cursor ? cursor : undefined);
+      const page = await api.operations(more && cursor ? cursor : undefined, selectedOrigin);
+      setKnownOrigins(() => { const found = new Map<string, Origin>(); if (selectedOrigin) found.set(originKey(selectedOrigin), selectedOrigin); for (const op of page.items) for (const origin of op.origins ?? []) found.set(originKey(origin), origin); return [...found.values()]; });
       if (!Array.isArray(page.items)) throw new Error('Invalid catalog');
       setOperations(old => more ? [...old, ...page.items] : page.items);
       setCursor(page.next_cursor); setLoaded(true);
@@ -156,6 +160,7 @@ export function App() {
       {pending.length > 0 && <section className="panel" aria-labelledby="recovery-title"><h2 id="recovery-title">Pending recovery</h2><p>A response was not confirmed. Load the exact item to check it; no request is retried automatically.</p><ul>{pending.map(item => <li key={item.id}><strong>{item.type}</strong> <code>{item.id}</code> {item.type === 'review' ? <button className="secondary" disabled={locked} onClick={() => void reloadReview(undefined, item.id)}>Load exact review</button> : item.type === 'comparison' ? <button className="secondary" disabled={locked} onClick={() => void recoverComparison(item.id)}>Load exact comparison</button> : <span>Reselect the same file and scope to retry the exact import.</span>}</li>)}</ul></section>}
       <div className="grid">
         <section className="panel" aria-labelledby="scope-title"><p className="step">01 / SCOPE</p><h2 id="scope-title">Select an operation</h2><p>Choose the operation and direction explicitly. IDs are assigned by the server.</p>
+          {knownOrigins.length > 0 && <><p>Origin choices come from the most recently loaded page. Additional origins may exist.</p><label htmlFor="origin-filter">Origin instance filter</label><select id="origin-filter" value={originFilter ? originKey(originFilter) : ''} disabled={locked} onChange={e => { const selected = knownOrigins.find(o => originKey(o) === e.target.value) ?? null; setOriginFilter(selected); selectOperation(''); setOperations([]); setCursor(null); setLoaded(false); void loadCatalog(false, selected); }}><option value="">All origins</option>{knownOrigins.map(o => <option key={originKey(o)} value={originKey(o)}>{o.instance_id} · service {o.service_id} · project {o.project_id} · environment {o.environment_id} · deployment {o.deployment_id}</option>)}</select></>}
           <label htmlFor="operation">Authorized operation</label>
           <select id="operation" value={operation?.id ?? ''} disabled={locked} onChange={e => selectOperation(e.target.value)}>
             <option value="">Select an operation…</option>
@@ -163,7 +168,7 @@ export function App() {
           </select>
           {loaded && operations.length === 0 && <p className="empty">No authorized operations in this scope yet.</p>}
           <div className="actions"><button className="secondary" disabled={locked} onClick={() => void loadCatalog()}>Reload catalog</button>{cursor && <button className="secondary" disabled={locked} onClick={() => void loadCatalog(true)}>Load more</button>}</div>
-          {operation && <dl><dt>Operation ID</dt><dd><code>{operation.id}</code></dd><dt>Direction</dt><dd>{operation.direction}</dd><dt>Visibility / completeness</dt><dd>{operation.visibility === null ? 'Not observed' : `${operation.visibility} / ${operation.completeness}`}</dd><dt>Last observation</dt><dd>{operation.last_seen ?? 'Not observed'}</dd><dt>Current approved baseline</dt><dd><code>{operation.approved_contract_id ?? 'None'}</code></dd></dl>}
+          {operation && <dl><dt>Operation ID</dt><dd><code>{operation.id}</code></dd><dt>Target service</dt><dd><code>{operation.service_id}</code></dd><dt>Origin instance</dt><dd>{operation.origin_evidence_available ? (operation.origins?.length ? <ul>{operation.origins.map(o => <li key={originKey(o)}><code>{o.instance_id}</code> · verified<br />Project {o.project_id} · service {o.service_id}<br />Environment {o.environment_id} · deployment {o.deployment_id}</li>)}</ul> : 'No verified origin shown') : 'Origin evidence unavailable'}{operation.origins_truncated && <p>Additional origin evidence may exist beyond the displayed observations.</p>}</dd><dt>Direction</dt><dd>{operation.direction}</dd><dt>Visibility / completeness</dt><dd>{operation.visibility === null ? 'Not observed' : `${operation.visibility} / ${operation.completeness}`}</dd><dt>Last observation</dt><dd>{operation.last_seen ?? 'Not observed'}</dd><dt>Current approved baseline</dt><dd><code>{operation.approved_contract_id ?? 'None'}</code></dd></dl>}
         </section>
         <section className="panel" aria-labelledby="import-title"><p className="step">02 / DECLARED INPUT</p><h2 id="import-title">Import a contract</h2><p>Upload baseline and candidate separately. The platform sanitizes each artifact before storage.</p>
           <form onSubmit={e => void importContract(e)}><fieldset disabled={locked}><label htmlFor="project">Project UUID</label><input id="project" required pattern={uuidPattern} value={project} onChange={e => setProject(e.target.value)} />

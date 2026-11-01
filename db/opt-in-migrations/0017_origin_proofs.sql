@@ -812,6 +812,27 @@ END $$;
 REVOKE ALL ON FUNCTION contour.catalog_origin_absent(uuid,uuid,uuid) FROM PUBLIC,contour_origin_ingress;
 GRANT EXECUTE ON FUNCTION contour.catalog_origin_absent(uuid,uuid,uuid) TO contour_catalog_worker;
 
+-- A derived latest observation per operation and complete historical origin scope.
+-- Only the owner-executed projection function can maintain this index.
+CREATE TABLE contour.catalog_origin_heads (
+ tenant_id uuid NOT NULL, project_id uuid NOT NULL, service_id uuid NOT NULL, environment_id uuid NOT NULL,
+ origin_project_id uuid NOT NULL, origin_service_id uuid NOT NULL, origin_environment_id uuid NOT NULL,
+ origin_deployment_id uuid NOT NULL, instance_id uuid NOT NULL, operation_id uuid NOT NULL,
+ collector_id uuid NOT NULL, batch_id uuid NOT NULL, record_id uuid NOT NULL, proof_id uuid NOT NULL,
+ observed_at timestamptz NOT NULL,
+ PRIMARY KEY (tenant_id,project_id,service_id,environment_id,origin_project_id,origin_service_id,
+              origin_environment_id,origin_deployment_id,instance_id,operation_id),
+ FOREIGN KEY (tenant_id,collector_id,batch_id,record_id) REFERENCES contour.observation_windows
+);
+ALTER TABLE contour.catalog_origin_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contour.catalog_origin_heads FORCE ROW LEVEL SECURITY;
+CREATE POLICY catalog_origin_heads_owner ON contour.catalog_origin_heads TO contour_owner
+ USING (tenant_id=contour.tenant_context()) WITH CHECK (tenant_id=contour.tenant_context());
+REVOKE ALL ON contour.catalog_origin_heads FROM PUBLIC,contour_catalog_reader,contour_catalog_worker;
+CREATE INDEX catalog_origin_heads_operation ON contour.catalog_origin_heads
+ (tenant_id,project_id,service_id,environment_id,operation_id,origin_project_id,origin_service_id,
+  origin_environment_id,origin_deployment_id,instance_id);
+
 -- Only this owner-executed operation can add projections. The worker cannot
 -- supply origin fields; all tuples come from the verified historical proof set.
 CREATE FUNCTION contour.project_catalog_origins(tenant uuid, collector uuid, batch uuid, payload bytea)
@@ -842,12 +863,115 @@ BEGIN
       (tenant_id,collector_id,batch_id,record_id,proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id)
       SELECT tenant,collector,batch,m.* FROM contour.catalog_origin_mapping(tenant,collector,batch,payload) m;
     GET DIAGNOSTICS inserted = ROW_COUNT;
+    INSERT INTO contour.catalog_origin_heads AS h
+      (tenant_id,project_id,service_id,environment_id,origin_project_id,origin_service_id,origin_environment_id,
+       origin_deployment_id,instance_id,operation_id,collector_id,batch_id,record_id,proof_id,observed_at)
+    SELECT DISTINCT ON (w.tenant_id,w.project_id,w.service_id,w.environment_id,p.origin_project_id,p.origin_service_id,
+                        p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.operation_id)
+      w.tenant_id,w.project_id,w.service_id,w.environment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,
+      p.origin_deployment_id,p.instance_id,w.operation_id,w.collector_id,w.batch_id,w.record_id,p.proof_id,w.last_seen::timestamptz
+    FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id)
+    WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,collector,batch)
+    ORDER BY w.tenant_id,w.project_id,w.service_id,w.environment_id,p.origin_project_id,p.origin_service_id,
+      p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.operation_id,w.last_seen::timestamptz DESC,w.collector_id,w.batch_id,w.record_id
+    ON CONFLICT (tenant_id,project_id,service_id,environment_id,origin_project_id,origin_service_id,
+                 origin_environment_id,origin_deployment_id,instance_id,operation_id)
+    DO UPDATE SET collector_id=excluded.collector_id,batch_id=excluded.batch_id,record_id=excluded.record_id,
+       proof_id=excluded.proof_id,observed_at=excluded.observed_at
+    WHERE excluded.observed_at > h.observed_at OR
+      (excluded.observed_at = h.observed_at AND (excluded.collector_id,excluded.batch_id,excluded.record_id)<(h.collector_id,h.batch_id,h.record_id));
     RETURN inserted;
 EXCEPTION WHEN no_data_found OR too_many_rows THEN
     RAISE EXCEPTION 'catalog batch unavailable' USING ERRCODE='23514';
 END $$;
 REVOKE ALL ON FUNCTION contour.project_catalog_origins(uuid,uuid,uuid,bytea) FROM PUBLIC,contour_origin_ingress;
 GRANT EXECUTE ON FUNCTION contour.project_catalog_origins(uuid,uuid,uuid,bytea) TO contour_catalog_worker;
+
+-- The trusted server authorizes actor target and origin scopes before disclosure.
+-- Both lookups use bounded index keysets; every returned head is verified below.
+CREATE FUNCTION contour.human_origin_candidates(tenant uuid, target_project uuid, target_service uuid,
+ target_environment uuid, origin_project uuid, origin_service uuid, origin_environment uuid,
+ origin_deployment uuid, origin_instance uuid, after_id uuid, page_size integer)
+RETURNS TABLE(operation_id uuid) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+ IF tenant IS NULL OR tenant IS DISTINCT FROM contour.tenant_context() OR page_size IS NULL OR page_size NOT BETWEEN 1 AND 201
+   OR target_project IS NULL OR target_service IS NULL OR target_environment IS NULL OR origin_project IS NULL OR origin_service IS NULL OR origin_environment IS NULL OR origin_deployment IS NULL OR origin_instance IS NULL THEN
+   RAISE EXCEPTION 'invalid catalog scope' USING ERRCODE='42501'; END IF;
+ RETURN QUERY SELECT h.operation_id FROM contour.catalog_origin_heads h
+ WHERE (h.tenant_id,h.project_id,h.service_id,h.environment_id,h.origin_project_id,h.origin_service_id,
+        h.origin_environment_id,h.origin_deployment_id,h.instance_id)
+    =(tenant,target_project,target_service,target_environment,origin_project,origin_service,origin_environment,origin_deployment,origin_instance)
+   AND (after_id IS NULL OR h.operation_id>after_id) ORDER BY h.operation_id LIMIT page_size;
+END $$;
+REVOKE ALL ON FUNCTION contour.human_origin_candidates(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contour.human_origin_candidates(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,integer) TO contour_catalog_reader;
+
+CREATE FUNCTION contour.human_origin_operation(tenant uuid, target_project uuid, target_service uuid,
+ target_environment uuid, operation uuid, filter_project uuid, filter_service uuid, filter_environment uuid,
+ filter_deployment uuid, filter_instance uuid)
+RETURNS TABLE(origin_project_id uuid,origin_service_id uuid,origin_environment_id uuid,
+ origin_deployment_id uuid,instance_id uuid,truncated boolean,last_seen text,visibility text,completeness text)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE h contour.catalog_origin_heads; w contour.observation_windows; payload bytea; envelope jsonb; checked_record jsonb; n integer := 0;
+ seen_batches text[] := ARRAY[]::text[]; batch_key text;
+BEGIN
+ IF tenant IS NULL OR tenant IS DISTINCT FROM contour.tenant_context() OR target_project IS NULL OR target_service IS NULL OR target_environment IS NULL OR operation IS NULL OR NOT ((filter_project IS NULL AND filter_service IS NULL AND filter_environment IS NULL AND filter_deployment IS NULL AND filter_instance IS NULL) OR (filter_project IS NOT NULL AND filter_service IS NOT NULL AND filter_environment IS NOT NULL AND filter_deployment IS NOT NULL AND filter_instance IS NOT NULL)) THEN
+   RAISE EXCEPTION 'invalid catalog scope' USING ERRCODE='42501'; END IF;
+ FOR h IN SELECT x.* FROM contour.catalog_origin_heads x
+   WHERE (x.tenant_id,x.project_id,x.service_id,x.environment_id,x.operation_id)=(tenant,target_project,target_service,target_environment,operation)
+     AND (filter_project IS NULL OR (x.origin_project_id,x.origin_service_id,x.origin_environment_id,x.origin_deployment_id,x.instance_id)=(filter_project,filter_service,filter_environment,filter_deployment,filter_instance))
+   ORDER BY x.origin_project_id,x.origin_service_id,x.origin_environment_id,x.origin_deployment_id,x.instance_id LIMIT 33
+ LOOP
+   n:=n+1;
+   IF n=33 THEN origin_project_id:=NULL; origin_service_id:=NULL; origin_environment_id:=NULL; origin_deployment_id:=NULL; instance_id:=NULL; truncated:=true; last_seen:=NULL; visibility:=NULL; completeness:=NULL; RETURN NEXT; RETURN; END IF;
+   SELECT x.* INTO STRICT w FROM contour.observation_windows x
+    WHERE (x.tenant_id,x.collector_id,x.batch_id,x.record_id)=(tenant,h.collector_id,h.batch_id,h.record_id)
+      AND (x.project_id,x.service_id,x.environment_id,x.operation_id)=(target_project,target_service,target_environment,operation)
+      AND x.last_seen::timestamptz=h.observed_at;
+   IF NOT EXISTS (SELECT 1 FROM contour.catalog_origin_projection p
+      WHERE (p.tenant_id,p.collector_id,p.batch_id,p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id)
+       =(tenant,h.collector_id,h.batch_id,h.record_id,h.proof_id,h.origin_project_id,h.origin_service_id,h.origin_environment_id,h.origin_deployment_id,h.instance_id)) THEN
+      RAISE EXCEPTION 'origin head mismatch' USING ERRCODE='23514'; END IF;
+   batch_key:=h.collector_id::text || '/' || h.batch_id::text;
+   SELECT p.checked_batch INTO STRICT payload FROM contour.ingestion_payloads p
+     WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id)
+       AND p.payload_format=2 AND pg_catalog.octet_length(p.checked_batch) BETWEEN 1 AND 1048576;
+   envelope:=pg_catalog.convert_from(payload,'UTF8')::jsonb;
+   IF NOT (batch_key=ANY(seen_batches)) THEN
+     PERFORM contour.verify_origin_batch_proofs(tenant,h.collector_id,h.batch_id,payload);
+     -- The ingress verifier preserves historical seeding behavior; human reads
+     -- additionally require a bidirectional attribution/witness match throughout
+     -- the retained checked batch before disclosing any verified identity.
+     IF EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(envelope->'records') AS item(value)
+       LEFT JOIN contour.ingestion_v2_metadata m
+         ON (m.tenant_id,m.collector_id,m.batch_id,m.record_id::text)=(tenant,h.collector_id,h.batch_id,item.value->'record'->>'record_id')
+       WHERE (item.value->'origin_witness'->>'kind'='downstream_mtls_leaf_sha256_v1' AND m.attribution_class IS DISTINCT FROM 'verified_origin_v1')
+          OR (item.value->'origin_witness'->>'kind'='unattributed' AND m.attribution_class IS DISTINCT FROM 'unattributed')) THEN
+       RAISE EXCEPTION 'origin attribution mismatch' USING ERRCODE='23514'; END IF;
+     IF EXISTS ((SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id
+         FROM contour.catalog_origin_projection p WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id)
+       EXCEPT SELECT * FROM contour.catalog_origin_mapping(tenant,h.collector_id,h.batch_id,payload))
+       UNION ALL (SELECT * FROM contour.catalog_origin_mapping(tenant,h.collector_id,h.batch_id,payload)
+       EXCEPT SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id
+         FROM contour.catalog_origin_projection p WHERE (p.tenant_id,p.collector_id,p.batch_id)=(tenant,h.collector_id,h.batch_id))) THEN
+       RAISE EXCEPTION 'origin projection mismatch' USING ERRCODE='23514'; END IF;
+     seen_batches:=pg_catalog.array_append(seen_batches,batch_key);
+   END IF;
+   SELECT item.value->'record' INTO STRICT checked_record
+     FROM pg_catalog.jsonb_array_elements(envelope->'records') AS item(value)
+     WHERE item.value->'record'->>'record_id'=h.record_id::text;
+   IF w.last_seen IS DISTINCT FROM checked_record->>'last_seen'
+      OR w.visibility IS DISTINCT FROM checked_record->>'visibility'
+      OR w.completeness IS DISTINCT FROM checked_record->>'completeness' THEN
+     RAISE EXCEPTION 'origin observation mismatch' USING ERRCODE='23514'; END IF;
+   origin_project_id:=h.origin_project_id; origin_service_id:=h.origin_service_id; origin_environment_id:=h.origin_environment_id;
+   origin_deployment_id:=h.origin_deployment_id; instance_id:=h.instance_id; truncated:=false;
+   last_seen:=w.last_seen; visibility:=w.visibility; completeness:=w.completeness; RETURN NEXT;
+ END LOOP;
+EXCEPTION WHEN no_data_found OR too_many_rows THEN RAISE EXCEPTION 'origin history unavailable' USING ERRCODE='23514';
+END $$;
+REVOKE ALL ON FUNCTION contour.human_origin_operation(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contour.human_origin_operation(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid) TO contour_catalog_reader;
 
 -- transaction failure probe
 INSERT INTO contour.schema_migrations(version) VALUES (17);

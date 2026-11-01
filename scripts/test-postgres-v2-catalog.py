@@ -169,7 +169,7 @@ def run_origin_cases(execute, body, port, directory, environment, expected_origi
       END $$; ROLLBACK;""" % dict(tenant=body['tenant_id'], collector=body['collector_id'],
                                  batch=body['batch_id'], record=body['records'][0]['record']['record_id'], scope=scope))
     execute("BEGIN; SET LOCAL ROLE contour_catalog_tls; SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',true); DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.catalog_origin_projection WHERE %s) THEN RAISE EXCEPTION 'cross-tenant projection visible'; END IF; END $$; ROLLBACK;" % scope)
-    rows = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.%s ORDER BY p.record_id) x;" % scope.replace(' AND ', ' AND p.')))
+    rows = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.operation_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.%s ORDER BY p.record_id) x;" % scope.replace(' AND ', ' AND p.')))
     target = body['records'][0]['record']
     for row, origin in zip(rows, expected_origins):
         for field, value in origin.items():
@@ -180,6 +180,82 @@ def run_origin_cases(execute, body, port, directory, environment, expected_origi
                 raise AssertionError('API target projection mismatch: ' + field)
     if len(rows) != 2 or rows[0]['proof_id'] == rows[1]['proof_id']:
         raise AssertionError('expected two distinct proof identities')
+    if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
+        # Exercise the human-reader helper on real historical projected proofs, with
+        # the restricted reader role and full origin tuple. No private table grant.
+        for row in rows:
+            args = (body['tenant_id'], row['project_id'], row['service_id'], row['environment_id'], row['operation_id'],
+                    row['origin_project_id'], row['origin_service_id'], row['origin_environment_id'], row['origin_deployment_id'], row['instance_id'])
+            quoted = ','.join("'%s'" % value for value in args)
+            candidate = ','.join("'%s'" % value for value in (*args[:4], *args[5:], None)).replace("'None'", 'NULL') + ',201'
+            execute("""BEGIN; SET LOCAL ROLE contour_catalog_reader_tls;
+              SELECT set_config('apicontour.tenant_id','%s',true);
+              DO $$ BEGIN
+               IF NOT EXISTS (SELECT 1 FROM contour.human_origin_candidates(%s) c WHERE c.operation_id='%s') THEN
+                 RAISE EXCEPTION 'full origin candidate missing'; END IF;
+               IF NOT EXISTS (SELECT 1 FROM contour.human_origin_operation(%s) o
+                  WHERE (o.origin_project_id,o.origin_service_id,o.origin_environment_id,o.origin_deployment_id,o.instance_id)
+                   =('%s','%s','%s','%s','%s') AND NOT o.truncated) THEN
+                 RAISE EXCEPTION 'verified origin missing'; END IF;
+              END $$; ROLLBACK;""" % (body['tenant_id'], candidate, row['operation_id'], quoted, *args[5:]))
+            wrong = list(args); wrong[5] = '00000000-0000-0000-0000-00000000ffff'
+            candidate_wrong = ','.join("'%s'" % value for value in (*wrong[:4], *wrong[5:], None)).replace("'None'", 'NULL') + ',201'
+            execute("""BEGIN; SET LOCAL ROLE contour_catalog_reader_tls;
+              SELECT set_config('apicontour.tenant_id','%s',true);
+              DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.human_origin_candidates(%s)) THEN
+               RAISE EXCEPTION 'partial or wrong origin matched'; END IF; END $$; ROLLBACK;""" % (body['tenant_id'], candidate_wrong))
+        # One-sided projection corruption is detected before any verified row is returned.
+        row = rows[0]
+        args = (body['tenant_id'], row['project_id'], row['service_id'], row['environment_id'], row['operation_id'],
+                row['origin_project_id'], row['origin_service_id'], row['origin_environment_id'], row['origin_deployment_id'], row['instance_id'])
+        quoted = ','.join("'%s'" % value for value in args)
+        execute("""BEGIN; SET LOCAL session_replication_role=replica;
+          DELETE FROM contour.catalog_origin_projection WHERE %s AND record_id='%s';
+          SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+          DO $$ DECLARE rejected boolean:=false; BEGIN
+            BEGIN PERFORM * FROM contour.human_origin_operation(%s);
+            EXCEPTION WHEN check_violation THEN rejected:=true; END;
+            IF NOT rejected THEN RAISE EXCEPTION 'missing projection accepted'; END IF;
+          END $$; ROLLBACK;""" % (scope, row['record_id'], body['tenant_id'], quoted))
+        execute("""BEGIN; SET LOCAL session_replication_role=replica;
+          DELETE FROM contour.observation_windows WHERE %s AND record_id='%s';
+          SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+          DO $$ DECLARE rejected boolean:=false; BEGIN
+            BEGIN PERFORM * FROM contour.human_origin_operation(%s);
+            EXCEPTION WHEN check_violation THEN rejected:=true; END;
+            IF NOT rejected THEN RAISE EXCEPTION 'missing selected window accepted'; END IF;
+          END $$; ROLLBACK;""" % (scope, row['record_id'], body['tenant_id'], quoted))
+        # Same-instant alternate timestamp text must fail, as must changed
+        # visibility/completeness. These are checked against retained wire bytes.
+        for assignment in ("last_seen=replace(last_seen,'Z','+00:00')", "visibility='connection'", "completeness='unavailable'"):
+            execute("""BEGIN; SET LOCAL session_replication_role=replica;
+              UPDATE contour.observation_windows SET %s WHERE %s AND record_id='%s';
+              SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+              DO $$ DECLARE rejected boolean:=false; BEGIN
+                BEGIN PERFORM * FROM contour.human_origin_operation(%s);
+                EXCEPTION WHEN check_violation THEN rejected:=true; END;
+                IF NOT rejected THEN RAISE EXCEPTION 'mismatched selected window accepted'; END IF;
+              END $$; ROLLBACK;""" % (assignment, scope, row['record_id'], body['tenant_id'], quoted))
+        # The whole batch is checked in both witness/class directions, including
+        # an unattributed record unrelated to the selected verified head.
+        for record_id, attribution in ((row['record_id'],'unattributed'), (body['records'][2]['record']['record_id'],'verified_origin_v1')):
+            execute("""BEGIN; SET LOCAL session_replication_role=replica;
+              UPDATE contour.ingestion_v2_metadata SET attribution_class='%s' WHERE %s AND record_id='%s';
+              SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+              DO $$ DECLARE rejected boolean:=false; BEGIN
+                BEGIN PERFORM * FROM contour.human_origin_operation(%s);
+                EXCEPTION WHEN check_violation THEN rejected:=true; END;
+                IF NOT rejected THEN RAISE EXCEPTION 'mismatched attribution accepted'; END IF;
+              END $$; ROLLBACK;""" % (attribution, scope, record_id, body['tenant_id'], quoted))
+        for damaged_table in ('origin_proofs', 'origin_batch_proof_completion'):
+            execute("""BEGIN; SET LOCAL session_replication_role=replica;
+              DELETE FROM contour.%s WHERE %s;
+              SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+              DO $$ DECLARE rejected boolean:=false; BEGIN
+                BEGIN PERFORM * FROM contour.human_origin_operation(%s);
+                EXCEPTION WHEN check_violation THEN rejected:=true; END;
+                IF NOT rejected THEN RAISE EXCEPTION 'missing proof history accepted'; END IF;
+              END $$; ROLLBACK;""" % (damaged_table, scope, body['tenant_id'], quoted))
     check('AlreadyProcessed')
     execute("BEGIN; ALTER TABLE contour.catalog_origin_projection DISABLE TRIGGER catalog_origin_immutable; UPDATE contour.catalog_origin_projection SET instance_id='00000000-0000-0000-0000-00000000ffff' WHERE %s; ALTER TABLE contour.catalog_origin_projection ENABLE TRIGGER catalog_origin_immutable; COMMIT;" % scope)
     check('Corrupt')

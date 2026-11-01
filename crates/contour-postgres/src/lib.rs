@@ -11,7 +11,7 @@ mod declared_store;
 mod human_authorization;
 mod human_catalog;
 pub use human_catalog::{
-    HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource,
+    HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource, HumanOrigin,
 };
 mod service_import_store;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};

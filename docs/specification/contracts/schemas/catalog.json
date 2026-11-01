@@ -86,6 +86,55 @@
           "operation",
           "connection"
         ]
+      },
+      "origin_evidence_available": {
+        "type": "boolean",
+        "description": "Whether this installation supports historical origin evidence."
+      },
+      "origins": {
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "service_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "environment_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "deployment_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "instance_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "proof_status": {
+              "const": "verified"
+            }
+          },
+          "required": [
+            "project_id",
+            "service_id",
+            "environment_id",
+            "deployment_id",
+            "instance_id",
+            "proof_status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "origins_truncated": {
+        "type": "boolean",
+        "description": "More observation history exists beyond the bounded summary."
       }
     },
     "required": [

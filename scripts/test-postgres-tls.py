@@ -26,6 +26,7 @@ def fixture_environment(password, target, sensor_image=None):
         CONTOUR_ORIGIN_HTTPS_PROBE=str(Path(target)/'debug/examples/origin_https_probe'))
     # Only the explicit fixture mode can activate the separately bounded pilot.
     environment.pop('CONTOUR_ORIGIN_SENSOR_IMAGE', None)
+    environment.pop('CONTOUR_HUMAN_ORIGIN_FIXTURE', None)
     if sensor_image is not None:
         environment['CONTOUR_ORIGIN_SENSOR_IMAGE'] = sensor_image
     return environment
@@ -133,12 +134,13 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     origin_sensor = flags == ['--origin-sensor']
     if origin_sensor:
         sys.dont_write_bytecode = True
-    authority_mode = '--authority' in flags or origin_sensor
+    human_origin = flags == ['--human-origin']
+    authority_mode = '--authority' in flags or origin_sensor or human_origin
     fixture_image = None
     for tool in ["docker", "openssl", "cargo"]:
         if not shutil.which(tool):
@@ -162,6 +164,8 @@ def main():
             run(["cargo", "build", "-p", "contour-ingress", "--example", "origin_https_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
+        if human_origin:
+            run(["cargo", "build", "-p", "contour-postgres", "--example", "human_catalog_probe", "--locked", "--offline"], timeout=180)
     elif "--service-import-store" in sys.argv or "--human-import" in sys.argv:
         run(["cargo", "build", "-p", "contour-postgres", "--example", "service_import_probe", "--example", "declared_store_probe", "--example", "review_store_probe", "--example", "comparison_store_probe", "--example", "public_review_probe", "--example", "human_catalog_probe", "--locked", "--offline"], timeout=180)
     elif "--review-store" in sys.argv:
@@ -191,6 +195,8 @@ def main():
         directory = Path(folder)
         password = secrets.token_hex(24)
         environment = fixture_environment(password, metadata['target_directory'], fixture_image)
+        if human_origin:
+            environment['CONTOUR_HUMAN_ORIGIN_FIXTURE'] = '1'
         try:
             (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
             for name in ["ca", "untrusted"]:
