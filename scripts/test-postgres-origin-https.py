@@ -120,7 +120,9 @@ def run_cases(execute, setup, pg_port, directory, environment, probe):
         request(port,body,404,path='/v2/batches?role=origin')
         request(port,raw,400)
         request(port,b'{"SYNTHETIC_SECRET":',400)
-        request(port,b' ' * 1048577,413)
+        # Declared oversize is rejected before body upload. Sending the entire
+        # body first races the intentional connection close and masks the 413.
+        request(port,b'',413,headers={'Content-Type':'application/json','Content-Length':'1048577'})
         request(port,body,415,headers={'Content-Type':'application/json','Content-Encoding':'gzip'})
         request(port,body,405,method='GET')
         execute("BEGIN; ALTER TABLE contour.origin_proofs DISABLE TRIGGER origin_proof_immutable; DELETE FROM contour.origin_proofs WHERE %s; ALTER TABLE contour.origin_proofs ENABLE TRIGGER origin_proof_immutable; COMMIT;" % scope)
