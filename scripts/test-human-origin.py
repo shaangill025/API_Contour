@@ -2,10 +2,13 @@
 import base64
 import copy
 import json
+import os
+import re
 from pathlib import Path
 import runpy
 import subprocess
 import time
+from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTOR = '00000000-0000-0000-0000-00000000ef01'
@@ -83,3 +86,123 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     predicate = "(tenant_id,project_id,service_id,environment_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id)=(%s)" % ','.join("'%s'" % key for key in keys)
     expected_operations = json.loads(execute("SELECT json_agg(operation_id::text ORDER BY operation_id) FROM contour.catalog_origin_heads WHERE %s;" % predicate))
     runpy.run_path(str(ROOT/'scripts/test-human-catalog.py'))['run_origin_cases'](execute,port,directory,environment,normal,unknown,target_scope,ACTOR,records,expected_operations)
+    run_business_cases(execute,port,directory,environment,normal,unknown,target_scope,records,expected_operations,target_dir)
+
+
+def run_business_cases(execute, port, directory, environment, normal, unknown, scope, records, expected_operations, target_dir):
+    """Exercise real Business::handle with synthetic verified identities and PG.
+
+    This is in-process handler-to-database evidence, not HTTP/TLS/session evidence.
+    The optional evidence file contains only allowlisted synthetic response JSON.
+    """
+    password_path = directory/'business-fixture-password'
+    password_path.write_text(environment['CONTOUR_FIXTURE_PASSWORD'])
+    config_path = directory/'business-fixture.json'
+    config_path.write_text(json.dumps(dict(database_host='localhost',database_port=int(port),database_name='contour_fixture',
+        database_user='contour_human_reader_tls',database_password_file=str(password_path),database_ca_file=str(directory/'ca.crt'),
+        tenant_id=scope[0],project_id=scope[1],service_id=scope[2],environment_id=scope[3],
+        routes=[['/source','/orders']],approved_names=['id','quantity'],approved_media=['application/json'])))
+    probe = Path(target_dir)/'debug/examples/human_origin_business_probe'
+    keys = ('project_id','service_id','environment_id','deployment_id','instance_id')
+    origin = records[0]
+    query = {'include_origin':'true', **{'origin_'+key:origin[key] for key in keys}}
+    operation_id = records[0]['operation_id']
+    uuid = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    old_fields = {'id','project_id','service_id','environment_id','protocol','direction','operation','route_template',
+                  'approved_contract_id','last_seen','visibility','completeness'}
+    new_fields = {'origin_evidence_available','origins','origins_truncated'}
+
+    def get(uri, credential=normal):
+        result = subprocess.run([str(probe),str(config_path),uri],
+            env=dict(environment,CONTOUR_FIXTURE_ID_TOKEN=str(credential)),capture_output=True,text=True,timeout=35,check=True)
+        assert not result.stderr, 'handler probe wrote an error'
+        value = json.loads(result.stdout)
+        assert set(value) == {'status','body'} and type(value['status']) is int and isinstance(value['body'],dict)
+        return value
+
+    def validate_operation(op, include):
+        assert isinstance(op,dict) and set(op) == old_fields | (new_fields if include else set())
+        for key in ('id','project_id','service_id','environment_id'):
+            assert isinstance(op[key],str) and uuid.fullmatch(op[key])
+        assert [op['project_id'],op['service_id'],op['environment_id']] == scope[1:]
+        assert op['approved_contract_id'] is None or isinstance(op['approved_contract_id'],str) and uuid.fullmatch(op['approved_contract_id'])
+        for key,maximum in (('protocol',32),('direction',32),('operation',32),('route_template',256)):
+            assert isinstance(op[key],str) and 0 < len(op[key]) <= maximum
+        for key in ('last_seen','visibility','completeness'):
+            assert op[key] is None or isinstance(op[key],str) and len(op[key]) <= 64
+        assert op['direction'] in ('request','response','publish','consume','operation','connection')
+        assert op['visibility'] in (None,'structure','operation','connection')
+        assert op['completeness'] in (None,'complete','partial','unavailable')
+        assert all(op[k] is None for k in ('last_seen','visibility','completeness')) or all(isinstance(op[k],str) for k in ('last_seen','visibility','completeness'))
+        if include:
+            assert type(op['origin_evidence_available']) is bool and type(op['origins_truncated']) is bool
+            assert isinstance(op['origins'],list) and len(op['origins']) <= 32
+            if not op['origin_evidence_available']: assert not op['origins'] and not op['origins_truncated']
+            for entry in op['origins']:
+                assert isinstance(entry,dict) and set(entry) == set(keys) | {'proof_status'}
+                assert entry['proof_status'] == 'verified'
+                assert all(isinstance(entry[key],str) and uuid.fullmatch(entry[key]) for key in keys)
+        return op
+
+    def validate_page(response, include):
+        assert response['status'] == 200 and set(response['body']) == {'items','next_cursor'}
+        body = response['body']; assert isinstance(body['items'],list) and len(body['items']) <= 200
+        assert body['next_cursor'] is None or isinstance(body['next_cursor'],str) and uuid.fullmatch(body['next_cursor'])
+        for op in body['items']: validate_operation(op,include)
+        return body
+
+    def error(response, status, code):
+        assert response['status'] == status
+        value = response['body']; assert set(value) == {'code','message','request_id','retryable'}
+        assert value['code'] == code and isinstance(value['message'],str) and uuid.fullmatch(value['request_id'])
+        assert type(value['retryable']) is bool
+
+    legacy = validate_page(get('/v1/operations?limit=200'),False)
+    included = validate_page(get('/v1/operations?limit=200&include_origin=true'),True)
+    assert operation_id in [v['id'] for v in legacy['items']]
+    assert [v['id'] for v in legacy['items']] == [v['id'] for v in included['items']]
+    assert legacy['items'] == [{key:item[key] for key in old_fields} for item in included['items']]
+    filtered = validate_page(get('/v1/operations?limit=200&'+urlencode(query)),True)
+    assert [item['id'] for item in filtered['items']] == expected_operations
+    selected = next(item for item in filtered['items'] if item['id'] == operation_id)
+    assert (selected['last_seen'],selected['visibility'],selected['completeness']) == (origin['last_seen'],origin['visibility'],origin['completeness'])
+    assert any(all(entry[key] == origin[key] for key in keys) for entry in selected['origins'])
+    first = validate_page(get('/v1/operations?limit=1&'+urlencode(query)),True)
+    assert len(first['items']) == 1 and first['next_cursor'] == first['items'][0]['id']
+    second = validate_page(get('/v1/operations?limit=1&cursor='+first['next_cursor']+'&'+urlencode(query)),True)
+    assert [first['items'][0]['id'],second['items'][0]['id']] == expected_operations and second['next_cursor'] is None
+    old_detail = get('/v1/operations/'+operation_id); assert old_detail['status'] == 200
+    validate_operation(old_detail['body'],False)
+    detail = get('/v1/operations/'+operation_id+'?include_origin=true'); assert detail['status'] == 200
+    validate_operation(detail['body'],True)
+    assert detail['body']['id'] == operation_id
+    assert old_detail['body'] == next(item for item in legacy['items'] if item['id'] == operation_id)
+    assert detail['body'] == next(item for item in included['items'] if item['id'] == operation_id)
+    assert {tuple(entry[key] for key in keys) for entry in detail['body']['origins']} == {tuple(item[key] for key in keys) for item in records}
+    mixed = {'include_origin':'true', **{'origin_'+key:records[1][key] for key in keys}}
+    mixed['origin_instance_id'] = origin['instance_id']
+    assert validate_page(get('/v1/operations?limit=200&'+urlencode(mixed)),True)['items'] == []
+    error(get('/v1/operations?include_origin=true&origin_instance_id='+origin['instance_id']),400,'invalid_request')
+    error(get('/v1/operations?include_origin=true&include_origin=true'),400,'invalid_request')
+    error(get('/v1/operations/'+operation_id+'?cursor=x'),400,'invalid_request')
+    error(get('/v1/operations?limit=200',unknown),403,'forbidden')
+    error(get('/v1/operations/'+operation_id+'?include_origin=true',unknown),403,'forbidden')
+
+    def role(project,service,enabled):
+        execute("SET ROLE contour_human_provisioner; UPDATE contour.human_service_roles SET enabled=%s WHERE actor_id='%s' AND tenant_id='%s' AND project_id='%s' AND service_id='%s';" % ('true' if enabled else 'false',ACTOR,scope[0],project,service))
+    role(origin['project_id'],origin['service_id'],False)
+    try: error(get('/v1/operations?limit=200&'+urlencode(query)),403,'forbidden')
+    finally: role(origin['project_id'],origin['service_id'],True)
+    role(scope[1],scope[2],False)
+    try: error(get('/v1/operations?limit=200'),403,'forbidden')
+    finally: role(scope[1],scope[2],True)
+
+    # Reconstruct the export from validated public fields only; no inputs,
+    # tokens, proof identifiers, hashes, headers or captured payloads are saved.
+    evidence = {'legacy_list':legacy,'included_list':included,'filtered_list':filtered,
+                'legacy_detail':old_detail['body'],'included_detail':detail['body']}
+    path = environment.get('CONTOUR_HUMAN_ORIGIN_EVIDENCE_PATH')
+    if path:
+        fd = os.open(path,os.O_WRONLY | os.O_CREAT | os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as output: json.dump(evidence,output,sort_keys=True,indent=2)
+    print('Real Business handler synthetic catalog/filter/authorization assertions passed (not HTTP/session evidence).',flush=True)
