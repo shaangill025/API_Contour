@@ -134,6 +134,7 @@ def main():
         run(["cargo", "build", "-p", "contour-postgres", "--example", "submit_probe", "--locked", "--offline"], timeout=180)
         if "--authority" in sys.argv:
             run(["cargo", "build", "-p", "contour-postgres", "--example", "v2_submit_probe", "--example", "origin_submit_probe", "--locked", "--offline"], timeout=180)
+            run(["cargo", "build", "-p", "contour-ingress", "--example", "origin_https_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
         run(["cargo", "build", "-p", "contour-postgres", "--example", "refresh_probe", "--locked", "--offline"], timeout=180)
     elif "--service-import-store" in sys.argv or "--human-import" in sys.argv:
@@ -164,7 +165,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="contour-tls-") as folder:
         directory = Path(folder)
         password = secrets.token_hex(24)
-        environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password, CONTOUR_ORIGIN_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_submit_probe'))
+        environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password, CONTOUR_ORIGIN_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_submit_probe'), CONTOUR_ORIGIN_HTTPS_PROBE=str(Path(metadata['target_directory'])/'debug'/'examples'/'origin_https_probe'))
         try:
             (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
             for name in ["ca", "untrusted"]:

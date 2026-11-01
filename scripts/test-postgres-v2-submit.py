@@ -162,3 +162,4 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     print('Restricted TLS V2 session, metadata, retry, rejection, rollback and COMMIT fault assertions passed')
 
     runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-origin-https.py'))['run_cases'](execute, setup, port, directory, environment, environment['CONTOUR_ORIGIN_HTTPS_PROBE'])
