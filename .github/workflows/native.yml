@@ -293,5 +293,11 @@ jobs:
           persist-credentials: false
       - name: Fetch pinned database fixture
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Install pinned Rust for strict codec fixtures
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Fetch locked Rust fixture dependencies
+        run: cargo +1.88.0 fetch --locked
       - name: Test identity and tenant isolation
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
         run: bash scripts/test-postgres.sh
