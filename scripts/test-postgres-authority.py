@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False, origin_sensor_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -82,6 +82,21 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         text += "UPDATE contour.collector_authorization SET active_revision=%d,enabled=true WHERE tenant_id='%s' AND collector_id='%s'; COMMIT;" % (current, tenant, collector)
         execute(text)
         return (body, collector, source)
+
+    if origin_sensor_only:
+        # Isolated component setup, not a production migration sequence. The
+        # standard SQL gate separately applies 1..14 followed by opt-in 15..17.
+        for path in ['db/migrations/0003_ingestion.sql', 'db/provision_catalog.sql',
+                     'db/migrations/0004_catalog.sql', 'db/migrations/0013_instance_registry.sql',
+                     'db/migrations/0014_observation_evidence.sql',
+                     'db/opt-in-migrations/0015_origin_lifecycle.sql',
+                     'db/provision_v2_ingress.sql', 'db/opt-in-migrations/0016_v2_unattributed.sql',
+                     'db/provision_origin_ingress.sql', 'db/opt-in-migrations/0017_origin_proofs.sql']:
+            execute((ROOT/path).read_text())
+        execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
+        runpy.run_path(str(ROOT/'scripts/test-postgres-origin-sensor.py'))['run_cases'](
+            container,execute,setup,directory,environment)
+        return
 
     if catalog_reader_only:
         submit_probe = str(Path(probe).with_name('submit_probe'))

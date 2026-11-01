@@ -215,7 +215,8 @@ def main():
                 volume = "contour-recovery-" + secrets.token_hex(12)
                 run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
-            container = run(["docker", "create", "--network", network, "--publish", "127.0.0.1::5432",
+            container = run(["docker", "create", "--network", network,
+                             *([] if origin_sensor else ['--publish', '127.0.0.1::5432']),
                              "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
                              *data_mount,
                              "-e", "POSTGRES_DB=contour_fixture", "-e", "POSTGRES_PASSWORD="+password,
@@ -256,6 +257,15 @@ def main():
             hba = "local all all trust\nhostnossl all all all reject\nhostssl contour_fixture contour_tls,contour_v2_ingress_test,contour_origin_ingress_test,contour_human_reader_tls,contour_human_writer_tls,contour_catalog_tls,contour_catalog_reader_tls,contour_declared_writer_tls,contour_declared_reader_tls,contour_approval_writer_tls,contour_comparison_writer_tls,contour_comparison_reader_tls,contour_review_writer_tls,contour_review_reader_tls all scram-sha-256\nhostssl all all all reject\n"
             run(["docker", "exec", "-i", container, "sh", "-c", "cat > /var/lib/postgresql/data/pg_hba.conf"], hba)
             run(sql, "SELECT pg_reload_conf();")
+            if origin_sensor:
+                # This mode has no host endpoints. All traffic and PostgreSQL
+                # TLS clients share the owned internal network namespace.
+                ports = json.loads(run(['docker','inspect',container]))[0]['NetworkSettings']['Ports']
+                if any(ports.values()):
+                    raise AssertionError('origin fixture must not publish host ports')
+                runpy.run_path(str(ROOT/'scripts/test-postgres-authority.py'))['run_cases'](
+                    container,sql,probe,'5432',directory,environment,origin_sensor_only=True)
+                return
             bindings = json.loads(run(["docker", "inspect", container]))[0]["NetworkSettings"]["Ports"]["5432/tcp"]
             if len(bindings) != 1 or bindings[0]["HostIp"] != "127.0.0.1":
                 raise AssertionError("fixture port is not loopback-only: " + repr(bindings))

@@ -170,7 +170,7 @@ def run_cases(container, execute, setup, directory, environment):
         openssl('pkcs8','-topk8','-nocrypt','-in',directory/'server.key','-outform','DER','-out',folder/'server.key.der')
         shutil.copyfile(folder/'http-client.der', folder/'http-client.crt.der')
         def policy(p):
-            p.update(approved_names=['POST','probe','id','quantity'],approved_route_segments=['pilot'])
+            p.update(approved_names=['POST','probe','id','quantity'],approved_route_segments=['pilot'],queue_bytes=1048576,queue_ttl_seconds=60)
         raw, collector, source = setup('origin_sensor', change=policy)
         tenant = raw['tenant_id']
         origin_service = '00000000-0000-0000-0000-00000000d001'
