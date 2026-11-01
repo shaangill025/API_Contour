@@ -165,7 +165,8 @@ impl VerifiedPolicy {
     pub(crate) fn content_digest(&self) -> [u8; 32] {
         self.1
     }
-    pub(crate) fn queue_bytes(&self) -> u64 {
+    /// Signed retention bound only; not a live grant or authorization.
+    pub fn queue_bytes(&self) -> u64 {
         self.0.queue_bytes.get()
     }
     pub(crate) fn approves(&self, service: &str, technique: &str, parser: &str) -> bool {
@@ -186,7 +187,8 @@ impl VerifiedPolicy {
     pub(crate) fn denied_templates(&self) -> &[String] {
         &self.0.denied_templates.0
     }
-    pub(crate) fn inspection_bytes(&self) -> usize {
+    /// Signed inspection bound only; not a live grant or authorization.
+    pub fn inspection_bytes(&self) -> usize {
         self.0.inspection_bytes.get() as usize
     }
     pub(crate) fn depth_limit(&self) -> usize {

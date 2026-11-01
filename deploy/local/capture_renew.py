@@ -9,9 +9,12 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 CAPTURE = ROOT / '.local-mvp/capture'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import capture_profiles
 spec = importlib.util.spec_from_file_location('capture_provision', ROOT/'deploy/local/capture_provision.py')
 p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 MAX_ENVELOPE = 16384
@@ -87,9 +90,11 @@ def decoded(value):
     return raw
 
 
-def crypt(op, key, message, signature=None):
-    # OpenSSL only receives temporary fixture-local files with private modes.
-    with tempfile.TemporaryDirectory(prefix='.renew-crypto-',dir=CAPTURE/'private') as directory:
+def crypt(op, key, message, signature=None, profile=None, scratch=None):
+    # OpenSSL only receives temporary files with private modes; optional scratch
+    # lets a read-only state preflight keep those files outside the profile.
+    directory_root = scratch if scratch is not None else (CAPTURE if profile is None else profile.capture)/'private'
+    with tempfile.TemporaryDirectory(prefix='.renew-crypto-',dir=directory_root) as directory:
         directory=Path(directory); keyfile=directory/'key'; msg=directory/'message'
         keyfile.write_bytes(key); msg.write_bytes(message)
         os.chmod(keyfile,0o600); os.chmod(msg,0o600)
@@ -103,18 +108,19 @@ def crypt(op, key, message, signature=None):
         return result.stdout
 
 
-def checked_envelope(raw, public):
+def checked_envelope(raw, public, profile=None, scratch=None):
     if len(raw)>MAX_ENVELOPE: raise ValueError('envelope limit')
     envelope=exact_json(raw)
     if json.dumps(envelope,separators=(',',':')).encode()!=raw: raise ValueError('noncanonical envelope')
     if not isinstance(envelope,dict) or set(envelope)!={'key_id','signature_profile','payload_base64url','signature_base64url'} or envelope['key_id']!='local' or envelope['signature_profile']!='ed25519-v1': raise ValueError('envelope')
     payload=decoded(envelope['payload_base64url']); signature=decoded(envelope['signature_base64url'])
     if len(signature)!=64: raise ValueError('signature')
-    crypt('verify',public,DOMAIN+payload,signature)
+    crypt('verify',public,DOMAIN+payload,signature,profile,scratch)
     policy=exact_json(payload)
     if json.dumps(policy,separators=(',',':')).encode()!=payload: raise ValueError('noncanonical policy')
-    if not isinstance(policy,dict) or set(policy)!=set(FIELDS)|{'revision','issued_at','expires_at'}: raise ValueError('policy fields')
-    for key,value in FIELDS.items():
+    fields = FIELDS if profile is None else dict(FIELDS, collector_id=profile.collector, approved_names=list(profile.approved_names), approved_route_segments=list(profile.approved_route_segments))
+    if not isinstance(policy,dict) or set(policy)!=set(fields)|{'revision','issued_at','expires_at'}: raise ValueError('policy fields')
+    for key,value in fields.items():
         if policy[key]!=value or type(policy[key]) is not type(value): raise ValueError('policy scope')
     revision=policy['revision']
     if type(revision) is not int or not 1<=revision<=18446744073709551615: raise ValueError('revision')
@@ -124,20 +130,22 @@ def checked_envelope(raw, public):
     return policy
 
 
-def signed_policy(old,key,now):
+def signed_policy(old,key,now,profile=None):
     if old['revision']>=18446744073709551615: raise ValueError('revision exhausted')
     policy=dict(old,revision=old['revision']+1,
         issued_at=(now-datetime.timedelta(seconds=30)).isoformat(timespec='microseconds').replace('+00:00','Z'),
         expires_at=(now+datetime.timedelta(minutes=14)).isoformat(timespec='microseconds').replace('+00:00','Z'))
     payload=json.dumps(policy,separators=(',',':')).encode()
-    signature=crypt('sign',key,DOMAIN+payload)
+    signature=crypt('sign',key,DOMAIN+payload,profile=profile)
     if len(signature)!=64: raise ValueError('signature')
     return json.dumps(dict(key_id='local',signature_profile='ed25519-v1',payload_base64url=encoded(payload),signature_base64url=encoded(signature)),separators=(',',':')).encode()
 
 
-def locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,preflight):
+def locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,preflight,profile=None):
     q=p.base.sql_quote
-    t,c,src,project,service,env,dep,instance,nonce=map(q,[p.TENANT,p.COLLECTOR,p.SOURCE,p.PROJECT,p.SERVICE,p.ENVIRONMENT,p.DEPLOYMENT,p.INSTANCE,p.NONCE])
+    profile = profile or capture_profiles.DEFAULT
+    if profile not in (capture_profiles.DEFAULT, capture_profiles.PILOT): raise ValueError('unknown capture profile')
+    t,c,src,project,service,env,dep,instance,nonce=map(q,[p.TENANT,profile.collector,profile.source,p.PROJECT,p.SERVICE,p.ENVIRONMENT,profile.deployment,profile.instance,profile.nonce])
     # Preflight runs under the same collector lock and authorization checks as
     # commit. It emits only a closed state token, never envelope contents.
     if preflight:
@@ -187,62 +195,68 @@ COMMIT;'''
         return state
 
 
-def database_state(base_bytes,base_revision,proposal,proposal_revision,issued,expires):
-    return locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,True)
+def database_state(base_bytes,base_revision,proposal,proposal_revision,issued,expires,profile=None):
+    return locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,True,profile)
 
 
-def database_commit(base_bytes,base_revision,proposal,proposal_revision,issued,expires):
-    locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,False)
+def database_commit(base_bytes,base_revision,proposal,proposal_revision,issued,expires,profile=None):
+    locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,False,profile)
 
 
-def renew(now=None):
+def renew(now=None, profile=None):
+    if profile not in (None, capture_profiles.DEFAULT, capture_profiles.PILOT): raise ValueError('unknown capture profile')
+    if profile == capture_profiles.DEFAULT: profile = None
+    capture = CAPTURE if profile is None else profile.capture
     now=now or datetime.datetime.now(datetime.timezone.utc)
-    private=CAPTURE/'private'; runtime=CAPTURE/'runtime'
-    for directory in (CAPTURE.parent,CAPTURE,private,runtime): safe_dir(directory)
+    private=capture/'private'; runtime=capture/'runtime'
+    for directory in (capture.parent,capture,private,runtime): safe_dir(directory)
     lockfd=os.open(private/'renew.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
     try:
         info=os.fstat(lockfd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077 or info.st_nlink!=1: raise ValueError('lock')
         fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         key=read_file(private/'policy.key',16384); raw_public=read_file(runtime/'policy.raw',32)
-        public=crypt('public',key,b'')
+        public=crypt('public',key,b'',profile=profile)
         if len(public)!=44 or public[-32:]!=raw_public: raise ValueError('signer mismatch')
         policy_path=private/'policy.json'; journal_path=private/'renew.pending'
-        current=read_file(policy_path,MAX_ENVELOPE); current_policy=checked_envelope(current,public)
+        current=read_file(policy_path,MAX_ENVELOPE); current_policy=checked_envelope(current,public,profile)
         if os.path.lexists(journal_path):
             journal_bytes=read_file(journal_path,MAX_JOURNAL)
             journal=exact_json(journal_bytes)
             if json.dumps(journal,separators=(',',':')).encode()!=journal_bytes: raise ValueError('noncanonical journal')
             if not isinstance(journal,dict) or set(journal)!={'version','base','proposal'} or type(journal['version']) is not int or journal['version']!=1: raise ValueError('journal')
             base=decoded(journal['base']); proposal=decoded(journal['proposal'])
-            old=checked_envelope(base,public); new=checked_envelope(proposal,public)
+            old=checked_envelope(base,public,profile); new=checked_envelope(proposal,public,profile)
             if new['revision']!=old['revision']+1 or current not in (base,proposal): raise ValueError('journal mismatch')
-            state=database_state(base,old['revision'],proposal,new['revision'],new['issued_at'],new['expires_at'])
+            args=(base,old['revision'],proposal,new['revision'],new['issued_at'],new['expires_at'])
+            state=database_state(*args) if profile is None else database_state(*args,profile=profile)
             if state=='base_expired':
                 if current!=base: raise ValueError('journal mismatch')
                 # The old proposal has been proven absent while the exact base
                 # is locked. Replace the durable journal before any mutation.
-                proposal=signed_policy(old,key,now); new=checked_envelope(proposal,public)
+                proposal=signed_policy(old,key,now,profile); new=checked_envelope(proposal,public,profile)
                 replacement=json.dumps(dict(version=1,base=encoded(base),proposal=encoded(proposal)),separators=(',',':')).encode()
                 replace_durable(journal_path,replacement)
         else:
             base=current; old=current_policy
-            proposal=signed_policy(old,key,now); new=checked_envelope(proposal,public)
+            proposal=signed_policy(old,key,now,profile); new=checked_envelope(proposal,public,profile)
             journal=json.dumps(dict(version=1,base=encoded(base),proposal=encoded(proposal)),separators=(',',':')).encode()
             replace_durable(journal_path,journal)
-        database_commit(base,old['revision'],proposal,new['revision'],new['issued_at'],new['expires_at'])
+        args=(base,old['revision'],proposal,new['revision'],new['issued_at'],new['expires_at'])
+        if profile is None: database_commit(*args)
+        else: database_commit(*args,profile=profile)
         if current!=proposal: replace_durable(policy_path,proposal)
         remove_durable(journal_path)
     finally:
         os.close(lockfd)
 
 
-def main():
+def main(profile=None):
     os.umask(0o077)
-    try: renew()
+    try: renew(profile=profile)
     except Exception:
         print('Synthetic policy renewal failed; existing state and pending journal retained.',file=__import__('sys').stderr)
         raise SystemExit(1)
     print('Synthetic policy renewal reconciled.')
 
-if __name__=='__main__': main()
+if __name__=='__main__': main(capture_profiles.arguments(sys.argv[1:]))

@@ -25,6 +25,7 @@ impl fmt::Display for AdmissionError {
 impl std::error::Error for AdmissionError {}
 
 /// Checked assignment syntax, not proof of authentication or enrollment.
+#[derive(PartialEq, Eq)]
 pub struct SourceAssignment {
     source_id: String,
     identity: [String; 6],
@@ -179,6 +180,19 @@ impl AdmissionInputs<'_> {
         now: OffsetDateTime,
         clock: &mut dyn crate::InspectionClock,
     ) -> Result<(u64, crate::Observation), AdmissionError> {
+        let revision = self.check_capture_scope(scope, now)?;
+        Ok((
+            revision,
+            crate::extract::extract_signed_json_with_clock(bytes, self.current, clock),
+        ))
+    }
+
+    /// Snapshot checks only, not live authority, enrollment, or revocation.
+    pub fn check_capture_scope(
+        &self,
+        scope: &CaptureScope<'_>,
+        now: OffsetDateTime,
+    ) -> Result<u64, AdmissionError> {
         self.current
             .validate_capture_at(now)
             .map_err(|_| AdmissionError::Time)?;
@@ -220,10 +234,7 @@ impl AdmissionInputs<'_> {
             return Err(AdmissionError::Scope);
         }
         validate_route(scope.route_template, self.current)?;
-        Ok((
-            self.current.revision(),
-            crate::extract::extract_signed_json_with_clock(bytes, self.current, clock),
-        ))
+        Ok(self.current.revision())
     }
 }
 

@@ -63,7 +63,7 @@ mod scalar;
 pub use policy::{PolicyError, PolicyKeys, VerifiedPolicy};
 pub use queue::{
     Acknowledgement, DeliveryBinding, DeliveryReservation, FrozenView, MemoryQueue, QueueError,
-    QueueLimits, QueueStats,
+    QueueLimits, QueueStats, UnfrozenAdmission,
 };
 pub use scalar::{ScalarError, Timestamp, UnsignedInteger};
 mod wire;
