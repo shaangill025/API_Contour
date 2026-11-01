@@ -10,7 +10,7 @@ use std::{
     },
     task::Poll,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore, SemaphorePermit};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoolCapture {
@@ -27,11 +27,14 @@ pub struct CollectorPool {
     enabled: AtomicBool,
     epoch: AtomicU64,
     sync: Mutex<()>,
+    background: Semaphore,
     cancel: Notify,
     gate: Gate<()>,
     losses: AtomicU64,
     cancelled: Vec<AtomicU64>,
     next_slot: AtomicUsize,
+    #[cfg(test)]
+    blocked_sends: AtomicUsize,
 }
 
 // Cancellation stays durable even when forwarding cannot acquire the gate.
@@ -71,10 +74,13 @@ impl CollectorPool {
             enabled: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             sync: Mutex::new(()),
+            background: Semaphore::new(1),
             cancel: Notify::new(),
             gate: Gate::new(()),
             losses: AtomicU64::new(0),
             next_slot: AtomicUsize::new(0),
+            #[cfg(test)]
+            blocked_sends: AtomicUsize::new(0),
         }))
     }
     fn try_gate(&self) -> Result<PoolGate<'_>, OwnerError> {
@@ -125,6 +131,25 @@ impl CollectorPool {
     }
     fn current(&self, epoch: u64) -> bool {
         self.enabled.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch
+    }
+    // Wait outside every owner/raw lock. Tokio's semaphore queues waiters fairly;
+    // cancellation must also wake an old waiter before it can use a new grant.
+    async fn background_permit(&self, epoch: u64) -> Result<SemaphorePermit<'_>, OwnerError> {
+        let acquire = self.background.acquire();
+        let mut acquire = pin!(acquire);
+        let notify = self.cancel.notified();
+        let mut notify = pin!(notify);
+        poll_fn(|cx| {
+            if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() || !self.current(epoch) {
+                return Poll::Ready(Err(OwnerError::Paused));
+            }
+            match acquire.as_mut().poll(cx) {
+                Poll::Ready(Ok(permit)) if self.current(epoch) => Poll::Ready(Ok(permit)),
+                Poll::Ready(_) => Poll::Ready(Err(OwnerError::Paused)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
     // Called with the coordinator gate held. A slot held by send has no raw
     // stream; every other slot can be examined and reclaimed without waiting.
@@ -416,6 +441,7 @@ impl CollectorPool {
         if !self.current(epoch) {
             return Err(OwnerError::Paused);
         }
+        let _permit = self.background_permit(epoch).await?;
         let mut owner = {
             let _gate = self.try_gate().map_err(|_| OwnerError::Paused)?;
             let owner = self
@@ -431,6 +457,16 @@ impl CollectorPool {
         };
         let notify = self.cancel.notified();
         let mut notify = pin!(notify);
+        #[cfg(test)]
+        let send = async {
+            if self.blocked_sends.load(Ordering::Acquire) != 0 {
+                self.blocked_sends.fetch_add(1, Ordering::AcqRel);
+                std::future::pending().await
+            } else {
+                owner.send_once().await
+            }
+        };
+        #[cfg(not(test))]
         let send = owner.send_once();
         let mut send = pin!(send);
         poll_fn(|cx| {
@@ -448,6 +484,7 @@ impl CollectorPool {
         if !self.current(epoch) {
             return Err(OwnerError::Paused);
         }
+        let _permit = self.background_permit(epoch).await?;
         let mut owner = {
             let _gate = self.try_gate().map_err(|_| OwnerError::Paused)?;
             let owner = self
@@ -482,6 +519,173 @@ impl CollectorPool {
 mod tests {
     use super::super::capture_tests::{make_owner, make_owner_at, make_owner_at_with_ttl, scope};
     use super::*;
+
+    #[test]
+    fn pending_background_sends_leave_capture_owner_available() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            let limits = contour_core::QueueLimits::new(2, 4000).unwrap();
+            owner.queue = contour_core::MemoryQueue::new(
+                owner.client.identity.each_ref().map(String::as_str),
+                limits,
+            )
+            .unwrap();
+            owner.configured_queue_bytes = limits.byte_limit();
+            owner.configured_queue_records = limits.record_limit();
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        {
+            let guards = pool
+                .slots
+                .iter()
+                .map(|slot| slot.try_lock().unwrap())
+                .collect::<Vec<_>>();
+            assert!(CollectorPool::validate_common(&guards).is_ok());
+        }
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut first = pin!(pool.send(0));
+                let mut second = pin!(pool.send(1));
+                poll_fn(|cx| {
+                    assert!(first.as_mut().poll(cx).is_pending());
+                    assert!(second.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(
+                    pool.blocked_sends.load(Ordering::Acquire) > 1,
+                    "a transport is actually pending while holding an owner"
+                );
+                let s = scope();
+                let capture = pool
+                    .try_begin(&s)
+                    .expect("background network waits must leave another owner available");
+                pool.try_fragment(capture, br#"{"id":1}"#).unwrap();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                pool.try_finish(
+                    capture,
+                    RecordMetadata {
+                        record_id: "00000000-0000-4000-8000-000000000002",
+                        source_id: s.source_id,
+                        workload: s.workload,
+                        protocol: "http",
+                        direction: "request",
+                        visibility: "structure",
+                        operation: s.operation,
+                        route_template: s.route_template,
+                        route_uncertain: false,
+                        parser_profile: s.parser_profile,
+                        policy_revision: 1,
+                        count: 1,
+                        first_seen: timestamp.clone(),
+                        last_seen: timestamp,
+                        sample_numerator: 1,
+                        sample_denominator: 1,
+                        status_code: None,
+                        request_header_names: &[],
+                        response_header_names: &[],
+                        query_parameter_names: &[],
+                    },
+                )
+                .expect("reserved owner must admit the actual captured record");
+                assert_eq!(pool.losses(), 0);
+            });
+    }
+
+    #[test]
+    fn synchronize_cancels_permit_waiter_and_inflight_send_clears_raw() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sync_lock = pool.sync.lock().await;
+                let mut sending = pin!(pool.send(0));
+                let mut waiting = pin!(pool.send(1));
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    assert!(waiting.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let capture = pool.try_begin(&scope()).unwrap();
+                assert_eq!(capture.slot, 1);
+                pool.try_fragment(capture, b"private raw bytes").unwrap();
+                let mut sync = Box::pin(pool.synchronize());
+                poll_fn(|cx| {
+                    assert!(sync.as_mut().poll(cx).is_pending());
+                    assert!(!pool.enabled.load(Ordering::Acquire));
+                    assert!(pool.slots[1].try_lock().unwrap().streams.is_empty());
+                    assert!(matches!(
+                        waiting.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    // The waiter returned without acquiring a permit or owner;
+                    // the active transport remains owned until its future polls cancellation.
+                    assert!(pool.slots[0].try_lock().is_err());
+                    assert!(matches!(
+                        sending.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(pool.slots[0].try_lock().is_ok());
+                assert_eq!(pool.blocked_sends.load(Ordering::Acquire), 2);
+                drop(sync);
+                drop(sync_lock);
+            });
+    }
+
+    #[test]
+    fn waiter_cannot_use_authority_from_a_later_epoch() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut sending = pin!(pool.send(0));
+                let mut waiting = pin!(pool.wait_retry(1));
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    assert!(waiting.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                // Model an authority generation being replaced while the old
+                // future is queued; it must not use the later live generation.
+                pool.enabled.store(false, Ordering::Release);
+                pool.advance_epoch().unwrap();
+                pool.enabled.store(true, Ordering::Release);
+                pool.cancel.notify_waiters();
+                poll_fn(|cx| {
+                    assert!(matches!(
+                        waiting.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    assert!(matches!(
+                        sending.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(pool.blocked_sends.load(Ordering::Acquire), 2);
+                assert!(pool.slots[1].try_lock().unwrap().streams.is_empty());
+            });
+    }
 
     #[test]
     fn expired_retention_is_reclaimed_before_full_queue_selection() {
