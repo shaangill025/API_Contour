@@ -62,16 +62,16 @@ def run_cases(container, execute, setup, check, port, directory, environment):
                 process.kill()
                 process.wait(timeout=3)
 
-    def scoped(candidate):
+    def retry_scope(candidate):
         return "tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (candidate['tenant_id'],candidate['collector_id'],candidate['batch_id'])
     def retained(candidate):
-        where = scoped(candidate)
+        where = retry_scope(candidate)
         return execute("SELECT b.receipt_id::text,floor(extract(epoch FROM b.accepted_at)*1000000)::bigint,b.record_count,encode(b.request_digest,'hex'),encode(sha256(p.checked_batch),'hex'),p.origin_writer_provenance,(SELECT count(*) FROM contour.ingestion_v2_metadata WHERE %s),(SELECT count(*) FROM contour.origin_proofs WHERE %s),(SELECT count(*) FROM contour.origin_batch_proof_completion WHERE %s),(SELECT count(*) FROM contour.catalog_origin_projection WHERE %s),COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id=b.tenant_id),0) FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.%s;" % (where,where,where,where,where.replace(' AND ',' AND b.')))
 
     def quota(candidate):
         return execute("SELECT COALESCE((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s'),0);" % candidate['tenant_id'])
     def provenance(candidate):
-        return execute("SELECT origin_writer_provenance FROM contour.ingestion_payloads WHERE " + scoped(candidate))
+        return execute("SELECT origin_writer_provenance FROM contour.ingestion_payloads WHERE " + retry_scope(candidate))
 
     # Table-level INSERT was narrowed to the original five columns. Ordinary
     # callers cannot submit the marker; even a privileged fixture caller cannot
@@ -80,7 +80,7 @@ def run_cases(container, execute, setup, check, port, directory, environment):
         if execute("SELECT has_column_privilege('%s','contour.ingestion_payloads','origin_writer_provenance','INSERT');" % role) != 'f':
             raise AssertionError('writer can supply provenance column')
     for selected_origin in (False,True):
-        source = before_17; where_source = scoped(source)
+        source = before_17; where_source = retry_scope(source)
         new_batch = '00000000-0000-4000-8000-00000000ff1%d' % int(selected_origin)
         gate = "SELECT contour.begin_origin_ingress('%s','%s');" % (source['tenant_id'],source['collector_id']) if selected_origin else "SELECT contour.lock_collector('%s','%s');" % (source['tenant_id'],source['collector_id'])
         # Inverse supplied value is deliberately ignored by the trigger.
@@ -104,13 +104,13 @@ def run_cases(container, execute, setup, check, port, directory, environment):
       BEGIN UPDATE contour.ingestion_payloads SET origin_writer_provenance=NOT origin_writer_provenance WHERE %s;
       EXCEPTION WHEN check_violation THEN rejected:=true; END;
       IF NOT rejected THEN RAISE EXCEPTION 'payload provenance is mutable'; END IF;
-    END $$;""" % scoped(before_17))
+    END $$;""" % retry_scope(before_17))
 
     for candidate, original_receipt in [(before_17,before_receipt),(after_17,after_receipt)]:
         before = retained(candidate)
         if provenance(candidate) != 'f':
             raise AssertionError('Basic payload was not marked Basic')
-        stored = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + scoped(candidate))
+        stored = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + retry_scope(candidate))
         canonical = json.dumps(candidate,sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode().hex()
         if stored == canonical:
             raise AssertionError('Basic wire unexpectedly canonical; retry reproducer invalid')
@@ -141,15 +141,15 @@ def run_cases(container, execute, setup, check, port, directory, environment):
 
     # Re-encoding preserves the V2 semantic digest but violates the immutable
     # canonical bytes required of Origin-created payloads, even with no witness.
-    original_wire = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + scoped(reverse))
+    original_wire = execute("SELECT encode(checked_batch,'hex') FROM contour.ingestion_payloads WHERE " + retry_scope(reverse))
     rewritten_wire = json.dumps(reverse,indent=2,ensure_ascii=False).encode().hex()
     if rewritten_wire == original_wire:
         raise AssertionError('canonical corruption reproducer did not alter bytes')
-    execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (rewritten_wire,scoped(reverse)))
+    execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (rewritten_wire,retry_scope(reverse)))
     try:
         submit(reverse,'Corrupt')
     finally:
-        execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (original_wire,scoped(reverse)))
+        execute("BEGIN; SET LOCAL session_replication_role=replica; UPDATE contour.ingestion_payloads SET checked_batch=decode('%s','hex') WHERE %s; COMMIT;" % (original_wire,retry_scope(reverse)))
     if retained(reverse) != before or submit(reverse,status='duplicate') != original_receipt:
         raise AssertionError('restored canonical origin retry changed retained receipt')
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_zero_canonical_cases'](execute, reverse, port, directory, environment)
@@ -227,7 +227,7 @@ def run_cases(container, execute, setup, check, port, directory, environment):
 
     # Deliberate owner-only corruption demonstrates the absence verifier fails
     # closed on each retained history component, even before digest conflicts.
-    candidate = before_17; target_scope = scoped(candidate)
+    candidate = before_17; target_scope = retry_scope(candidate)
     original_record = candidate['records'][0]['record']['record_id']
     changed = copy.deepcopy(candidate); changed['records'][0]['record']['count'] += 1
     for table in ('origin_proofs','origin_batch_proof_completion','catalog_origin_projection'):
