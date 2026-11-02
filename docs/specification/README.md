@@ -42,3 +42,18 @@ python3.13 docs/specification/validate.py
 ```
 
 This check validates document links and traceability. It does not establish product correctness, schema-standard conformance, platform compatibility, or release readiness. Run `validate-standard.py` with the pinned validation requirements for full JSON Schema 2020-12 and OpenAPI checks. See [Validation](12-validation.md) for commands and executed evidence. Implementation tasks must add executable product tests for every acceptance case.
+
+The [causal event batch schema](contracts/causal-event-batch.schema.json) and
+[fixtures](fixtures/causal-events.json) define a data-only format. The schema
+covers closed field shapes and bounds; the codec and fixture semantic checks
+also enforce sequence ordering, identifier consistency, and loss ranges. Raw
+JSON duplicate keys, integer token spelling, and the 1 MiB input/canonical byte
+limit require codec validation and cannot be established by JSON Schema over
+already decoded values. IDs and marker digests are untrusted claims; parsing
+this format does not authenticate, admit, or prove a causal relationship.
+
+Within a batch, a root identifier also names its boundary activity. A delivery
+activity cannot be its own parent or reuse a root boundary activity, and an
+attempt cannot name a different root's boundary activity. An attempt may use
+its own root boundary activity. References not resolved in the batch remain
+untrusted data for future admission; this check does not resolve a graph.

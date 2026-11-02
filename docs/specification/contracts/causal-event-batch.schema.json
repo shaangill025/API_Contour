@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apicontour.invalid/spec/v1/causal-event-batch.schema.json",
+  "type": "object",
+  "properties": {
+    "wire_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "batch_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "tenant_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "runtime_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "session_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "first_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "last_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "root"
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "root": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "kind",
+              "event_id",
+              "seq",
+              "root"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "delivery"
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "root": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "activity": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "parent": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "kind",
+              "event_id",
+              "seq",
+              "root",
+              "activity",
+              "parent"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "attempt"
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "root": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "activity": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "attempt": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "marker_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "minLength": 64,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "kind",
+              "event_id",
+              "seq",
+              "root",
+              "activity",
+              "attempt",
+              "marker_digest"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "loss"
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$",
+                "minLength": 32,
+                "maxLength": 32
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "first_missing_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "last_missing_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "overflow",
+                  "expired",
+                  "canceled",
+                  "guard_invalidated",
+                  "dispatch_missing",
+                  "restart",
+                  "unsupported"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "event_id",
+              "seq",
+              "first_missing_seq",
+              "last_missing_seq",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "wire_version",
+    "batch_id",
+    "tenant_id",
+    "runtime_id",
+    "session_epoch",
+    "first_seq",
+    "last_seq",
+    "events"
+  ],
+  "additionalProperties": false
+}

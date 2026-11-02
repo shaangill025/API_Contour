@@ -1,0 +1,1812 @@
+[
+  {
+    "id": "root_loss",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 3,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "loss",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 3,
+          "first_missing_seq": 2,
+          "last_missing_seq": 2,
+          "reason": "overflow"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1},{\"event_id\":\"22222222222222222222222222222222\",\"first_missing_seq\":2,\"kind\":\"loss\",\"last_missing_seq\":2,\"reason\":\"overflow\",\"seq\":3}],\"first_seq\":1,\"last_seq\":3,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":1,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 472,
+    "sha256": "a21ae3a990acb213decb496e419899e3bec1439ae81df61e7e16b4745fe6a345",
+    "events": [
+      {
+        "canonical": "{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1}",
+        "bytes": 111,
+        "sha256": "0aa7e5dac2a436aa3906d42c83a633ea50471e9494cd22f22a1b35fe023715e7"
+      },
+      {
+        "canonical": "{\"event_id\":\"22222222222222222222222222222222\",\"first_missing_seq\":2,\"kind\":\"loss\",\"last_missing_seq\":2,\"reason\":\"overflow\",\"seq\":3}",
+        "bytes": 132,
+        "sha256": "85f1c64e6ce0a1bc299eb64a494066c7abc540dd626c991e667b9f7f7bcd1927"
+      }
+    ]
+  },
+  {
+    "id": "all_variants",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1},{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"event_id\":\"22222222222222222222222222222222\",\"kind\":\"delivery\",\"parent\":\"cccccccccccccccccccccccccccccccc\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2},{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":3},{\"event_id\":\"44444444444444444444444444444444\",\"first_missing_seq\":4,\"kind\":\"loss\",\"last_missing_seq\":4,\"reason\":\"dispatch_missing\",\"seq\":5}],\"first_seq\":1,\"last_seq\":5,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":1,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 975,
+    "sha256": "2a17984ed4019ea7d691499406f8f7e2a6036eee04480f123eb44e6d5299743a",
+    "events": [
+      {
+        "canonical": "{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1}",
+        "bytes": 111,
+        "sha256": "0aa7e5dac2a436aa3906d42c83a633ea50471e9494cd22f22a1b35fe023715e7"
+      },
+      {
+        "canonical": "{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"event_id\":\"22222222222222222222222222222222\",\"kind\":\"delivery\",\"parent\":\"cccccccccccccccccccccccccccccccc\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}",
+        "bytes": 205,
+        "sha256": "dbec935498b7a4d823517bf9a7ebdc1f2367232a767eb767cc395256cefb037e"
+      },
+      {
+        "canonical": "{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":3}",
+        "bytes": 288,
+        "sha256": "db7890ede426b3ce28e384c6d6fb4e10d0dd79785320ac633a171d304079fe68"
+      },
+      {
+        "canonical": "{\"event_id\":\"44444444444444444444444444444444\",\"first_missing_seq\":4,\"kind\":\"loss\",\"last_missing_seq\":4,\"reason\":\"dispatch_missing\",\"seq\":5}",
+        "bytes": 140,
+        "sha256": "b801b8090f56c35f7e65b1722620dc7a8af0924ebb14e380ed0cc574c4b53167"
+      }
+    ]
+  },
+  {
+    "id": "empty",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": []
+    }
+  },
+  {
+    "id": "unknown_envelope",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ],
+      "metadata": {}
+    }
+  },
+  {
+    "id": "unknown_event",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc",
+          "header": "secret"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "unknown_kind",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "other",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bad_uuid",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "invalid",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "zero_epoch",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 0,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "overflow",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 18446744073709551616,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "zero_sequence",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 0,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "endpoint",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 2,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "out_of_order",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "duplicate_event_id",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bad_hex",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "loss_zero",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 0,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "loss_reversed",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 5,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "loss_future",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 5,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "loss_overlaps",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 3,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bad_reason",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "unknown"
+        }
+      ]
+    }
+  },
+  {
+    "id": "duplicate_root",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 7,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "root",
+          "event_id": "55555555555555555555555555555555",
+          "seq": 4,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 7,
+          "first_missing_seq": 6,
+          "last_missing_seq": 6,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "conflicting_activity",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 6,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "55555555555555555555555555555555",
+          "seq": 4,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "ffffffffffffffffffffffffffffffff"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 6,
+          "first_missing_seq": 5,
+          "last_missing_seq": 5,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "conflicting_attempt",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 6,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "55555555555555555555555555555555",
+          "seq": 4,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "ffffffffffffffffffffffffffffffff",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 6,
+          "first_missing_seq": 5,
+          "last_missing_seq": 5,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "activity_root_conflict",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "ffffffffffffffffffffffffffffffff",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "batch_id_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000\n",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "tenant_id_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001\n",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "runtime_id_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002\n",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "event_id_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111\n",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "root_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "activity_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "parent_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc\n"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "attempt_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd\n",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "marker_digest_trailing_newline",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 5,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 3,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n"
+        },
+        {
+          "kind": "loss",
+          "event_id": "44444444444444444444444444444444",
+          "seq": 5,
+          "first_missing_seq": 4,
+          "last_missing_seq": 4,
+          "reason": "dispatch_missing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "u64_boundaries",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 18446744073709551615,
+      "first_seq": 9007199254740993,
+      "last_seq": 18446744073709551615,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 9007199254740993,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "loss",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 18446744073709551615,
+          "first_missing_seq": 9007199254740994,
+          "last_missing_seq": 18446744073709551614,
+          "reason": "overflow"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":9007199254740993},{\"event_id\":\"22222222222222222222222222222222\",\"first_missing_seq\":9007199254740994,\"kind\":\"loss\",\"last_missing_seq\":18446744073709551614,\"reason\":\"overflow\",\"seq\":18446744073709551615}],\"first_seq\":9007199254740993,\"last_seq\":18446744073709551615,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":18446744073709551615,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 593,
+    "sha256": "73225e70dfd7e83d0c0978526f81fb10cee367634ad7303223cdc4ced2675281",
+    "events": [
+      {
+        "canonical": "{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":9007199254740993}",
+        "bytes": 126,
+        "sha256": "fa00ea3905796a2463a1f943adde5468994f4e4e091c1b678293e56299f2d051"
+      },
+      {
+        "canonical": "{\"event_id\":\"22222222222222222222222222222222\",\"first_missing_seq\":9007199254740994,\"kind\":\"loss\",\"last_missing_seq\":18446744073709551614,\"reason\":\"overflow\",\"seq\":18446744073709551615}",
+        "bytes": 185,
+        "sha256": "e68d6c87042777d04b7d768767fb2939c96c7f4a97882ba7ca8d7edfd43626ca"
+      }
+    ]
+  },
+  {
+    "id": "delivery_self_parent",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 1,
+      "events": [
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    }
+  },
+  {
+    "id": "delivery_root_alias_root_first",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        }
+      ]
+    }
+  },
+  {
+    "id": "delivery_root_alias_root_last",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  },
+  {
+    "id": "attempt_cross_root_root_first",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "ffffffffffffffffffffffffffffffff"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "ffffffffffffffffffffffffffffffff",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    }
+  },
+  {
+    "id": "attempt_cross_root_root_last",
+    "expected": "reject",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "ffffffffffffffffffffffffffffffff",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 2,
+          "root": "ffffffffffffffffffffffffffffffff"
+        }
+      ]
+    }
+  },
+  {
+    "id": "attempt_own_root_root_first",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1},{\"activity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}],\"first_seq\":1,\"last_seq\":2,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":1,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 628,
+    "sha256": "68d1764cc82dafc9e3cf1456c57b8f6537a8634c348440825d422f60aa8ea1f1",
+    "events": [
+      {
+        "canonical": "{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1}",
+        "bytes": 111,
+        "sha256": "0aa7e5dac2a436aa3906d42c83a633ea50471e9494cd22f22a1b35fe023715e7"
+      },
+      {
+        "canonical": "{\"activity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}",
+        "bytes": 288,
+        "sha256": "1aa0c48c5c8c233fc98d72450697d5ecda85e0d61848da1750bb8fd58987f974"
+      }
+    ]
+  },
+  {
+    "id": "attempt_own_root_root_last",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "kind": "root",
+          "event_id": "11111111111111111111111111111111",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"activity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1},{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}],\"first_seq\":1,\"last_seq\":2,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":1,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 628,
+    "sha256": "eaa7fff3596081a501a2e1b8e77216ce519bdf18686ec8a1aaf3ee7bee380bef",
+    "events": [
+      {
+        "canonical": "{\"activity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1}",
+        "bytes": 288,
+        "sha256": "fd5f27c3c3290f18f1f7b0fef085faa97e47c4add3a61be127d04e5450038520"
+      },
+      {
+        "canonical": "{\"event_id\":\"11111111111111111111111111111111\",\"kind\":\"root\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}",
+        "bytes": 111,
+        "sha256": "9a0d784d6085c94d8c2aeaf5435290804c83b88dbe831f3b4e79f22d678c086e"
+      }
+    ]
+  },
+  {
+    "id": "unresolved_references",
+    "expected": "accept",
+    "body": {
+      "wire_version": 1,
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174001",
+      "runtime_id": "123e4567-e89b-12d3-a456-426614174002",
+      "session_epoch": 1,
+      "first_seq": 1,
+      "last_seq": 2,
+      "events": [
+        {
+          "kind": "delivery",
+          "event_id": "22222222222222222222222222222222",
+          "seq": 1,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent": "cccccccccccccccccccccccccccccccc"
+        },
+        {
+          "kind": "attempt",
+          "event_id": "33333333333333333333333333333333",
+          "seq": 2,
+          "root": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "attempt": "dddddddddddddddddddddddddddddddd",
+          "marker_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"events\":[{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"event_id\":\"22222222222222222222222222222222\",\"kind\":\"delivery\",\"parent\":\"cccccccccccccccccccccccccccccccc\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1},{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}],\"first_seq\":1,\"last_seq\":2,\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"session_epoch\":1,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174001\",\"wire_version\":1}",
+    "bytes": 722,
+    "sha256": "32e7e81e1cfa686d6087bf5b08d63596e72ae69dbbb81b9e9cc40b045afc7c27",
+    "events": [
+      {
+        "canonical": "{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"event_id\":\"22222222222222222222222222222222\",\"kind\":\"delivery\",\"parent\":\"cccccccccccccccccccccccccccccccc\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":1}",
+        "bytes": 205,
+        "sha256": "f91de5435ab857e8d62d75b2e305fde2683550b4e382210f8fa0d4c767fc9cdc"
+      },
+      {
+        "canonical": "{\"activity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"attempt\":\"dddddddddddddddddddddddddddddddd\",\"event_id\":\"33333333333333333333333333333333\",\"kind\":\"attempt\",\"marker_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"seq\":2}",
+        "bytes": 288,
+        "sha256": "7c2cec383a63ede4016fa1f694a64b702d62649c8b00ea2e8ed473dfda453db3"
+      }
+    ]
+  }
+]

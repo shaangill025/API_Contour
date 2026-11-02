@@ -14,6 +14,11 @@ mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod batch_v2;
 pub use batch_v2::{BatchV2, BatchV2Record, OriginWitness};
+mod causal_event;
+pub use causal_event::{
+    CausalEvent, CausalEventBatch, CausalEventKind, LossReason, MAX_CAUSAL_EVENT_BATCH_BYTES,
+    MAX_CAUSAL_EVENTS,
+};
 mod comparison;
 pub use comparison::{
     ComparisonError, MAX_COMPARISON_DIFFERENCES, MAX_COMPARISON_PATH_BYTES,
