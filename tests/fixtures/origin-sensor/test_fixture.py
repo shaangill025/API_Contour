@@ -69,10 +69,36 @@ class Fixture(unittest.TestCase):
         fixture.assert_transition(unattributed,set(),'a',allow_unattributed=True)
         with self.assertRaises(AssertionError): fixture.assert_transition(unattributed,set(),'a')
     def test_stock_flow_has_fixed_identity_and_target(self):
-        nodes={node['id']:node for node in fixture.flows('b'*64)}
+        nodes={node['id']:node for node in fixture.flows('b'*64, 'a')}
         self.assertEqual(nodes['send']['url'],'https://127.0.0.1:9443/pilot')
         self.assertEqual(nodes['send']['tls'],'tls')
         self.assertEqual(nodes['tls']['cert'],'/fixture/client.crt')
         self.assertIn('x-contour-origin-witness',nodes['make']['func'])
+        self.assertIn('{probe:[true]}', nodes['make']['func'])
+        other={node['id']:node for node in fixture.flows('a'*64, 'b')}
+        self.assertIn('{probe:{id:1}}', other['make']['func'])
+        with self.assertRaises(ValueError): fixture.flows('a'*64, 'unknown')
+
+    def test_concurrent_shape_attribution_is_fail_closed(self):
+        def obj(fields): return {'kind':'object','fields':fields,'additional':None}
+        def row(record, leaf, direction, shape):
+            value=[None]*22; value[0]=leaf; value[13]=record; value[14]=direction; value[21]=shape
+            return value
+        rows=[
+            row('ar','a','request',obj({'probe':{'kind':'array','items':{'kind':'boolean'}}})),
+            row('br','b','request',obj({'probe':obj({'id':{'kind':'integer'}})})),
+            row('as','a','response',obj({'id':{'kind':'boolean'}})),
+            row('bs','b','response',obj({'quantity':{'kind':'array','items':{'kind':'integer'}}})),
+        ]
+        old=row('old','foreign','request',{})
+        fixture.assert_concurrent([old,*rows],{'old'},'a','b')
+        for first, second in [(0,1),(2,3)]:
+            changed=[r.copy() for r in rows]
+            changed[first][0],changed[second][0]=changed[second][0],changed[first][0]
+            with self.assertRaises(AssertionError): fixture.assert_concurrent(changed,set(),'a','b')
+        duplicate=[r.copy() for r in rows]; duplicate[1]=duplicate[0].copy(); duplicate[1][13]='duplicate'
+        foreign=[r.copy() for r in rows]; foreign[0][0]='foreign'
+        for changed in (rows[:-1], [*rows,row('extra','a','request',{})], duplicate, foreign):
+            with self.assertRaises(AssertionError): fixture.assert_concurrent(changed,set(),'a','b')
 
 if __name__ == '__main__': unittest.main()

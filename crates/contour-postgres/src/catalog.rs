@@ -269,7 +269,18 @@ async fn load(
             .filter(|(_, witness)| !matches!(witness, OriginWitness::Unattributed))
             .count();
         if available && expected_proofs == 0 {
-            verify_origin_absence(transaction, expected, batch_id).await?;
+            // Basic V2 can retain ordinary wire bytes; an Origin-created batch
+            // must still pass the exact canonical payload/proof verifier.
+            let row = transaction.query_one("SELECT contour.catalog_origin_requires_canonical($1::text::uuid,$2::text::uuid,$3::text::uuid)", &[&expected[0], &expected[1], &batch_id]).await.map_err(origin_error)?;
+            if row
+                .try_get::<_, bool>(0)
+                .map_err(|_| CatalogError::Corrupt)?
+            {
+                let rows = transaction.query("SELECT record_id::text FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+                if !rows.is_empty() {
+                    return Err(CatalogError::Corrupt);
+                }
+            }
         } else if available {
             // Read-only verification of the entire immutable proof set precedes the claim.
             let rows = transaction.query("SELECT record_id::text FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;

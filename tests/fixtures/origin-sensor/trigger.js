@@ -4,8 +4,8 @@ const [mode, port, forged]=process.argv.slice(2);
 function fail(){ process.exitCode=1; }
 if (mode==='ready') {
   const s=require('net').connect(Number(port),'127.0.0.1',()=>{s.end();process.stdout.write('READY\n');}); s.setTimeout(2000,()=>s.destroy());s.on('error',fail);
-} else if (mode==='normal' || mode==='spoof' || mode==='xfcc' || mode==='connection') {
-  const r=http.get({host:'127.0.0.1',port:Number(port),path:'/trigger?mode='+mode,timeout:6000},res=>{let data='';res.on('data',b=>{data+=b;if(data.length>4096)r.destroy();});res.on('end',()=>{if(res.statusCode!==200||data!== '{"id":1,"quantity":2}')return fail();process.stdout.write('OK\n');});});r.on('error',fail);r.on('timeout',()=>r.destroy());
+} else if (mode==='concurrent' || mode==='normal' || mode==='spoof' || mode==='xfcc' || mode==='connection') {
+  const r=http.get({host:'127.0.0.1',port:Number(port),path:'/trigger?mode='+mode,timeout:6000},res=>{let data='';res.on('data',b=>{data+=b;if(data.length>4096)r.destroy();});res.on('end',()=>{if(res.statusCode!==200||data!== (mode==='concurrent' ? (forged==='a' ? '{"id":true}' : forged==='b' ? '{"quantity":[1]}' : '') : '{"id":1,"quantity":2}'))return fail();process.stdout.write('OK\n');});});r.on('error',fail);r.on('timeout',()=>r.destroy());
 } else if (mode==='duplicate' || mode==='wrong-forwarder') {
   const conn=tls.connect({host:'127.0.0.1',port:Number(port),servername:mode==='duplicate'?'pilot-destination':'native-gateway.test',ca:fs.readFileSync('/fixture/ca.crt'),cert:fs.readFileSync('/fixture/client.crt'),key:fs.readFileSync('/fixture/client.key'),rejectUnauthorized:true});
   let data='',secure=false;conn.setTimeout(6000,()=>conn.destroy());

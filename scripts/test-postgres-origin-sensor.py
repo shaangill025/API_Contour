@@ -31,14 +31,15 @@ def checked_source_head():
     return subprocess.check_output(['git','rev-parse','HEAD'], **options).strip()
 
 
-def flows(other_fingerprint):
+def flows(other_fingerprint, name):
     """Each process has a fixed TLS identity and target; trigger data cannot change them."""
+    if name not in ('a', 'b'): raise ValueError('invalid fixture instance')
     function = '''const mode = msg.req.query.mode || "normal";
 msg.headers = {"content-type":"application/json"};
 if (mode === "spoof") msg.headers["x-contour-origin-witness"] = "%s";
 if (mode === "xfcc") msg.headers["x-forwarded-client-cert"] = "Hash=%s";
 if (mode === "connection") { msg.headers["connection"] = "x-contour-origin-witness"; msg.headers["x-contour-origin-witness"] = "%s"; }
-msg.payload = {probe:true}; return msg;''' % ((other_fingerprint,) * 3)
+msg.payload = mode === "concurrent" ? %s : {probe:true}; return msg;''' % (*((other_fingerprint,) * 3), '{probe:[true]}' if name == 'a' else '{probe:{id:1}}')
     return [
         {'id':'tab','type':'tab','label':'synthetic'},
         {'id':'tls','type':'tls-config','name':'instance identity','cert':'/fixture/client.crt','key':'/fixture/client.key','ca':'/fixture/ca.crt','certType':'files','servername':'pilot-destination','verifyservercert':True},
@@ -89,6 +90,25 @@ def assert_transition(rows, before, fingerprint, allow_unattributed=False):
     if any(row[0] not in allowed for row in fresh): raise AssertionError('request attributed to another instance')
     if len({row[0] for row in fresh}) != 1: raise AssertionError('request and response attribution differ')
     return {row[13] for row in rows}
+
+
+def assert_concurrent(rows, before, a, b):
+    primitive = lambda kind: {'kind':kind}
+    obj = lambda fields: {'kind':'object','fields':fields,'additional':None}
+    shapes = {
+        (a,'request'): obj({'probe':{'kind':'array','items':primitive('boolean')}}),
+        (b,'request'): obj({'probe':obj({'id':primitive('integer')})}),
+        (a,'response'): obj({'id':primitive('boolean')}),
+        (b,'response'): obj({'quantity':{'kind':'array','items':primitive('integer')}}),
+    }
+    fresh=[row for row in rows if row[13] not in before]
+    if len(fresh)!=4: raise AssertionError('concurrent pair must create four records')
+    observed={}
+    for row in fresh:
+        key=(row[0],row[14])
+        if key in observed or key not in shapes: raise AssertionError('concurrent attribution mismatch')
+        observed[key]=row[21]
+    if observed != shapes: raise AssertionError('concurrent shape attribution mismatch')
 
 
 def run_cases(container, execute, setup, directory, environment):
@@ -211,7 +231,7 @@ def run_cases(container, execute, setup, directory, environment):
         docker('run','-d','--name',edge,*common,*edge_mounts,ENVOY,'envoy','-c','/fixture/envoy.json','--log-level','error','--concurrency','1')
         nodes=[]
         for name,other,port in [('a','b',1880),('b','a',1881)]:
-            flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash(other))))
+            flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash(other),name)))
             cname=prefix+'-'+name; resources.append(('container',cname))
             mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(name+'.crt'),'/fixture/client.crt')+mount(folder/(name+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
             docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
@@ -220,7 +240,7 @@ def run_cases(container, execute, setup, directory, environment):
             result=docker('exec',node,'node','/fixture/trigger.js',mode,str(port),extra,seconds=10)
             if result != ('READY' if mode=='ready' else 'OK'): raise AssertionError('fixture trigger mismatch')
         def snapshot():
-            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class)), '[]'::json)
+            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure')), '[]'::json)
 FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_payloads b USING (tenant_id,collector_id,batch_id)
 LEFT JOIN contour.origin_proofs p USING (tenant_id,collector_id,batch_id,record_id)
 CROSS JOIN LATERAL jsonb_array_elements(convert_from(b.checked_batch,'UTF8')::jsonb->'records') r(value)
@@ -247,6 +267,33 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
             before={row[13] for row in snapshot()}
             trigger(node,'normal',port)
             after_request(before,cert_hash(name))
+        # Each fixed flow emits a different approved request shape. The destination
+        # waits for both before responding with a corresponding distinct shape.
+        # Its PAIR acknowledgment establishes overlap independently of capture.
+        for _ in range(3):
+            before={row[13] for row in snapshot()}
+            barrier=threading.Barrier(3, timeout=5)
+            failures=queue.Queue()
+            def concurrent_trigger(node, port, name):
+                try:
+                    barrier.wait()
+                    trigger(node,'concurrent',port,name)
+                except BaseException as exc:
+                    failures.put(exc)
+            workers=[threading.Thread(target=concurrent_trigger,args=(node,port,name))
+                     for (node,port),name in zip(nodes,['a','b'])]
+            for worker in workers: worker.start()
+            try:
+                barrier.wait()
+            finally:
+                for worker in workers: worker.join(timeout=12)
+            if any(worker.is_alive() for worker in workers):
+                raise AssertionError('concurrent trigger thread leaked')
+            if not failures.empty(): raise AssertionError('concurrent trigger failed') from failures.get()
+            if line(destination, 5) != 'PAIR a b': raise AssertionError('destination overlap not established')
+            drain()
+            rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
+            assert_concurrent(rows,before,cert_hash('a'),cert_hash('b'))
         before={row[13] for row in snapshot()}
         trigger(nodes[0][0],'wrong-forwarder',gateway_port)
         drain()
@@ -265,7 +312,7 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
             after_request(before,cert_hash(name),allow_unattributed=True)
         drain()
         final_rows=snapshot(); assert_proofs(final_rows,expected,origin_service,origin_deployment,source)
-        if len(final_rows) != 18: raise AssertionError('final single-flight record count mismatch')
+        if len(final_rows) != 30: raise AssertionError('final record count mismatch')
         # Stop the gateway before shutting down the origin HTTP server, then
         # demand its normal two-phase cancellation and database cleanup.
         gateway.stdin.write('STOP\n'); gateway.stdin.flush(); gateway.wait(timeout=5)
