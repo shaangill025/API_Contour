@@ -249,7 +249,7 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         def drain():
             value=command(gateway,'DRAIN',15).split()
             if len(value)!=4 or value[:3]!=['DRAIN','0','0'] or not value[3].isdigit():
-                raise AssertionError('gateway did not drain without loss')
+                raise AssertionError('gateway drain failed: ' + (' '.join(value) if len(value)==4 and value[0]=='DRAIN' and all(x.isdigit() for x in value[1:]) else 'invalid diagnostic'))
         def after_request(before, fingerprint, allow_unattributed=False):
             drain()
             rows=snapshot(); assert_proofs(rows, expected, origin_service, origin_deployment, source)
@@ -330,9 +330,21 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
     finally:
         prior = sys.exc_info()[1]
         errors=[]
+        # Remove only containers created by this fixture before waiting for
+        # attached Docker clients. Container PID 1 need not handle SIGTERM.
+        for kind,name in reversed(resources):
+            try:
+                if kind != 'container': raise RuntimeError('unexpected fixture resource')
+                docker('rm','-f',name)
+            except Exception as exc: errors.append(exc)
+        try:
+            remaining=set(docker('ps','-a','--format','{{.Names}}').splitlines())
+            if any(name in remaining for kind,name in resources):
+                errors.append(RuntimeError('fixture container remained'))
+        except Exception as exc: errors.append(exc)
         for p in reversed(processes):
             try:
-                if p.poll() is None: p.terminate(); p.wait(timeout=5)
+                if p.poll() is None: p.wait(timeout=5)
             except Exception as exc:
                 p.kill(); p.wait(timeout=3); errors.append(exc)
             for stream in (p.stdin,p.stderr):
@@ -342,11 +354,6 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
             if thread.is_alive(): errors.append(RuntimeError('fixture stdout reader leaked'))
         for p in processes:
             if p.stdout and not p.stdout.closed: p.stdout.close()
-        for kind,name in reversed(resources):
-            try:
-                if kind == 'container': docker('rm','-f',name)
-                else: docker('network','rm',name)
-            except Exception as exc: errors.append(exc)
         if errors:
             failure = RuntimeError('origin sensor fixture cleanup failed')
             if prior is not None: raise BaseExceptionGroup('fixture and cleanup failed', [prior, failure])

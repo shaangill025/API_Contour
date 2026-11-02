@@ -1,4 +1,4 @@
-//! Isolated fixture: production Gateway and V2 pool with explicit single-flight drain.
+//! Isolated fixture: production Gateway and V2 pool geometry with explicit drain.
 use contour_core::{PolicyKeys, QueueLimits};
 use contour_delivery::{CollectorOwner, CollectorPool, DeliveryClient, SendOutcome};
 use contour_ingress::{
@@ -13,7 +13,7 @@ use std::{
     net::SocketAddr,
     time::Duration,
 };
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout_at};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,28 +104,36 @@ fn run() -> Result<(), &'static str> {
         let delivery_ca = read(&c.delivery_ca_der, 65536)?;
         let delivery_cert = read(&c.delivery_client_certificate_der, 65536)?;
         let delivery_key = read(&c.delivery_client_key_der, 16384)?;
-        let client = DeliveryClient::from_der_v2(
-            &c.delivery_name,
-            c.delivery_address,
-            [&c.tenant, &c.collector],
-            &[&delivery_ca],
-            &[&delivery_cert],
-            &delivery_key,
-            timeout,
-        )
-        .map_err(|_| "delivery TLS invalid")?;
         let key: [u8; 32] = read(&c.policy_key_file, 32)?
             .try_into()
             .map_err(|_| "policy key invalid")?;
-        let keys = PolicyKeys::new(&[(&c.policy_key_id, key)]).map_err(|_| "policy key invalid")?;
-        let owner = CollectorOwner::new_v2(
-            client,
-            keys,
-            &[&c.source],
-            QueueLimits::new(16, 16384).map_err(|_| "queue invalid")?,
-        )
-        .map_err(|_| "owner invalid")?;
-        let pool = CollectorPool::new(vec![owner]).map_err(|_| "pool invalid")?;
+        // Match the production default: four independent owners, each with
+        // 16 records and 16 KiB. The signed policy still governs aggregate quota.
+        let mut owners = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let client = DeliveryClient::from_der_v2(
+                &c.delivery_name,
+                c.delivery_address,
+                [&c.tenant, &c.collector],
+                &[&delivery_ca],
+                &[&delivery_cert],
+                &delivery_key,
+                timeout,
+            )
+            .map_err(|_| "delivery TLS invalid")?;
+            let keys =
+                PolicyKeys::new(&[(&c.policy_key_id, key)]).map_err(|_| "policy key invalid")?;
+            owners.push(
+                CollectorOwner::new_v2(
+                    client,
+                    keys,
+                    &[&c.source],
+                    QueueLimits::new(16, 16384).map_err(|_| "queue invalid")?,
+                )
+                .map_err(|_| "owner invalid")?,
+            );
+        }
+        let pool = CollectorPool::new(owners).map_err(|_| "pool invalid")?;
         pool.synchronize()
             .await
             .map_err(|_| "authority synchronization failed")?;
@@ -178,26 +186,39 @@ fn run() -> Result<(), &'static str> {
             }
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut acknowledgements = 0u64;
-            loop {
-                if Instant::now() >= deadline {
-                    return Err("drain deadline");
-                }
-                let frozen = match pool.try_freeze(0, &id()?, 100, 1_048_576) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        sleep(Duration::from_millis(10)).await;
-                        continue;
+            for slot in 0..4 {
+                loop {
+                    if Instant::now() >= deadline {
+                        println!("DRAIN 1 {} {acknowledgements}", pool.losses());
+                        return Err("drain deadline");
                     }
-                };
-                if !frozen {
-                    break;
-                }
-                match pool.send(0).await {
-                    Ok(SendOutcome::Acknowledged { .. }) => acknowledgements += 1,
-                    _ => return Err("drain delivery failed"),
+                    let frozen = match pool.try_freeze(slot, &id()?, 100, 1_048_576) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+                    };
+                    if !frozen {
+                        break;
+                    }
+                    match timeout_at(deadline, pool.send(slot)).await {
+                        Ok(Ok(SendOutcome::Acknowledged { .. })) => acknowledgements += 1,
+                        _ => {
+                            println!("DRAIN 2 {} {acknowledgements}", pool.losses());
+                            return Err("drain delivery failed");
+                        }
+                    }
                 }
             }
-            println!("DRAIN 0 {} {acknowledgements}", pool.losses());
+            let losses = pool.losses();
+            println!(
+                "DRAIN {} {losses} {acknowledgements}",
+                u8::from(losses != 0)
+            );
+            if losses != 0 {
+                return Err("drain loss");
+            }
         }
         Err("command input closed")
     })
