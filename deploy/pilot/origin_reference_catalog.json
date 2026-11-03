@@ -1,0 +1,2454 @@
+{
+  "column_acl": [
+    {
+      "column": "active_revision",
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "UPDATE",
+      "table": "collector_authorization"
+    },
+    {
+      "column": "enabled",
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "UPDATE",
+      "table": "collector_authorization"
+    },
+    {
+      "column": "revoked_at",
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "UPDATE",
+      "table": "collector_authorization"
+    },
+    {
+      "column": "batch_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "batch_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "collector_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "collector_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "digest_version",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "digest_version",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "record_count",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "record_count",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "request_digest",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "request_digest",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "tenant_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "tenant_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "column": "batch_id",
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "batch_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "batch_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "checked_batch",
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "checked_batch",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "checked_batch",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "collector_id",
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "collector_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "collector_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "payload_format",
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "payload_format",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "payload_format",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "tenant_id",
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "tenant_id",
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "tenant_id",
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "column": "parser_profiles",
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "UPDATE",
+      "table": "source_authorization"
+    },
+    {
+      "column": "technique",
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "UPDATE",
+      "table": "source_authorization"
+    }
+  ],
+  "functions": [
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "assign_origin_fact_epoch()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "begin_origin_ingress(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "begin_origin_operation(uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "catalog_origin_absent(uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "catalog_origin_mapping(uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "catalog_origin_requires_canonical(uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "check_origin_pending_batch()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "cleanup_origin_ingress_context()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_runtime",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_v2_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "collector_lock_key(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "encode_origin_proof(contour.origin_proofs)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_admin",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "end_origin(uuid,text,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "enqueue_origin_pending_batch()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_admin",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "enroll_origin_credential(uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_admin",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "enroll_origin(uuid,uuid,uuid,uuid,uuid,uuid,uuid,text,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "ensure_origin_tenant_state(uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_admin",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "grant_origin_observer(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_admin",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_ingestion",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_v2_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "guard_collector(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "guard_origin_insert()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "human_origin_candidates(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,integer)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "human_origin_operation(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_runtime",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_v2_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "lock_collector(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "lock_origin_collector(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "lock_origin_credential(bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "mark_origin_payload_provenance()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_collector_lock_held(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_history_highwater(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "origin_insert_authorized(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_lifecycle_highwater(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_lock_held(integer,integer)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_proof_set_digest(uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "origin_retry_requires_canonical(uuid,uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "origin_server_time()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "parse_origin_batch(uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "project_catalog_origins(uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "require_origin_ingress(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "require_origin_locks(uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "resolve_origin_record_checked(uuid,uuid,contour.ingestion_v2_metadata,jsonb)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "resolve_origin_record(uuid,uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_approval_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_approval_writer",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_comparison_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_comparison_writer",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_declared_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_declared_writer",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_review_reader",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_review_writer",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_runtime",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_v2_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "tenant_context()"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "verify_origin_batch_parsed(uuid,uuid,uuid,contour.ingestion_batches,jsonb)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "verify_origin_batch_proofs(uuid,uuid,uuid,bytea)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": false,
+      "signature": "verify_origin_proof_parsed(uuid,contour.origin_proofs,contour.ingestion_batches,contour.ingestion_v2_metadata,jsonb)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_catalog_worker",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "verify_origin_proof(uuid,uuid)"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "contour_origin_ingress",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        },
+        {
+          "grantable": false,
+          "grantee": "contour_owner",
+          "grantor": "contour_owner",
+          "privilege": "EXECUTE"
+        }
+      ],
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "owner": "contour_owner",
+      "present": true,
+      "security_definer": true,
+      "signature": "write_origin_batch_proofs(uuid,uuid,uuid,bytea)"
+    }
+  ],
+  "policies": [
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "catalog_origin_heads_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "catalog_origin_heads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "catalog_origin_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "catalog_origin_projection",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "catalog_origin_scope",
+      "permissive": true,
+      "roles": [
+        "contour_catalog_worker"
+      ],
+      "table": "catalog_origin_projection",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "collector_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_runtime"
+      ],
+      "table": "collector_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "v2_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "collector_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "catalog_inbox_read",
+      "permissive": true,
+      "roles": [
+        "contour_catalog_worker"
+      ],
+      "table": "ingestion_batches",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(digest_version = 1)",
+      "command": "a",
+      "name": "ingestion_v1_only",
+      "permissive": false,
+      "roles": [
+        "contour_ingestion"
+      ],
+      "table": "ingestion_batches",
+      "using": null
+    },
+    {
+      "check": "((digest_version = 2) AND contour.origin_insert_authorized(tenant_id, collector_id))",
+      "command": "a",
+      "name": "origin_batches_insert",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_batches",
+      "using": null
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_batches_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_batches",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_resolver_owner_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "ingestion_batches",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_ingestion"
+      ],
+      "table": "ingestion_batches",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "((tenant_id = contour.tenant_context()) AND (digest_version = 2))",
+      "command": "*",
+      "name": "v2_ingress_batches",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "ingestion_batches",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "catalog_inbox_read",
+      "permissive": true,
+      "roles": [
+        "contour_catalog_worker"
+      ],
+      "table": "ingestion_payloads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "((payload_format = 2) AND contour.origin_insert_authorized(tenant_id, collector_id))",
+      "command": "a",
+      "name": "origin_payloads_insert",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_payloads",
+      "using": null
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_payloads_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_payloads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_resolver_owner_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "ingestion_payloads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(payload_format = 1)",
+      "command": "a",
+      "name": "payload_v1_only",
+      "permissive": false,
+      "roles": [
+        "contour_ingestion"
+      ],
+      "table": "ingestion_payloads",
+      "using": null
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_ingestion"
+      ],
+      "table": "ingestion_payloads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "((tenant_id = contour.tenant_context()) AND (payload_format = 2))",
+      "command": "*",
+      "name": "v2_ingress_payloads",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "ingestion_payloads",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "contour.origin_insert_authorized(tenant_id, collector_id)",
+      "command": "a",
+      "name": "origin_metadata_insert",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": null
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_metadata_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_resolver_owner_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "v2_metadata_catalog",
+      "permissive": true,
+      "roles": [
+        "contour_catalog_worker"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "v2_metadata_ingress",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(attribution_class = 'unattributed'::text)",
+      "command": "a",
+      "name": "v2_metadata_unattributed_only",
+      "permissive": false,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "ingestion_v2_metadata",
+      "using": null
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "catalog_origin_windows_owner_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "observation_windows",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "catalog_tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_catalog_reader",
+        "contour_catalog_worker"
+      ],
+      "table": "observation_windows",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_batch_completion_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_batch_proof_completion",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_admin_read",
+      "permissive": true,
+      "roles": [
+        "contour_admin"
+      ],
+      "table": "origin_credentials",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_owner_scope",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_credentials",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_ingress_context_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_ingress_context",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_admin_read",
+      "permissive": true,
+      "roles": [
+        "contour_admin"
+      ],
+      "table": "origin_lifecycles",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_owner_scope",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_lifecycles",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_logical_usage_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_logical_usage",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_admin_read",
+      "permissive": true,
+      "roles": [
+        "contour_admin"
+      ],
+      "table": "origin_observer_grants",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_owner_scope",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_observer_grants",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_pending_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_pending_batch",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_proofs_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_proofs",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_tenant_state_owner",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_tenant_state",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_admin_read",
+      "permissive": true,
+      "roles": [
+        "contour_admin"
+      ],
+      "table": "origin_terminal_events",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "origin_owner_scope",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "origin_terminal_events",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "policy_revisions",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_runtime"
+      ],
+      "table": "policy_revisions",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "v2_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "policy_revisions",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "source_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_runtime"
+      ],
+      "table": "source_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "v2_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "source_authorization",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "sources",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_owner_source_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "sources",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_runtime"
+      ],
+      "table": "sources",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "v2_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_v2_ingress"
+      ],
+      "table": "sources",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_authority_read",
+      "permissive": true,
+      "roles": [
+        "contour_origin_ingress"
+      ],
+      "table": "workload_assignments",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_runtime"
+      ],
+      "table": "workload_assignments",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": "(tenant_id = contour.tenant_context())",
+      "command": "*",
+      "name": "instance_tenant_scope",
+      "permissive": true,
+      "roles": [
+        "contour_admin"
+      ],
+      "table": "workload_instances",
+      "using": "(tenant_id = contour.tenant_context())"
+    },
+    {
+      "check": null,
+      "command": "r",
+      "name": "origin_owner_instance_read",
+      "permissive": true,
+      "roles": [
+        "contour_owner"
+      ],
+      "table": "workload_instances",
+      "using": "(tenant_id = contour.tenant_context())"
+    }
+  ],
+  "schema": {
+    "acl": [
+      {
+        "grantable": false,
+        "grantee": "contour_approval_reader",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_approval_writer",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_catalog_reader",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_catalog_worker",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_comparison_reader",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_comparison_writer",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_declared_reader",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_declared_writer",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_human_lookup",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_human_provisioner",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_origin_ingress",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_owner",
+        "grantor": "contour_owner",
+        "privilege": "CREATE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_owner",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_review_reader",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_review_writer",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_runtime",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      },
+      {
+        "grantable": false,
+        "grantee": "contour_v2_ingress",
+        "grantor": "contour_owner",
+        "privilege": "USAGE"
+      }
+    ],
+    "owner": "contour_owner",
+    "present": true
+  },
+  "table_acl": [
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "catalog_origin_projection"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "collector_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "collector_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_runtime",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "collector_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "collector_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_batches"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_batches"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_batches"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_batches"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_batches"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_ingestion",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_payloads"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_v2_metadata"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_v2_metadata"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_v2_metadata"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "ingestion_v2_metadata"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "ingestion_v2_metadata"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_reader",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "observation_windows"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "observation_windows"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_catalog_worker",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "observation_windows"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "origin_credentials"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "origin_lifecycles"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "origin_observer_grants"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "origin_terminal_events"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "policy_revisions"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "policy_revisions"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_runtime",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "policy_revisions"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "policy_revisions"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "source_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "source_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_runtime",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "source_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "source_authorization"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "sources"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "sources"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_runtime",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "sources"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_v2_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "sources"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "workload_assignments"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_origin_ingress",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "workload_assignments"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_runtime",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "workload_assignments"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "INSERT",
+      "table": "workload_instances"
+    },
+    {
+      "grantable": false,
+      "grantee": "contour_admin",
+      "grantor": "contour_owner",
+      "privilege": "SELECT",
+      "table": "workload_instances"
+    }
+  ],
+  "tables": [
+    {
+      "force_rls": true,
+      "name": "catalog_origin_heads",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "catalog_origin_projection",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "collector_authorization",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "ingestion_batches",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "ingestion_payloads",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "ingestion_v2_metadata",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "observation_windows",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_batch_proof_completion",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_credentials",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_ingress_context",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_lifecycles",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_logical_usage",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_observer_grants",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_pending_batch",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_proofs",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_tenant_state",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "origin_terminal_events",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "policy_revisions",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "source_authorization",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "sources",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "workload_assignments",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    },
+    {
+      "force_rls": true,
+      "name": "workload_instances",
+      "owner": "contour_owner",
+      "present": true,
+      "rls": true
+    }
+  ]
+}

@@ -35,6 +35,21 @@ def private_file(path):
         raise RuntimeError('required private configuration is missing or accessible to other users')
     return path.read_text()
 
+def apply_migrations(installed, versions):
+    if installed == versions + [15, 16, 17] and versions == list(range(1, 15)):
+        # Explicit opt-in only: ordinary startup never installs these migrations.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('origin_schema', ROOT / 'deploy/pilot/origin_schema.py')
+        origin_schema = importlib.util.module_from_spec(spec); spec.loader.exec_module(origin_schema)
+        origin_schema.require_ready(psql)
+        expected = installed
+    else:
+        if installed != versions[:len(installed)]: raise RuntimeError('unexpected migration ledger')
+        for path in MIGRATIONS[len(installed):]: psql(path.read_text())
+        expected = versions
+    if [int(v) for v in psql('SELECT version FROM contour.schema_migrations ORDER BY version;').splitlines()] != expected:
+        raise RuntimeError('migration ledger did not reach expected version')
+
 def main():
     os.umask(0o077)
     subjects = json.loads(private_file(STATE / 'subjects.json'))
@@ -63,10 +78,7 @@ def main():
     versions = [int(path.name[:4]) for path in MIGRATIONS]
     if versions != list(range(1,len(versions)+1)): raise RuntimeError('unexpected migration files')
     installed = [] if not has_schema else [int(v) for v in psql('SELECT version FROM contour.schema_migrations ORDER BY version;').splitlines()]
-    if installed != versions[:len(installed)]: raise RuntimeError('unexpected migration ledger')
-    for path in MIGRATIONS[len(installed):]: psql(path.read_text())
-    if [int(v) for v in psql('SELECT version FROM contour.schema_migrations ORDER BY version;').splitlines()] != versions:
-        raise RuntimeError('migration ledger did not reach expected version')
+    apply_migrations(installed, versions)
     exists = psql("SELECT count(*) FROM pg_roles WHERE rolname='contour_app';") == '1'
     if not exists:
         psql('BEGIN; CREATE ROLE contour_app LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD ' + sql_quote(password) + '; GRANT ' + ','.join(GROUPS) + ' TO contour_app; GRANT CONNECT ON DATABASE contour_local TO contour_app; COMMIT;')
