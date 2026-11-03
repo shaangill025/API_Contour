@@ -3,6 +3,15 @@ from deploy.pilot.native_envoy import config
 
 
 class NativeEnvoyTests(unittest.TestCase):
+    def test_origin_profile_adds_exact_overwrite_only_when_selected(self):
+        def route(value):
+            return value['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']['route_config']
+        self.assertNotIn('request_headers_to_add', route(config()))
+        self.assertEqual(route(config(origin_v2=True))['request_headers_to_add'], [{
+            'header': {'key': 'x-contour-origin-witness', 'value': '%DOWNSTREAM_PEER_FINGERPRINT_256%'},
+            'append_action': 'OVERWRITE_IF_EXISTS_OR_ADD', 'keep_empty_value': True}])
+        with self.assertRaises(ValueError): config(origin_v2='v2')
+
     def test_roles_are_mutually_authenticated_and_fixed(self):
         result = config()
         chain = result['static_resources']['listeners'][0]['filter_chains'][0]

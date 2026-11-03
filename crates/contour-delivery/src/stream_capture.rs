@@ -1,7 +1,9 @@
 //! Owner-private bounded raw fragments. No payload leaves this module except
 //! through the existing signed structural extractor.
 use super::{CollectorOwner, OwnerError};
-use contour_core::{AdmissionInputs, CaptureScope, Observation, RecordDraft, RecordMetadata};
+use contour_core::{
+    AdmissionInputs, CaptureScope, Observation, OriginWitness, RecordDraft, RecordMetadata,
+};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
@@ -29,6 +31,7 @@ struct Stream {
     operation: String,
     route: String,
     bytes: Vec<u8>,
+    witness: Option<OriginWitness>,
 }
 impl Drop for Stream {
     fn drop(&mut self) {
@@ -91,7 +94,43 @@ impl CollectorOwner {
     /// Reserve a private stream under the current live scope. The returned token
     /// identifies storage only; it does not confer authority on later calls.
     pub fn begin_capture(&mut self, scope: &CaptureScope<'_>) -> Result<CaptureId, OwnerError> {
+        self.begin_capture_version(scope, None)
+    }
+    /// Reserve a V2 stream with an immutable, untrusted witness claim.
+    pub fn begin_capture_v2(
+        &mut self,
+        scope: &CaptureScope<'_>,
+        witness: &OriginWitness,
+    ) -> Result<CaptureId, OwnerError> {
         self.guard()?;
+        if self.client.wire_mode != super::WireMode::V2 {
+            return Err(OwnerError::Paused);
+        }
+        let witness = match witness {
+            OriginWitness::Unattributed => OriginWitness::Unattributed,
+            OriginWitness::DownstreamMtlsLeafSha256V1 { leaf_sha256 }
+                if leaf_sha256.len() == 64
+                    && leaf_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+            {
+                OriginWitness::DownstreamMtlsLeafSha256V1 {
+                    leaf_sha256: leaf_sha256.clone(),
+                }
+            }
+            _ => return Err(OwnerError::Paused),
+        };
+        self.begin_capture_version(scope, Some(witness))
+    }
+    fn begin_capture_version(
+        &mut self,
+        scope: &CaptureScope<'_>,
+        witness: Option<OriginWitness>,
+    ) -> Result<CaptureId, OwnerError> {
+        self.guard()?;
+        if (self.client.wire_mode == super::WireMode::V2) != witness.is_some() {
+            return Err(OwnerError::Paused);
+        }
         if !scope.request_header_names.is_empty()
             || !scope.response_header_names.is_empty()
             || !scope.query_parameter_names.is_empty()
@@ -119,6 +158,7 @@ impl CollectorOwner {
                 operation: scope.operation.to_owned(),
                 route: scope.route_template.to_owned(),
                 bytes,
+                witness,
             },
         );
         Ok(id)
@@ -205,7 +245,7 @@ impl CollectorOwner {
         mut metadata: RecordMetadata<'_>,
     ) -> Result<(), OwnerError> {
         self.guard()?;
-        let stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
+        let mut stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
         if metadata.source_id != stream.source
             || metadata.workload != stream.workload.each_ref().map(String::as_str)
             || metadata.parser_profile != stream.profile
@@ -228,6 +268,7 @@ impl CollectorOwner {
         metadata.policy_revision = revision;
         let draft =
             RecordDraft::from_observation(metadata, observation).map_err(|_| OwnerError::Paused)?;
-        self.admit(draft)
+        let witness = stream.witness.take();
+        self.admit_inner(draft, witness, |_| {})
     }
 }

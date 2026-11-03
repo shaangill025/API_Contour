@@ -61,7 +61,7 @@ def run_cases(container, execute, setup, submit, consume, port, directory, envir
     expected = {(body['collector_id'], body['batch_id'], record['record_id']): record for body in [first, second] for record in body['records']}
     initial = read(limit=1)
     actual = items(initial)
-    assert len(initial['pages']) == 3 and len(actual) == 3
+    assert len(initial['pages']) == 3 and len(actual) == 3, 'legacy page/record counts: %d/%d' % (len(initial['pages']),len(actual))
     for item in actual:
         assert item['canonicalization_version']==1
         assert item['structure_fingerprint']==execute("SELECT encode(structure_hash,'hex') FROM contour.variants WHERE tenant_id='%s' AND variant_id='%s';" % (scope[0],item['variant_id'])), 'checked structure fingerprint lost'

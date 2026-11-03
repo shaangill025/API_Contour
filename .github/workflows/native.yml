@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   native:
-    needs: [business, delivery, local-mvp, gateway]
+    needs: [business, delivery, local-mvp, gateway, origin]
     if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - name: Require all prerequisite TLS jobs
-        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' }}
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' || needs.origin.result != 'success' }}
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -298,5 +298,51 @@ jobs:
           persist-credentials: false
       - name: Fetch pinned database fixture
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Install pinned Rust for strict codec fixtures
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Fetch locked Rust fixture dependencies
+        run: cargo +1.88.0 fetch --locked
       - name: Test identity and tenant isolation
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
         run: bash scripts/test-postgres.sh
+
+  origin:
+    name: Original instance HTTPS proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install pinned Rust fixture tools
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Fetch locked fixture dependencies
+        run: cargo +1.88.0 fetch --locked
+      - name: Fetch approved immutable origin fixture images
+        run: |
+          docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+          docker pull docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963
+          docker pull envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4
+          docker pull rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0
+          docker pull debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+      - name: Test origin witness and pilot boundary regressions
+        run: |
+          python3 -B scripts/test-envoy-origin-witness.py --self-test
+          python3 -B -m unittest discover -s tests/fixtures/origin-sensor -p test_fixture.py
+      - name: Verify actual original-peer TLS witness channel
+        timeout-minutes: 5
+        run: python3 -B scripts/test-envoy-origin-witness.py
+      - name: Verify two stock product instances through capture and durable origin proofs
+        timeout-minutes: 20
+        run: python3 -B scripts/test-postgres-tls.py --origin-sensor
+      - name: Verify human origin authorization, history and pagination
+        timeout-minutes: 5
+        run: python3 -B scripts/test-postgres-tls.py --human-origin

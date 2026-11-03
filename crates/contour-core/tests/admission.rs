@@ -1,7 +1,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use contour_core::{
-    AdmissionError, AdmissionInputs, Batch, PolicyKeys, SourceAssignment, Timestamp,
-    VerifiedPolicy, validate_admission,
+    AdmissionError, AdmissionInputs, Batch, BatchV2, PolicyKeys, SourceAssignment, Timestamp,
+    VerifiedPolicy, validate_admission, validate_admission_v2,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
@@ -56,13 +56,40 @@ fn verified(value: &Value) -> VerifiedPolicy {
 fn source() -> SourceAssignment {
     SourceAssignment::new(SOURCE, [ID; 6], "runtime", &["http_json_v1"]).unwrap()
 }
+fn with_witness(input: &Value, witness: Value) -> Value {
+    let mut out = input.clone();
+    out["wire_version"] = json!(2);
+    out["records"] = Value::Array(
+        input["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| json!({"record": record, "origin_witness": witness}))
+            .collect(),
+    );
+    out
+}
+fn witnesses() -> [Value; 3] {
+    [
+        json!({"kind":"unattributed"}),
+        json!({"kind":"downstream_mtls_leaf_sha256_v1","leaf_sha256":"aa".repeat(32)}),
+        json!({"kind":"downstream_mtls_leaf_sha256_v1","leaf_sha256":"bb".repeat(32)}),
+    ]
+}
 fn admit(input: &Value, historical: &Value, current: &Value) -> Result<(), AdmissionError> {
     let historical = verified(historical);
     let current = verified(current);
     let sources = [source()];
     let inputs = AdmissionInputs::new([ID; 2], &current, &[&historical], &sources)?;
     let batch = Batch::from_wire_json(&serde_json::to_vec(input).unwrap()).unwrap();
-    validate_admission(&batch, &inputs, now())
+    let expected = validate_admission(&batch, &inputs, now());
+    for witness in witnesses() {
+        let v2 =
+            BatchV2::from_wire_json(&serde_json::to_vec(&with_witness(input, witness)).unwrap())
+                .unwrap();
+        assert_eq!(validate_admission_v2(&v2, &inputs, now()), expected);
+    }
+    expected
 }
 #[test]
 fn schema_valid_secret_operation_is_rejected() {
@@ -433,4 +460,184 @@ fn registry_identity_and_safe_diagnostics() {
     assert_eq!(format!("{inputs:?}"), "AdmissionInputs");
     assert_eq!(format!("{:?}", sources[0]), "SourceAssignment");
     assert_eq!(AdmissionError::Scope.to_string(), "Scope");
+}
+
+#[test]
+fn v2_snapshot_checks_and_error_precedence_match_v1() {
+    let current = verified(&policy());
+    let wrong_parser = [SourceAssignment::new(SOURCE, [ID; 6], "runtime", &["other"]).unwrap()];
+    let no_history = [source()];
+    let cases = [
+        AdmissionInputs::new([ID; 2], &current, &[&current], &wrong_parser).unwrap(),
+        AdmissionInputs::new([ID; 2], &current, &[], &no_history).unwrap(),
+    ];
+    let original = batch();
+    let legacy = Batch::from_wire_json(&serde_json::to_vec(&original).unwrap()).unwrap();
+    for inputs in &cases {
+        let expected = validate_admission(&legacy, inputs, now());
+        assert!(expected.is_err());
+        for witness in witnesses() {
+            let candidate = BatchV2::from_wire_json(
+                &serde_json::to_vec(&with_witness(&original, witness)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(validate_admission_v2(&candidate, inputs, now()), expected);
+        }
+    }
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut wrong = original.clone();
+    wrong["tenant_id"] = json!(SOURCE);
+    let legacy = Batch::from_wire_json(&serde_json::to_vec(&wrong).unwrap()).unwrap();
+    let later = time("2026-10-08T12:00:06Z");
+    assert_eq!(
+        validate_admission(&legacy, &inputs, later),
+        Err(AdmissionError::Identity)
+    );
+    for witness in witnesses() {
+        let candidate =
+            BatchV2::from_wire_json(&serde_json::to_vec(&with_witness(&wrong, witness)).unwrap())
+                .unwrap();
+        assert_eq!(
+            validate_admission_v2(&candidate, &inputs, later),
+            Err(AdmissionError::Identity)
+        );
+    }
+}
+
+#[test]
+fn v2_each_record_is_checked_independently_of_its_witness() {
+    let mut original = batch();
+    let mut second = original["records"][0].clone();
+    second["record_id"] = json!("00000000-0000-4000-8000-000000000003");
+    second["operation"] = json!("SYNTHETIC_SECRET");
+    original["records"].as_array_mut().unwrap().push(second);
+    assert_eq!(
+        admit(&original, &policy(), &policy()),
+        Err(AdmissionError::Scope)
+    );
+    let mut v2 = with_witness(&original, witnesses()[0].clone());
+    v2["records"][1]["origin_witness"] = witnesses()[1].clone();
+    let current = verified(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let candidate = BatchV2::from_wire_json(&serde_json::to_vec(&v2).unwrap()).unwrap();
+    assert_eq!(
+        validate_admission_v2(&candidate, &inputs, now()),
+        Err(AdmissionError::Scope)
+    );
+}
+
+#[test]
+fn v2_time_and_projections_match_legacy_records_without_origin_attribution() {
+    let mut original = batch();
+    let mut second = original["records"][0].clone();
+    second["record_id"] = json!("00000000-0000-4000-8000-000000000003");
+    second["direction"] = json!("request");
+    second["status_code"] = Value::Null;
+    original["records"].as_array_mut().unwrap().push(second);
+    let legacy = Batch::from_wire_json(&serde_json::to_vec(&original).unwrap()).unwrap();
+    let mut data = with_witness(&original, witnesses()[0].clone());
+    data["records"][1]["origin_witness"] = witnesses()[1].clone();
+    let candidate = BatchV2::from_wire_json(&serde_json::to_vec(&data).unwrap()).unwrap();
+    for instant in [
+        now(),
+        time("2026-10-06T11:54:59Z"),
+        time("2026-10-07T12:00:05Z"),
+    ] {
+        assert_eq!(candidate.validate_at(instant), legacy.validate_at(instant));
+    }
+    let expected = legacy.authority_requests().collect::<Vec<_>>();
+    let actual = candidate.authority_requests().collect::<Vec<_>>();
+    assert_eq!(actual.len(), expected.len());
+    for (a, b) in actual.iter().zip(&expected) {
+        assert_eq!(
+            (a.source_id(), a.revision(), a.queued_at()),
+            (b.source_id(), b.revision(), b.queued_at())
+        );
+    }
+    let expected = legacy.operation_observations().collect::<Vec<_>>();
+    let actual = candidate.operation_observations().collect::<Vec<_>>();
+    assert_eq!(actual.len(), expected.len());
+    for (index, ((a, witness), b)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(*witness, candidate.records()[index].origin_witness());
+        assert_eq!(a.key.components(), b.key.components());
+        assert_eq!(
+            a.key.canonical_bytes().unwrap(),
+            b.key.canonical_bytes().unwrap()
+        );
+        assert_eq!(
+            (
+                a.deployment_id,
+                a.collector_id,
+                a.source_id,
+                a.parser_profile,
+                a.policy_revision,
+                a.visibility,
+                a.route_uncertain,
+                a.record_id,
+                a.canonicalization_version
+            ),
+            (
+                b.deployment_id,
+                b.collector_id,
+                b.source_id,
+                b.parser_profile,
+                b.policy_revision,
+                b.visibility,
+                b.route_uncertain,
+                b.record_id,
+                b.canonicalization_version
+            )
+        );
+        assert_eq!(a.structure, b.structure);
+        assert_eq!(
+            (
+                a.completeness,
+                a.reasons,
+                a.count,
+                a.sample_numerator,
+                a.sample_denominator,
+                a.status_code
+            ),
+            (
+                b.completeness,
+                b.reasons,
+                b.count,
+                b.sample_numerator,
+                b.sample_denominator,
+                b.status_code
+            )
+        );
+        assert_eq!(
+            (
+                a.first_seen.as_str(),
+                a.last_seen.as_str(),
+                a.queued_at.as_str(),
+                a.expires_at.as_str()
+            ),
+            (
+                b.first_seen.as_str(),
+                b.last_seen.as_str(),
+                b.queued_at.as_str(),
+                b.expires_at.as_str()
+            )
+        );
+        assert_eq!(
+            (
+                a.request_header_names,
+                a.response_header_names,
+                a.query_parameter_names
+            ),
+            (
+                b.request_header_names,
+                b.response_header_names,
+                b.query_parameter_names
+            )
+        );
+    }
+    assert_ne!(
+        candidate.records()[0].origin_witness(),
+        candidate.records()[1].origin_witness()
+    );
 }

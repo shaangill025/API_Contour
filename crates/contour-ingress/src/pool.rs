@@ -1,5 +1,5 @@
 //! Fixed slots bound potentially live sessions across receiver cancellation.
-use contour_core::{Batch, PolicyKeys};
+use contour_core::{Batch, BatchV2, PolicyKeys};
 use contour_postgres::{
     AuthorityError, AuthorityRead, AuthorityReadRequest, ConnectedDatabase, DatabaseSettings,
     DurableReceipt, SubmitError, TrustedCa,
@@ -29,6 +29,15 @@ enum Job {
         Batch,
         [String; 2],
         oneshot::Sender<Result<DurableReceipt, SubmitError>>,
+    ),
+    Origin(
+        BatchV2,
+        [String; 2],
+        oneshot::Sender<Result<DurableReceipt, SubmitError>>,
+    ),
+    OriginAuthority(
+        AuthorityReadRequest,
+        oneshot::Sender<Result<AuthorityRead, AuthorityError>>,
     ),
     Authority(
         AuthorityReadRequest,
@@ -186,6 +195,16 @@ impl DatabasePool {
         self.start(Job::Submit(batch, identity, reply), deadline)?;
         Ok(receive)
     }
+    pub(crate) fn submit_origin(
+        &self,
+        batch: BatchV2,
+        identity: [String; 2],
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<DurableReceipt, SubmitError>>, PoolError> {
+        let (reply, receive) = oneshot::channel();
+        self.start(Job::Origin(batch, identity, reply), deadline)?;
+        Ok(receive)
+    }
     pub(crate) fn read_authority(
         &self,
         request: AuthorityReadRequest,
@@ -193,6 +212,15 @@ impl DatabasePool {
     ) -> Result<oneshot::Receiver<Result<AuthorityRead, AuthorityError>>, PoolError> {
         let (reply, receive) = oneshot::channel();
         self.start(Job::Authority(request, reply), deadline)?;
+        Ok(receive)
+    }
+    pub(crate) fn read_origin_authority(
+        &self,
+        request: AuthorityReadRequest,
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<AuthorityRead, AuthorityError>>, PoolError> {
+        let (reply, receive) = oneshot::channel();
+        self.start(Job::OriginAuthority(request, reply), deadline)?;
         Ok(receive)
     }
     fn start(&self, job: Job, deadline: Instant) -> Result<(), PoolError> {
@@ -246,6 +274,54 @@ impl DatabasePool {
                         Err(_) => Err(AuthorityError::Database.into()),
                     };
                     Outcome::Submit(reply, result)
+                }
+                Job::Origin(batch, identity, reply) => {
+                    let result = match &mut connected {
+                        Ok(session) => {
+                            match tokio::time::timeout_at(deadline, session.origin_ingress()).await
+                            {
+                                Ok(Ok(mut origin)) => {
+                                    origin
+                                        .submit_batch_v2_until(
+                                            &batch,
+                                            [&identity[0], &identity[1]],
+                                            &keys,
+                                            deadline,
+                                        )
+                                        .await
+                                }
+                                Ok(Err(error)) => Err(error),
+                                Err(_) => Err(AuthorityError::Deadline.into()),
+                            }
+                        }
+                        Err(_) => Err(AuthorityError::Database.into()),
+                    };
+                    Outcome::Submit(reply, result)
+                }
+                Job::OriginAuthority(request, reply) => {
+                    let result = match &mut connected {
+                        Ok(session) => {
+                            let allowed =
+                                match tokio::time::timeout_at(deadline, session.origin_ingress())
+                                    .await
+                                {
+                                    Ok(Ok(_)) => Ok(()),
+                                    Ok(Err(SubmitError::Authority(error))) => Err(error),
+                                    Ok(Err(_)) => Err(AuthorityError::Database),
+                                    Err(_) => Err(AuthorityError::Deadline),
+                                };
+                            match allowed {
+                                Ok(()) => {
+                                    session
+                                        .read_authority_until(&request, &keys, deadline)
+                                        .await
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(_) => Err(AuthorityError::Database),
+                    };
+                    Outcome::Authority(reply, Box::new(result))
                 }
                 Job::Authority(request, reply) => {
                     let result = match &mut connected {

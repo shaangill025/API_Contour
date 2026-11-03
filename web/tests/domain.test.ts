@@ -77,3 +77,15 @@ test('imported-only operations have explicit absent observation evidence', () =>
   assert.throws(() => catalog({items:[{...op,last_seen:'2026-10-27T00:00:00Z'}],next_cursor:null}));
   assert.throws(() => catalog({items:[{...op,visibility:'structure'}],next_cursor:null}));
 });
+
+test('catalog accepts bounded verified origin scopes and rejects incomplete evidence', () => {
+  const origin = {project_id:id,service_id:id,environment_id:id,deployment_id:id,instance_id:id,proof_status:'verified'};
+  const op = {id,project_id:id,service_id:id,environment_id:id,protocol:'http',operation:'GET',route_template:'/',direction:'request',approved_contract_id:null,last_seen:null,visibility:null,completeness:null};
+  const page = {items:[{...op,origin_evidence_available:true,origins:[origin],origins_truncated:false}],next_cursor:null};
+  assert.equal(catalog(page),page);
+  assert.throws(() => catalog({...page,items:[{...page.items[0],origins:[{...origin,instance_id:'name'}]}]}));
+  assert.throws(() => catalog({...page,items:[{...page.items[0],origins:[{...origin,proof_status:'unverified'}]}]}));
+  assert.throws(() => catalog({...page,items:[{...page.items[0],origin_evidence_available:false}]}));
+  assert.throws(() => catalog({...page,items:[{...page.items[0],origins:Array(33).fill(origin)}]}));
+  assert.equal(catalog({items:[op],next_cursor:null}).items.length,1);
+});

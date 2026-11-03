@@ -1,10 +1,12 @@
 export type Kind = 'declared' | 'approved' | 'observed';
 export type Assessment = 'compatible' | 'incompatible' | 'inconclusive';
+export interface Origin { project_id: string; service_id: string; environment_id: string; deployment_id: string; instance_id: string; proof_status: 'verified' }
 export interface Operation {
   id: string; project_id: string; service_id: string; environment_id: string;
   protocol: string; operation: string; route_template: string;
   approved_contract_id: string | null; last_seen: string | null;
   visibility: string | null; completeness: string | null; direction: string;
+  origin_evidence_available?: boolean; origins?: Origin[]; origins_truncated?: boolean;
 }
 export interface Contract {
   id: string; project_id: string; service_id: string; kind: 'declared' | 'approved';

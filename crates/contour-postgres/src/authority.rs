@@ -6,8 +6,8 @@ use crate::{
     },
 };
 use contour_core::{
-    AdmissionInputs, Batch, PolicyKeys, SourceAssignment, UnsignedInteger, VerifiedPolicy,
-    validate_admission,
+    AdmissionInputs, AuthorityRequest, Batch, BatchV2, PolicyKeys, SourceAssignment,
+    UnsignedInteger, VerifiedPolicy, validate_admission, validate_admission_v2,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,6 +38,26 @@ impl fmt::Display for AuthorityError {
 }
 impl std::error::Error for AuthorityError {}
 
+// V2 witnesses are retained in the checked batch and never used as authority.
+#[derive(Clone, Copy)]
+enum BatchInput<'a> {
+    V1(&'a Batch),
+    V2(&'a BatchV2),
+}
+impl<'a> BatchInput<'a> {
+    fn identity(self) -> [&'a str; 2] {
+        match self {
+            Self::V1(batch) => [batch.tenant_id(), batch.collector_id()],
+            Self::V2(batch) => [batch.tenant_id(), batch.collector_id()],
+        }
+    }
+    fn requests(self) -> Box<dyn Iterator<Item = AuthorityRequest<'a>> + 'a> {
+        match self {
+            Self::V1(batch) => Box::new(batch.authority_requests()),
+            Self::V2(batch) => Box::new(batch.authority_requests()),
+        }
+    }
+}
 pub(crate) struct LoadedAuthority {
     policies: BTreeMap<u64, VerifiedPolicy>,
     current: u64,
@@ -50,12 +70,28 @@ impl LoadedAuthority {
         expected: [&str; 2],
         now: OffsetDateTime,
     ) -> Result<(), AuthorityError> {
+        self.validate_input(BatchInput::V1(batch), expected, now)
+    }
+    pub(crate) fn validate_v2(
+        &self,
+        batch: &BatchV2,
+        expected: [&str; 2],
+        now: OffsetDateTime,
+    ) -> Result<(), AuthorityError> {
+        self.validate_input(BatchInput::V2(batch), expected, now)
+    }
+    fn validate_input(
+        &self,
+        batch: BatchInput<'_>,
+        expected: [&str; 2],
+        now: OffsetDateTime,
+    ) -> Result<(), AuthorityError> {
         let current = self
             .policies
             .get(&self.current)
             .ok_or(AuthorityError::Missing)?;
         let historical = batch
-            .authority_requests()
+            .requests()
             .map(|request| request.revision())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -63,7 +99,11 @@ impl LoadedAuthority {
             .collect::<Result<Vec<_>, _>>()?;
         let inputs = AdmissionInputs::new(expected, current, &historical, &self.sources)
             .map_err(|_| AuthorityError::Admission)?;
-        validate_admission(batch, &inputs, now).map_err(|_| AuthorityError::Admission)
+        match batch {
+            BatchInput::V1(batch) => validate_admission(batch, &inputs, now),
+            BatchInput::V2(batch) => validate_admission_v2(batch, &inputs, now),
+        }
+        .map_err(|_| AuthorityError::Admission)
     }
 }
 impl ConnectedDatabase {
@@ -76,7 +116,32 @@ impl ConnectedDatabase {
         expected: [&str; 2],
         keys: &PolicyKeys,
     ) -> Result<(), AuthorityError> {
-        if batch.tenant_id() != expected[0] || batch.collector_id() != expected[1] {
+        self.validate_record_authority_input(BatchInput::V1(batch), expected, keys)
+            .await
+    }
+
+    /// Validate only legacy signed record and destination authority for V2.
+    /// Witnesses do not establish origin authority. Success cannot authorize a
+    /// later write; an atomic V2 writer must acquire the origin gate before the
+    /// collector lock and perform its own fresh validation through commit.
+    /// The caller independently authenticates the expected tenant and collector.
+    pub async fn validate_v2_record_authority(
+        &mut self,
+        batch: &BatchV2,
+        expected: [&str; 2],
+        keys: &PolicyKeys,
+    ) -> Result<(), AuthorityError> {
+        self.validate_record_authority_input(BatchInput::V2(batch), expected, keys)
+            .await
+    }
+
+    async fn validate_record_authority_input(
+        &mut self,
+        batch: BatchInput<'_>,
+        expected: [&str; 2],
+        keys: &PolicyKeys,
+    ) -> Result<(), AuthorityError> {
+        if batch.identity() != expected {
             return Err(AuthorityError::Identity);
         }
         if self.client.is_none() {
@@ -94,11 +159,24 @@ impl ConnectedDatabase {
             let result = async {
                 configure_context(&transaction, expected, guard.connection.deadline).await?;
                 let initial = clock(&transaction).await?;
-                let loaded = load(&transaction, batch, expected, keys, initial, deadline).await?;
-                loaded.validate(batch, expected, clock(&transaction).await?)?;
+                let loaded = match batch {
+                    BatchInput::V1(_) => {
+                        load_input(&transaction, batch, expected, keys, initial, deadline, None)
+                            .await?
+                    }
+                    BatchInput::V2(batch) => {
+                        load_staged_v2(&transaction, batch, expected, keys, initial, deadline, None)
+                            .await?
+                    }
+                };
+                let validate = |now| match batch {
+                    BatchInput::V1(batch) => loaded.validate(batch, expected, now),
+                    BatchInput::V2(batch) => loaded.validate_v2(batch, expected, now),
+                };
+                validate(clock(&transaction).await?)?;
                 check_deadline(deadline)?;
                 // Refresh every time-sensitive admission rule again before success.
-                loaded.validate(batch, expected, clock(&transaction).await?)?;
+                validate(clock(&transaction).await?)?;
                 check_deadline(deadline)
             }
             .await;
@@ -179,17 +257,6 @@ pub(crate) fn verify_policy(
     }
     Ok(policy)
 }
-// Private owned loader: a future inbox consumer must call it under its own held lock.
-async fn load(
-    transaction: &Transaction<'_>,
-    batch: &Batch,
-    expected: [&str; 2],
-    keys: &PolicyKeys,
-    initial: OffsetDateTime,
-    deadline: Instant,
-) -> Result<LoadedAuthority, AuthorityError> {
-    load_staged(transaction, batch, expected, keys, initial, deadline, None).await
-}
 pub(crate) struct StagedCurrent {
     pub(crate) policy: VerifiedPolicy,
     size: usize,
@@ -246,13 +313,57 @@ pub(crate) async fn load_staged(
     deadline: Instant,
     staged: Option<StagedCurrent>,
 ) -> Result<LoadedAuthority, AuthorityError> {
+    load_input(
+        transaction,
+        BatchInput::V1(batch),
+        expected,
+        keys,
+        initial,
+        deadline,
+        staged,
+    )
+    .await
+}
+
+// The caller must hold the required transaction locks through any subsequent write.
+pub(crate) async fn load_staged_v2(
+    transaction: &Transaction<'_>,
+    batch: &BatchV2,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    initial: OffsetDateTime,
+    deadline: Instant,
+    staged: Option<StagedCurrent>,
+) -> Result<LoadedAuthority, AuthorityError> {
+    load_input(
+        transaction,
+        BatchInput::V2(batch),
+        expected,
+        keys,
+        initial,
+        deadline,
+        staged,
+    )
+    .await
+}
+
+// This loader alone is not authorization for a later transaction or V2 write.
+async fn load_input(
+    transaction: &Transaction<'_>,
+    batch: BatchInput<'_>,
+    expected: [&str; 2],
+    keys: &PolicyKeys,
+    initial: OffsetDateTime,
+    deadline: Instant,
+    staged: Option<StagedCurrent>,
+) -> Result<LoadedAuthority, AuthorityError> {
     let current = match &staged {
         Some(current) => current.policy.revision(),
         None => current_revision(transaction, expected).await?,
     };
     let mut requested = BTreeMap::new();
     let mut sources = BTreeSet::new();
-    for request in batch.authority_requests() {
+    for request in batch.requests() {
         if request.revision() > current {
             return Err(AuthorityError::Policy);
         }
@@ -385,6 +496,61 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, AuthorityError::Policy);
         assert_eq!(error.to_string(), "Policy");
+    }
+    #[test]
+    fn v2_witnesses_preserve_record_authority_requests() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/specification/fixtures/batches.json"
+        ))
+        .unwrap();
+        let body = fixtures
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fixture| fixture["id"] == "valid_structure")
+            .unwrap()["body"]
+            .clone();
+        let v1 = Batch::from_wire_json(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let expected: Vec<_> = BatchInput::V1(&v1)
+            .requests()
+            .map(|request| {
+                (
+                    request.source_id().to_owned(),
+                    request.revision(),
+                    request.queued_at(),
+                )
+            })
+            .collect();
+        for witness in [
+            serde_json::json!({"kind": "unattributed"}),
+            serde_json::json!({"kind": "downstream_mtls_leaf_sha256_v1", "leaf_sha256": "ab".repeat(32)}),
+        ] {
+            let mut wire = body.clone();
+            wire["wire_version"] = 2.into();
+            wire["records"] = body["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| serde_json::json!({"record": record, "origin_witness": witness}))
+                .collect::<Vec<_>>()
+                .into();
+            let v2 = BatchV2::from_wire_json(&serde_json::to_vec(&wire).unwrap()).unwrap();
+            assert_eq!(
+                BatchInput::V1(&v1).identity(),
+                BatchInput::V2(&v2).identity()
+            );
+            let requests: Vec<_> = BatchInput::V2(&v2)
+                .requests()
+                .map(|request| {
+                    (
+                        request.source_id().to_owned(),
+                        request.revision(),
+                        request.queued_at(),
+                    )
+                })
+                .collect();
+            assert_eq!(requests, expected);
+        }
     }
     #[test]
     fn aggregate_and_revision_boundaries() {

@@ -225,3 +225,18 @@ test('mismatched success id keeps the pending create recoverable', async () => {
     assert.equal(fresh.pendingRecovery().length,1);
   } finally {globalThis.fetch=previousFetch; Object.defineProperty(globalThis,'sessionStorage',{value:previousStorage,configurable:true});}
 });
+
+test('origin filtering sends all five scope fields with the page cursor', async () => {
+  const previous = globalThis.fetch;
+  let url = '';
+  globalThis.fetch = async input => {url = String(input); return new Response('{"items":[],"next_cursor":null}',{status:200});};
+  const id = '00000000-0000-4000-8000-000000000001';
+  try {
+    await api.operations(id,{project_id:id,service_id:id,environment_id:id,deployment_id:id,instance_id:id,proof_status:'verified'});
+    const query = new URL(url,'https://example.test').searchParams;
+    assert.equal(query.get('cursor'),id);
+    for (const key of ['project_id','service_id','environment_id','deployment_id','instance_id']) assert.equal(query.get(`origin_${key}`),id);
+    assert.equal(query.get('include_origin'),'true');
+    assert.equal([...query].length,8);
+  } finally { globalThis.fetch = previous; }
+});

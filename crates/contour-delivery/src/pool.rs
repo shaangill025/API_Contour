@@ -1,6 +1,6 @@
 //! Fixed-owner pool. It never transfers authority or waits in capture callbacks.
 use super::{CaptureId, CollectorOwner, OwnerError, SendOutcome};
-use contour_core::{AdmissionInputs, CaptureScope, RecordMetadata};
+use contour_core::{AdmissionInputs, CaptureScope, OriginWitness, RecordMetadata};
 use std::{
     future::{Future, poll_fn},
     pin::pin,
@@ -23,6 +23,7 @@ pub struct PoolCapture {
 /// The pool owns all slots; no owner handle escapes to the forwarding adapter.
 pub struct CollectorPool {
     instance: u64,
+    origin_v2: bool,
     slots: Vec<Mutex<CollectorOwner>>,
     enabled: AtomicBool,
     epoch: AtomicU64,
@@ -54,10 +55,11 @@ impl CollectorPool {
             return Err(OwnerError::Paused);
         }
         let first = &owners[0];
-        if owners
-            .iter()
-            .any(|o| o.client.identity != first.client.identity || o.source_ids != first.source_ids)
-        {
+        if owners.iter().any(|o| {
+            o.client.identity != first.client.identity
+                || o.source_ids != first.source_ids
+                || o.client.wire_mode != first.client.wire_mode
+        }) {
             return Err(OwnerError::Paused);
         }
         static NEXT_POOL: AtomicU64 = AtomicU64::new(1);
@@ -66,9 +68,11 @@ impl CollectorPool {
                 value.checked_add(1)
             })
             .map_err(|_| OwnerError::Paused)?;
+        let origin_v2 = first.client.wire_mode == super::WireMode::V2;
         let cancelled = (0..owners.len()).map(|_| AtomicU64::new(0)).collect();
         Ok(Arc::new(Self {
             instance,
+            origin_v2,
             cancelled,
             slots: owners.into_iter().map(Mutex::new).collect(),
             enabled: AtomicBool::new(false),
@@ -82,6 +86,10 @@ impl CollectorPool {
             #[cfg(test)]
             blocked_sends: AtomicUsize::new(0),
         }))
+    }
+    /// The immutable wire profile shared by every owner in this pool.
+    pub fn is_origin_v2(&self) -> bool {
+        self.origin_v2
     }
     fn try_gate(&self) -> Result<PoolGate<'_>, OwnerError> {
         let guard = self.gate.try_lock().map_err(|_| OwnerError::Paused)?;
@@ -242,6 +250,21 @@ impl CollectorPool {
         Ok(())
     }
     pub fn try_begin(&self, scope: &CaptureScope<'_>) -> Result<PoolCapture, OwnerError> {
+        self.try_begin_version(scope, None)
+    }
+    /// Begin a V2 stream with a data-only origin witness.
+    pub fn try_begin_v2(
+        &self,
+        scope: &CaptureScope<'_>,
+        witness: &OriginWitness,
+    ) -> Result<PoolCapture, OwnerError> {
+        self.try_begin_version(scope, Some(witness))
+    }
+    fn try_begin_version(
+        &self,
+        scope: &CaptureScope<'_>,
+        witness: Option<&OriginWitness>,
+    ) -> Result<PoolCapture, OwnerError> {
         let _gate = self.try_gate().map_err(|_| {
             self.lose();
             OwnerError::Paused
@@ -311,7 +334,10 @@ impl CollectorPool {
                     Err(OwnerError::Paused)
                 };
             };
-            if let Ok(id) = owner.begin_capture(scope) {
+            if let Ok(id) = match witness {
+                Some(w) => owner.begin_capture_v2(scope, w),
+                None => owner.begin_capture(scope),
+            } {
                 self.next_slot
                     .store((slot + 1) % self.slots.len(), Ordering::Relaxed);
                 return Ok(PoolCapture {
@@ -517,7 +543,9 @@ impl CollectorPool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::capture_tests::{make_owner, make_owner_at, make_owner_at_with_ttl, scope};
+    use super::super::capture_tests::{
+        make_owner, make_owner_at, make_owner_at_with_ttl, make_owner_v2, scope,
+    };
     use super::*;
 
     #[test]
@@ -987,6 +1015,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn v2_pool_rejects_mixed_modes_foreign_tokens_and_stale_epochs() {
+        assert!(CollectorPool::new(vec![make_owner(), make_owner_v2()]).is_err());
+        assert!(
+            !CollectorPool::new(vec![make_owner()])
+                .unwrap()
+                .is_origin_v2()
+        );
+        let a = CollectorPool::new(vec![make_owner_v2()]).unwrap();
+        let b = CollectorPool::new(vec![make_owner_v2()]).unwrap();
+        assert!(a.is_origin_v2());
+        a.enabled.store(true, Ordering::Release);
+        b.enabled.store(true, Ordering::Release);
+        assert!(a.try_begin(&scope()).is_err());
+        let foreign = a
+            .try_begin_v2(&scope(), &OriginWitness::Unattributed)
+            .unwrap();
+        let own = b
+            .try_begin_v2(&scope(), &OriginWitness::Unattributed)
+            .unwrap();
+        assert!(b.try_fragment(foreign, b"foreign").is_err());
+        b.try_cancel(foreign);
+        b.try_fragment(own, b"private").unwrap();
+        b.advance_epoch().unwrap();
+        assert!(b.try_fragment(own, b"late").is_err());
+        b.try_cancel(own);
+        assert!(b.slots[0].try_lock().unwrap().streams.is_empty());
+        assert!(a.try_fragment(foreign, br#"{"id":1}"#).is_ok());
+        a.try_cancel(foreign);
+    }
     #[test]
     fn active_capture_is_not_displaced_by_send_or_another_stream() {
         let pool = CollectorPool::new(vec![make_owner()]).unwrap();

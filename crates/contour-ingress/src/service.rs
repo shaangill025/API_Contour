@@ -1,7 +1,7 @@
 use crate::CollectorTls;
 use crate::pool::{DatabaseCapacity, DatabasePool};
 use bytes::Bytes;
-use contour_core::{Batch, PolicyKeys};
+use contour_core::{Batch, BatchV2, PolicyKeys};
 use contour_postgres::{AuthorityError, DatabaseSettings, SubmitError, TrustedCa};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -100,7 +100,14 @@ impl HttpLimits {
         Ok(self)
     }
 }
+/// Immutable operator-selected ingestion capability and wire version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IngestionProfile {
+    V1,
+    OriginV2,
+}
 struct State {
+    profile: IngestionProfile,
     tls: CollectorTls,
     registry: PrincipalRegistry,
     database: DatabasePool,
@@ -124,8 +131,28 @@ impl IngestionServer {
         keys: PolicyKeys,
         limits: HttpLimits,
     ) -> Self {
+        Self::with_profile(
+            tls,
+            registry,
+            database,
+            trust,
+            keys,
+            limits,
+            IngestionProfile::V1,
+        )
+    }
+    pub fn with_profile(
+        tls: CollectorTls,
+        registry: PrincipalRegistry,
+        database: DatabaseSettings,
+        trust: TrustedCa,
+        keys: PolicyKeys,
+        limits: HttpLimits,
+        profile: IngestionProfile,
+    ) -> Self {
         Self {
             state: Arc::new(State {
+                profile,
                 tls,
                 registry,
                 database: DatabasePool::new(database, trust, keys, limits.database_sessions),
@@ -226,7 +253,11 @@ async fn handle(
     };
     let target = request.uri().path_and_query().map(|target| target.as_str());
     let authority = target == Some("/v1/collector-authority");
-    if (!authority && target != Some("/v1/batches")) || request.uri().scheme().is_some() {
+    let batch_path = match state.profile {
+        IngestionProfile::V1 => "/v1/batches",
+        IngestionProfile::OriginV2 => "/v2/batches",
+    };
+    if (!authority && target != Some(batch_path)) || request.uri().scheme().is_some() {
         return fail(StatusCode::NOT_FOUND, "not_found", false);
     }
     if request.method() != hyper::Method::POST {
@@ -302,16 +333,31 @@ async fn handle(
     if authority {
         return authority_response(&state, principal, bytes, deadline, &id).await;
     }
-    let Ok(batch) = Batch::from_wire_json(&bytes) else {
-        return fail(StatusCode::BAD_REQUEST, "invalid_batch", false);
-    };
-    if batch.tenant_id() != principal[0] || batch.collector_id() != principal[1] {
-        return fail(StatusCode::FORBIDDEN, "not_authorized", false);
-    }
     // Do not precheck validate_at: committed expired-record retries are legitimate.
+    let (batch_id, receive) = match state.profile {
+        IngestionProfile::V1 => {
+            let Ok(batch) = Batch::from_wire_json(&bytes) else {
+                return fail(StatusCode::BAD_REQUEST, "invalid_batch", false);
+            };
+            if batch.tenant_id() != principal[0] || batch.collector_id() != principal[1] {
+                return fail(StatusCode::FORBIDDEN, "not_authorized", false);
+            }
+            let id = batch.batch_id().to_owned();
+            (id, state.database.submit(batch, principal, deadline))
+        }
+        IngestionProfile::OriginV2 => {
+            let Ok(batch) = BatchV2::from_wire_json(&bytes) else {
+                return fail(StatusCode::BAD_REQUEST, "invalid_batch", false);
+            };
+            if batch.tenant_id() != principal[0] || batch.collector_id() != principal[1] {
+                return fail(StatusCode::FORBIDDEN, "not_authorized", false);
+            }
+            let id = batch.batch_id().to_owned();
+            (id, state.database.submit_origin(batch, principal, deadline))
+        }
+    };
     drop(bytes);
-    let batch_id = batch.batch_id().to_owned();
-    let Ok(receive) = state.database.submit(batch, principal, deadline) else {
+    let Ok(receive) = receive else {
         return fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "database_capacity_unavailable",
@@ -330,6 +376,7 @@ async fn handle(
                 json!({"batch_id":batch_id,"status":receipt.status().as_str(),"receipt_id":receipt.id(),"accepted_at":accepted}),
             )
         }
+        Err(SubmitError::LogicalQuota) => fail(StatusCode::LOCKED, "logical_quota", false),
         Err(SubmitError::Conflict) => fail(StatusCode::CONFLICT, "batch_conflict", false),
         Err(SubmitError::OutcomeUnknown) => {
             fail(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown", true)
@@ -369,7 +416,11 @@ async fn authority_response(
         return fail(StatusCode::BAD_REQUEST, "invalid_authority_request", false);
     };
     drop(bytes);
-    let Ok(receive) = state.database.read_authority(request, deadline) else {
+    let receive = match state.profile {
+        IngestionProfile::V1 => state.database.read_authority(request, deadline),
+        IngestionProfile::OriginV2 => state.database.read_origin_authority(request, deadline),
+    };
+    let Ok(receive) = receive else {
         return fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "database_capacity_unavailable",

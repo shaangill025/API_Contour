@@ -116,6 +116,10 @@ def run_cases(container, execute, setup, submit, port, directory, environment, r
         runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog-reader.py'))['run_cases'](container, execute, setup, submit, check, port, directory, environment, body, second)
         return
 
+    # These additional observations have their own full-authority fixture lane.
+    # Keep the legacy reader's three-record ground truth isolated from them.
+    runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_cases'](execute, accepted, check, counts)
+
     candidate = accepted('parallel', 2)
     # Hold the first worker after its unique claim but before any observation can
     # finish. The second worker must wait on that transaction's claim, not arrive

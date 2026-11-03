@@ -1006,3 +1006,345 @@ fn bounded_freeze_exact_prefix_limits_loss_and_sticky_exposure() {
         Err(QueueError::Limits)
     );
 }
+
+#[test]
+fn v2_queue_preserves_witnesses_digest_and_retry() {
+    use crate::{BatchV2, OriginWitness};
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut queue = MemoryQueue::new_v2([ID; 2], QueueLimits::new(3, 100000).unwrap()).unwrap();
+    assert_eq!(
+        admit(&mut queue, draft(1), &inputs, time(5)),
+        Err(QueueError::Record)
+    );
+    for (index, witness) in [
+        (1, OriginWitness::Unattributed),
+        (
+            2,
+            OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "ab".repeat(32),
+            },
+        ),
+    ] {
+        queue
+            .admit_version_with(draft(index), Some(witness), &inputs, || Ok(time(5)))
+            .unwrap();
+    }
+    queue.freeze_at(ID, 2, &inputs, time(6)).unwrap();
+    let view = queue.delivery_at(&inputs, time(7)).unwrap().unwrap();
+    let wire = view.wire().to_vec();
+    let digest = *view.digest();
+    let batch = BatchV2::from_wire_json(&wire).unwrap();
+    assert_eq!(batch.to_wire_json().unwrap(), wire);
+    assert_eq!(batch.request_digest_bytes().unwrap(), digest);
+    assert!(matches!(
+        batch.records()[0].origin_witness(),
+        OriginWitness::Unattributed
+    ));
+    assert!(
+        matches!(batch.records()[1].origin_witness(), OriginWitness::DownstreamMtlsLeafSha256V1 { leaf_sha256 } if leaf_sha256 == &"ab".repeat(32))
+    );
+    let retry = queue.delivery_at(&inputs, time(8)).unwrap().unwrap();
+    assert_eq!(retry.wire(), wire);
+    assert_eq!(*retry.digest(), digest);
+    let mut legacy = MemoryQueue::new([ID; 2], QueueLimits::new(1, 100000).unwrap()).unwrap();
+    assert_eq!(
+        legacy.admit_version_with(draft(3), Some(OriginWitness::Unattributed), &inputs, || Ok(
+            time(5)
+        )),
+        Err(QueueError::Record)
+    );
+}
+
+#[test]
+fn v2_charge_bounds_retraction_and_expiry() {
+    use crate::OriginWitness;
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut probe = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+    probe
+        .admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    let charge = probe.stats().bytes;
+    let mut exact = MemoryQueue::new_v2([ID; 2], QueueLimits::new(1, charge).unwrap()).unwrap();
+    exact
+        .admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    let mut short = MemoryQueue::new_v2([ID; 2], QueueLimits::new(1, charge - 1).unwrap()).unwrap();
+    assert_eq!(
+        short.admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || Ok(
+            time(5)
+        )),
+        Err(QueueError::Full)
+    );
+    probe.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    let length = probe
+        .delivery_at(&inputs, time(6))
+        .unwrap()
+        .unwrap()
+        .wire()
+        .len();
+    let mut bounded = MemoryQueue::new_v2([ID; 2], QueueLimits::new(1, charge).unwrap()).unwrap();
+    bounded
+        .admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    bounded
+        .freeze_with_limits_at(ID, 1, length - 1, &inputs, time(6))
+        .unwrap();
+    assert_eq!(bounded.stats().oversized, 1);
+    exact
+        .freeze_with_limits_at(ID, 1, length, &inputs, time(6))
+        .unwrap();
+    assert!(exact.delivery_at(&inputs, time(6)).unwrap().is_some());
+    exact.expire_retained_at(time(5) + Duration::days(1));
+    assert_eq!(exact.stats().records, 0);
+    let mut bad = MemoryQueue::new_v2([ID; 2], QueueLimits::new(1, charge).unwrap()).unwrap();
+    assert_eq!(
+        bad.admit_version_with(
+            draft(2),
+            Some(OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "A".repeat(64)
+            }),
+            &inputs,
+            || Ok(time(5))
+        ),
+        Err(QueueError::Record)
+    );
+}
+
+#[test]
+fn v2_retraction_ownership_and_policy_purge() {
+    use crate::OriginWitness;
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let mut first = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+    first
+        .admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    let token = UnfrozenAdmission {
+        instance: first.instance,
+        sequence: first.next_admission,
+    };
+    let mut second = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+    let foreign = UnfrozenAdmission {
+        instance: token.instance,
+        sequence: token.sequence,
+    };
+    assert_eq!(
+        second.retract_admission(foreign),
+        Err(QueueError::Ownership)
+    );
+    first.retract_admission(token).unwrap();
+    assert_eq!(first.stats().records, 0);
+    first
+        .admit_version_with(draft(2), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    let stale = UnfrozenAdmission {
+        instance: first.instance,
+        sequence: first.next_admission,
+    };
+    first.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    assert_eq!(first.retract_admission(stale), Err(QueueError::Ownership));
+    let mut narrowed = policy();
+    narrowed["revision"] = json!(2);
+    narrowed["approved_names"] = json!(["GET"]);
+    let narrowed = signed(&narrowed);
+    let changed = AdmissionInputs::new([ID; 2], &narrowed, &[&current], &sources).unwrap();
+    assert!(first.delivery_at(&changed, time(7)).unwrap().is_none());
+    assert_eq!(first.stats().records, 0);
+}
+
+#[test]
+fn v2_invalid_admission_reconciles_before_rejection() {
+    use crate::OriginWitness;
+    let mut short = policy();
+    short["queue_ttl_seconds"] = json!(10);
+    let current = signed(&short);
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    for invalid in [false, true] {
+        let mut q = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+        q.admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+        let witness = if invalid {
+            Some(OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "A".repeat(64),
+            })
+        } else {
+            None
+        };
+        assert_eq!(
+            q.admit_version_with(draft(2), witness, &inputs, || Ok(time(15))),
+            Err(QueueError::Record)
+        );
+        assert_eq!(
+            q.stats().records,
+            0,
+            "expired entry must be removed before rejection"
+        );
+    }
+    let old = signed(&policy());
+    let initial = AdmissionInputs::new([ID; 2], &old, &[&old], &sources).unwrap();
+    let mut narrow = policy();
+    narrow["revision"] = json!(2);
+    narrow["approved_names"] = json!(["GET"]);
+    let narrow = signed(&narrow);
+    let changed = AdmissionInputs::new([ID; 2], &narrow, &[&old], &sources).unwrap();
+    for invalid in [false, true] {
+        let mut q = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, 100000).unwrap()).unwrap();
+        q.admit_version_with(
+            draft(1),
+            Some(OriginWitness::Unattributed),
+            &initial,
+            || Ok(time(5)),
+        )
+        .unwrap();
+        let witness = if invalid {
+            Some(OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "A".repeat(64),
+            })
+        } else {
+            None
+        };
+        assert_eq!(
+            q.admit_version_with(draft(2), witness, &changed, || Ok(time(6))),
+            Err(QueueError::Record)
+        );
+        assert_eq!(
+            q.stats().records,
+            0,
+            "disallowed entry must be removed before rejection"
+        );
+    }
+}
+
+#[test]
+fn v2_full_capacity_prefix_acknowledgement_preserves_pairs() {
+    use crate::{BatchV2, OriginWitness};
+    let current = signed(&policy());
+    let sources = [source()];
+    let inputs = AdmissionInputs::new([ID; 2], &current, &[&current], &sources).unwrap();
+    let wrapper = b"{\"record\":".len() + b",\"origin_witness\":".len() + 1;
+    let first = OriginWitness::Unattributed;
+    let second = OriginWitness::DownstreamMtlsLeafSha256V1 {
+        leaf_sha256: "ab".repeat(32),
+    };
+    let first_charge = 3
+        * (draft(1).retention_charge().unwrap()
+            + wrapper
+            + serde_json::to_vec(&first).unwrap().len());
+    let second_charge = 3
+        * (draft(2).retention_charge().unwrap()
+            + wrapper
+            + serde_json::to_vec(&second).unwrap().len());
+    let total = first_charge + second_charge;
+    let mut q = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, total).unwrap()).unwrap();
+    q.admit_version_with(draft(1), Some(first), &inputs, || Ok(time(5)))
+        .unwrap();
+    q.admit_version_with(draft(2), Some(second), &inputs, || Ok(time(5)))
+        .unwrap();
+    assert_eq!(q.stats().bytes, total);
+    let created = Timestamp::from_instant(time(6)).unwrap();
+    let first_entry = q.entries.front().unwrap();
+    let wrappers = [crate::batch_v2::BorrowedV2Record {
+        record: &first_entry.record.record,
+        origin_witness: first_entry.witness.as_ref().unwrap(),
+    }];
+    let exact = crate::batch_v2::BorrowedBatchV2::new(ID, [ID; 2], &created, &wrappers)
+        .unwrap()
+        .length()
+        .unwrap();
+    q.freeze_with_limits_at(ID, 2, exact, &inputs, time(6))
+        .unwrap();
+    let view = q.delivery_at(&inputs, time(6)).unwrap().unwrap();
+    assert_eq!(view.wire().len(), exact);
+    let first_batch = BatchV2::from_wire_json(view.wire()).unwrap();
+    assert_eq!(first_batch.record_count(), 1);
+    assert_eq!(
+        first_batch.records()[0].record_id(),
+        "00000000-0000-4000-8000-000000000001"
+    );
+    assert!(matches!(
+        first_batch.records()[0].origin_witness(),
+        OriginWitness::Unattributed
+    ));
+    let wire = view.wire().to_vec();
+    let digest = *view.digest();
+    let binding = view.binding();
+    assert_eq!(
+        q.freeze_with_limits_at(ID, 1, exact - 1, &inputs, time(6)),
+        Err(QueueError::Ownership)
+    );
+    assert_eq!(
+        q.delivery_at(&inputs, time(6)).unwrap().unwrap().wire(),
+        wire
+    );
+    let accepted = Timestamp::from_instant(time(7)).unwrap();
+    let mut foreign = MemoryQueue::new_v2([ID; 2], QueueLimits::new(1, total).unwrap()).unwrap();
+    foreign
+        .admit_version_with(draft(3), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    foreign.freeze_at(ID, 1, &inputs, time(6)).unwrap();
+    let foreign_binding = foreign
+        .delivery_at(&inputs, time(6))
+        .unwrap()
+        .unwrap()
+        .binding();
+    assert_eq!(
+        q.acknowledge(
+            Acknowledgement::from_transport(foreign_binding, [ID; 2], ID, &digest, ID, &accepted)
+                .unwrap()
+        ),
+        Err(QueueError::Receipt)
+    );
+    assert_eq!(q.stats().bytes, total);
+    q.acknowledge(
+        Acknowledgement::from_transport(binding, [ID; 2], ID, &digest, ID, &accepted).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(q.stats().bytes, second_charge);
+    q.freeze_at(ID, 1, &inputs, time(7)).unwrap();
+    let remaining =
+        BatchV2::from_wire_json(q.delivery_at(&inputs, time(7)).unwrap().unwrap().wire()).unwrap();
+    assert_eq!(
+        remaining.records()[0].record_id(),
+        "00000000-0000-4000-8000-000000000002"
+    );
+    assert!(
+        matches!(remaining.records()[0].origin_witness(), OriginWitness::DownstreamMtlsLeafSha256V1 { leaf_sha256 } if leaf_sha256 == &"ab".repeat(32))
+    );
+    let mut short = MemoryQueue::new_v2([ID; 2], QueueLimits::new(2, total - 1).unwrap()).unwrap();
+    short
+        .admit_version_with(draft(1), Some(OriginWitness::Unattributed), &inputs, || {
+            Ok(time(5))
+        })
+        .unwrap();
+    assert_eq!(
+        short.admit_version_with(
+            draft(2),
+            Some(OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "ab".repeat(32)
+            }),
+            &inputs,
+            || Ok(time(5))
+        ),
+        Err(QueueError::Full)
+    );
+}

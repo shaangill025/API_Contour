@@ -55,14 +55,17 @@ def live_policy(private):
         raise RuntimeError('pilot policy identity drift')
 
 
-def gateway_config():
+def gateway_config(*, origin_v2=False):
     point = [base.IDS[1],base.IDS[2],base.IDS[3],PROFILE.deployment]
-    return native_gateway_config.config(upstream_ip='pilot-destination',delivery_ip='pilot-capture-ingress',
+    result = native_gateway_config.config(upstream_ip='pilot-destination',delivery_ip='pilot-capture-ingress',
         delivery_name='ingress',tenant=base.IDS[0],collector=PROFILE.collector,source=PROFILE.source,
         workload=point,policy_key_id='local')
+    if origin_v2:
+        result['capture_wire_version'] = 'v2'
+    return result
 
 
-def check():
+def check(*, origin_v2=False):
     capture = PROFILE.capture
     for directory in (PILOT, capture, capture/'private', capture/'runtime', NATIVE, NATIVE/'gateway', NATIVE/'forwarder'):
         capture_renew.safe_dir(directory)
@@ -71,9 +74,9 @@ def check():
         if json.loads(capture_renew.read_file(capture/'runtime'/name, 16384)) != expected:
             raise RuntimeError('pilot capture configuration drift')
     gateway, forwarder = NATIVE/'gateway', NATIVE/'forwarder'
-    if json.loads(capture_renew.read_file(gateway/'gateway.json', 16384)) != gateway_config():
+    if json.loads(capture_renew.read_file(gateway/'gateway.json', 16384)) != gateway_config(origin_v2=origin_v2):
         raise RuntimeError('native gateway configuration drift')
-    if json.loads(capture_renew.read_file(forwarder/'envoy.json', 65536)) != native_envoy.config():
+    if json.loads(capture_renew.read_file(forwarder/'envoy.json', 65536)) != native_envoy.config(origin_v2=origin_v2):
         raise RuntimeError('native forwarder configuration drift')
     for name in ['server.der','server-key.der','forwarder-ca.der','forwarder.der','upstream-ca.der','upstream-client.der','upstream-client-key.der','delivery-ca.der','collector.der','collector-key.der','policy-public-key.bin']:
         capture_renew.read_file(gateway/name, 65536)
@@ -103,7 +106,7 @@ def check():
     print('Native pilot preflight passed.')
 
 
-def prepare():
+def prepare(*, origin_v2=False):
     os.umask(0o077)
     if not PILOT.is_dir() or not (STATE/'ca.crt').is_file() or not (STATE/'ca.key').is_file():
         raise RuntimeError('owned pilot and local CA required')
@@ -148,13 +151,15 @@ def prepare():
         shutil.copyfile(STATE/'ca.crt',forwarder/target)
     for directory in (gateway,forwarder):
         for path in directory.iterdir(): os.chmod(path,0o600)
-    config = gateway_config()
+    config = gateway_config(origin_v2=origin_v2)
     write(gateway/'gateway.json',(json.dumps(config,indent=2)+'\n').encode())
-    write(forwarder/'envoy.json',(json.dumps(native_envoy.config(),separators=(',',':'))+'\n').encode())
+    write(forwarder/'envoy.json',(json.dumps(native_envoy.config(origin_v2=origin_v2),separators=(',',':'))+'\n').encode())
     print('Native pilot identities prepared; private CA and signer remain operator-only.')
 
 
 if __name__ == '__main__':
     if len(sys.argv) == 1: prepare()
     elif sys.argv[1:] == ['--check']: check()
-    else: raise SystemExit('expected no arguments or --check')
+    elif sys.argv[1:] == ['--origin-v2']: prepare(origin_v2=True)
+    elif sys.argv[1:] == ['--check', '--origin-v2']: check(origin_v2=True)
+    else: raise SystemExit('expected [--check] [--origin-v2]')

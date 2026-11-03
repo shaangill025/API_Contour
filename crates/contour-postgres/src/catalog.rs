@@ -5,7 +5,7 @@ use crate::{
         CancellationGuard, begin, check_deadline, configure_tenant, database_error, empty_context,
     },
 };
-use contour_core::{Batch, OperationKey, OperationObservation};
+use contour_core::{Batch, BatchV2, OperationKey, OperationObservation, OriginWitness};
 use std::fmt;
 use tokio::time::{Instant, timeout_at};
 use tokio_postgres::Transaction;
@@ -144,11 +144,29 @@ impl ConnectedDatabase {
                     if row.try_get::<_, i16>(0).map_err(|_| CatalogError::Corrupt)? != 1 {
                         return Err(CatalogError::Corrupt);
                     }
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
                     return Ok(CatalogStatus::AlreadyProcessed);
                 }
-                for observation in batch.operation_observations() {
-                    check_deadline(deadline)?;
-                    store(&transaction, batch_id, observation).await?;
+                // Processor version identifies the projection format, which remains
+                // V1 for both accepted envelope versions.
+                match &batch {
+                    LoadedBatch::V1(batch) => for observation in batch.operation_observations() {
+                        check_deadline(deadline)?;
+                        store(&transaction, batch_id, observation).await?;
+                    },
+                    LoadedBatch::V2(batch, _, _) => for (observation, _) in batch.operation_observations() {
+                        check_deadline(deadline)?;
+                        store(&transaction, batch_id, observation).await?;
+                    },
+                }
+                if let LoadedBatch::V2(loaded, payload, true) = &batch {
+                    if has_origin_witness(loaded) {
+                    transaction.query_one("SELECT contour.project_catalog_origins($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+                    }
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
+                }
+                if matches!(&batch, LoadedBatch::V1(_)) {
+                    verify_projection(&transaction, expected, batch_id, &batch).await?;
                 }
                 transaction.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(database_error)?;
                 check_deadline(deadline)?;
@@ -200,11 +218,16 @@ fn uuid(value: &str) -> bool {
             }
         })
 }
+enum LoadedBatch {
+    V1(Batch),
+    V2(BatchV2, Vec<u8>, bool),
+}
+
 async fn load(
     transaction: &Transaction<'_>,
     expected: [&str; 2],
     batch_id: &str,
-) -> Result<Batch, CatalogError> {
+) -> Result<LoadedBatch, CatalogError> {
     // Metadata bounds precede retrieval of either bytea field, including a digest
     // damaged by privileged storage repair. Immutable inbox rows cannot change
     // between these statements through an application role.
@@ -214,10 +237,10 @@ async fn load(
     let count: i32 = row.try_get(2).map_err(|_| CatalogError::Corrupt)?;
     let format: Option<i16> = row.try_get(3).map_err(|_| CatalogError::Corrupt)?;
     let size: Option<i32> = row.try_get(4).map_err(|_| CatalogError::Corrupt)?;
-    if version != 1
+    if !matches!(version, 1 | 2)
         || digest_size != 32
         || !(1..=500).contains(&count)
-        || format != Some(1)
+        || format != Some(version)
         || !size.is_some_and(|size| (1..=1_048_576).contains(&size))
     {
         return Err(CatalogError::Corrupt);
@@ -225,6 +248,50 @@ async fn load(
     let row = transaction.query_one("SELECT b.request_digest,p.checked_batch FROM contour.ingestion_batches b JOIN contour.ingestion_payloads p USING(tenant_id,collector_id,batch_id) WHERE b.tenant_id=$1::text::uuid AND b.collector_id=$2::text::uuid AND b.batch_id=$3::text::uuid AND octet_length(b.request_digest)=32 AND octet_length(p.checked_batch) BETWEEN 1 AND 1048576", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
     let digest: &[u8] = row.try_get(0).map_err(|_| CatalogError::Corrupt)?;
     let payload: &[u8] = row.try_get(1).map_err(|_| CatalogError::Corrupt)?;
+    if version == 2 {
+        let batch = BatchV2::from_wire_json(payload).map_err(|_| CatalogError::Corrupt)?;
+        if batch.tenant_id() != expected[0]
+            || batch.collector_id() != expected[1]
+            || batch.batch_id() != batch_id
+            || batch.record_count() != count as usize
+            || batch
+                .request_digest_bytes()
+                .map_err(|_| CatalogError::Corrupt)?
+                .as_slice()
+                != digest
+        {
+            return Err(CatalogError::Corrupt);
+        }
+        validate_v2_metadata(transaction, &batch, expected, batch_id).await?;
+        let available: bool = transaction.query_one("SELECT to_regprocedure('contour.catalog_origin_mapping(uuid,uuid,uuid,bytea)') IS NOT NULL", &[]).await.map_err(database_error)?.try_get(0).map_err(|_| CatalogError::Corrupt)?;
+        let expected_proofs = batch
+            .operation_observations()
+            .filter(|(_, witness)| !matches!(witness, OriginWitness::Unattributed))
+            .count();
+        if available && expected_proofs == 0 {
+            // Basic V2 can retain ordinary wire bytes; an Origin-created batch
+            // must still pass the exact canonical payload/proof verifier.
+            let row = transaction.query_one("SELECT contour.catalog_origin_requires_canonical($1::text::uuid,$2::text::uuid,$3::text::uuid)", &[&expected[0], &expected[1], &batch_id]).await.map_err(origin_error)?;
+            if row
+                .try_get::<_, bool>(0)
+                .map_err(|_| CatalogError::Corrupt)?
+            {
+                let rows = transaction.query("SELECT record_id::text FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+                if !rows.is_empty() {
+                    return Err(CatalogError::Corrupt);
+                }
+            }
+        } else if available {
+            // Read-only verification of the entire immutable proof set precedes the claim.
+            let rows = transaction.query("SELECT record_id::text FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+            if rows.len() != expected_proofs {
+                return Err(CatalogError::Corrupt);
+            }
+        } else if expected_proofs != 0 {
+            return Err(CatalogError::Corrupt);
+        }
+        return Ok(LoadedBatch::V2(batch, payload.to_vec(), available));
+    }
     let batch = Batch::from_wire_json(payload).map_err(|_| CatalogError::Corrupt)?;
     if batch.tenant_id() != expected[0]
         || batch.collector_id() != expected[1]
@@ -238,7 +305,141 @@ async fn load(
     {
         return Err(CatalogError::Corrupt);
     }
-    Ok(batch)
+    if origin_schema_available(transaction).await? {
+        verify_origin_absence(transaction, expected, batch_id).await?;
+    }
+    Ok(LoadedBatch::V1(batch))
+}
+
+async fn validate_v2_metadata(
+    transaction: &Transaction<'_>,
+    batch: &BatchV2,
+    expected: [&str; 2],
+    batch_id: &str,
+) -> Result<(), CatalogError> {
+    // Inspect every row, including extras, and recheck bindings even if storage
+    // constraints were bypassed by privileged repair.
+    let rows = transaction.query("SELECT m.record_id::text,m.source_id::text,m.project_id::text,m.service_id::text,m.environment_id::text,m.deployment_id::text,CASE WHEN m.policy_revision BETWEEN 1 AND 18446744073709551615 AND m.policy_revision=trunc(m.policy_revision) THEN trunc(m.policy_revision)::text END,CASE WHEN octet_length(m.parser_profile) BETWEEN 1 AND 64 THEN m.parser_profile END,CASE WHEN octet_length(m.attribution_class) IN (12,18) THEN m.attribution_class END,(m.digest_version=2 AND m.request_digest=b.request_digest AND m.accepted_at=b.accepted_at AND isfinite(m.accepted_at)) FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_batches b USING(tenant_id,collector_id,batch_id) WHERE m.tenant_id=$1::text::uuid AND m.collector_id=$2::text::uuid AND m.batch_id=$3::text::uuid LIMIT 501", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
+    if rows.len() != batch.record_count() {
+        return Err(CatalogError::Corrupt);
+    }
+    let mut by_record = std::collections::HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let id: &str = row.try_get(0).map_err(|_| CatalogError::Corrupt)?;
+        if by_record.insert(id, row).is_some() {
+            return Err(CatalogError::Corrupt);
+        }
+    }
+    for (observation, witness) in batch.operation_observations() {
+        let row = by_record
+            .remove(observation.record_id)
+            .ok_or(CatalogError::Corrupt)?;
+        let parts = observation.key.components();
+        let expected_fields = [
+            observation.source_id,
+            parts[1],
+            parts[2],
+            parts[3],
+            observation.deployment_id,
+        ];
+        for (index, value) in expected_fields.iter().enumerate() {
+            if row
+                .try_get::<_, &str>(index + 1)
+                .map_err(|_| CatalogError::Corrupt)?
+                != *value
+            {
+                return Err(CatalogError::Corrupt);
+            }
+        }
+        if row
+            .try_get::<_, &str>(6)
+            .map_err(|_| CatalogError::Corrupt)?
+            != observation.policy_revision.to_string()
+            || row
+                .try_get::<_, &str>(7)
+                .map_err(|_| CatalogError::Corrupt)?
+                != observation.parser_profile
+            || row
+                .try_get::<_, &str>(8)
+                .map_err(|_| CatalogError::Corrupt)?
+                != match witness {
+                    OriginWitness::Unattributed => "unattributed",
+                    OriginWitness::DownstreamMtlsLeafSha256V1 { .. } => "verified_origin_v1",
+                }
+            || !row
+                .try_get::<_, bool>(9)
+                .map_err(|_| CatalogError::Corrupt)?
+        {
+            return Err(CatalogError::Corrupt);
+        }
+    }
+    if !by_record.is_empty() {
+        return Err(CatalogError::Corrupt);
+    }
+    Ok(())
+}
+fn origin_error(error: tokio_postgres::Error) -> CatalogError {
+    if error.code().is_some_and(|code| code.code() == "23514") {
+        CatalogError::Corrupt
+    } else {
+        database_error(error).into()
+    }
+}
+
+fn has_origin_witness(batch: &BatchV2) -> bool {
+    batch
+        .operation_observations()
+        .any(|(_, witness)| !matches!(witness, OriginWitness::Unattributed))
+}
+
+async fn origin_schema_available(transaction: &Transaction<'_>) -> Result<bool, CatalogError> {
+    transaction.query_one("SELECT to_regprocedure('contour.catalog_origin_mapping(uuid,uuid,uuid,bytea)') IS NOT NULL", &[]).await.map_err(database_error)?.try_get(0).map_err(|_| CatalogError::Corrupt)
+}
+
+async fn verify_origin_absence(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    batch_id: &str,
+) -> Result<(), CatalogError> {
+    transaction
+        .query_one(
+            "SELECT contour.catalog_origin_absent($1::text::uuid,$2::text::uuid,$3::text::uuid)",
+            &[&expected[0], &expected[1], &batch_id],
+        )
+        .await
+        .map_err(origin_error)?;
+    Ok(())
+}
+
+async fn verify_projection(
+    transaction: &Transaction<'_>,
+    expected: [&str; 2],
+    batch_id: &str,
+    batch: &LoadedBatch,
+) -> Result<(), CatalogError> {
+    if let LoadedBatch::V2(loaded, payload, true) = batch {
+        if !has_origin_witness(loaded) {
+            return verify_origin_absence(transaction, expected, batch_id).await;
+        }
+        // Compare both directions so missing, extra, and altered projections fail closed.
+        let row = transaction.query_one("SELECT NOT EXISTS ((SELECT record_id,proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id FROM contour.catalog_origin_projection WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND batch_id=$3::text::uuid EXCEPT SELECT * FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4)) UNION ALL (SELECT * FROM contour.catalog_origin_mapping($1::text::uuid,$2::text::uuid,$3::text::uuid,$4) EXCEPT SELECT record_id,proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id FROM contour.catalog_origin_projection WHERE tenant_id=$1::text::uuid AND collector_id=$2::text::uuid AND batch_id=$3::text::uuid))", &[&expected[0], &expected[1], &batch_id, &payload]).await.map_err(origin_error)?;
+        if !row
+            .try_get::<_, bool>(0)
+            .map_err(|_| CatalogError::Corrupt)?
+        {
+            return Err(CatalogError::Corrupt);
+        }
+        let orphan = transaction.query_one("SELECT EXISTS(SELECT 1 FROM contour.catalog_origin_projection p LEFT JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.tenant_id=$1::text::uuid AND p.collector_id=$2::text::uuid AND p.batch_id=$3::text::uuid AND w.record_id IS NULL)", &[&expected[0], &expected[1], &batch_id]).await.map_err(database_error)?;
+        if orphan
+            .try_get::<_, bool>(0)
+            .map_err(|_| CatalogError::Corrupt)?
+        {
+            return Err(CatalogError::Corrupt);
+        }
+    } else if matches!(batch, LoadedBatch::V1(_)) && origin_schema_available(transaction).await? {
+        verify_origin_absence(transaction, expected, batch_id).await?;
+    }
+    Ok(())
 }
 async fn store(
     transaction: &Transaction<'_>,

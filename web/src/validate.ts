@@ -34,6 +34,12 @@ export function operation(value: unknown): Operation {
     member(o.visibility,['structure','operation','connection']);
     member(o.completeness,['complete','partial','unavailable']);
   }
+  const absent = o.origin_evidence_available === undefined && o.origins === undefined && o.origins_truncated === undefined;
+  if (!absent) {
+    if (typeof o.origin_evidence_available !== 'boolean' || typeof o.origins_truncated !== 'boolean' || !Array.isArray(o.origins) || o.origins.length > 32) throw new Error('Invalid response');
+    if (!o.origin_evidence_available && (o.origins.length || o.origins_truncated)) throw new Error('Invalid response');
+    for (const value of o.origins) { const origin = object(value); ids(origin,['project_id','service_id','environment_id','deployment_id','instance_id']); member(origin.proof_status,['verified']); }
+  }
   return value as Operation;
 }
 export function catalog(value: unknown): Page<Operation> {

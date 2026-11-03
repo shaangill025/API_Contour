@@ -4,8 +4,8 @@ use crate::{
     *,
 };
 use contour_core::{
-    AdmissionInputs, CaptureScope, MemoryQueue, Observation, PolicyKeys, QueueLimits, QueueStats,
-    RecordDraft, VerifiedPolicy,
+    AdmissionInputs, CaptureScope, MemoryQueue, Observation, OriginWitness, PolicyKeys,
+    QueueLimits, QueueStats, RecordDraft, VerifiedPolicy,
 };
 use std::collections::BTreeSet;
 #[path = "stream_capture.rs"]
@@ -84,6 +84,27 @@ impl CollectorOwner {
         source_ids: &[&str],
         limits: QueueLimits,
     ) -> Result<Self, OwnerError> {
+        Self::new_version(client, keys, source_ids, limits, WireMode::V1)
+    }
+    /// Construct an explicit V2 owner; witnesses are untrusted data only.
+    pub fn new_v2(
+        client: DeliveryClient,
+        keys: PolicyKeys,
+        source_ids: &[&str],
+        limits: QueueLimits,
+    ) -> Result<Self, OwnerError> {
+        Self::new_version(client, keys, source_ids, limits, WireMode::V2)
+    }
+    fn new_version(
+        client: DeliveryClient,
+        keys: PolicyKeys,
+        source_ids: &[&str],
+        limits: QueueLimits,
+        version: WireMode,
+    ) -> Result<Self, OwnerError> {
+        if client.wire_mode != version {
+            return Err(DeliveryError::Configuration.into());
+        }
         if source_ids.is_empty()
             || source_ids.len() > 500
             || source_ids.iter().any(|s| !uuid(s))
@@ -91,7 +112,11 @@ impl CollectorOwner {
         {
             return Err(DeliveryError::Configuration.into());
         }
-        let queue = MemoryQueue::new(client.identity.each_ref().map(String::as_str), limits)?;
+        let queue = if version == WireMode::V2 {
+            MemoryQueue::new_v2(client.identity.each_ref().map(String::as_str), limits)?
+        } else {
+            MemoryQueue::new(client.identity.each_ref().map(String::as_str), limits)?
+        };
         Ok(Self {
             client,
             keys,
@@ -253,12 +278,13 @@ impl CollectorOwner {
         Ok(result)
     }
     pub fn admit(&mut self, draft: RecordDraft) -> Result<(), OwnerError> {
-        self.admit_inner(draft, |_| {})
+        self.admit_inner(draft, None, |_| {})
     }
     // Private fault hook; forwarding adapters cannot supply or access it.
     fn admit_inner(
         &mut self,
         draft: RecordDraft,
+        witness: Option<OriginWitness>,
         after_admission: impl FnOnce(&mut Self),
     ) -> Result<(), OwnerError> {
         self.guard()?;
@@ -271,7 +297,10 @@ impl CollectorOwner {
             &live.sources,
         )
         .map_err(|e| OwnerError::Queue(QueueError::Admission(e)))?;
-        let admission = self.queue.admit_retractable(draft, &inputs)?;
+        let admission = match witness {
+            Some(w) => self.queue.admit_v2_retractable(draft, w, &inputs)?,
+            None => self.queue.admit_retractable(draft, &inputs)?,
+        };
         after_admission(self);
         if !self.is_live() {
             self.live = None;
@@ -443,10 +472,16 @@ mod capture_tests {
     pub(super) fn make_owner() -> CollectorOwner {
         make_owner_at(OffsetDateTime::now_utc())
     }
+    pub(super) fn make_owner_v2() -> CollectorOwner {
+        make_owner_mode_at(WireMode::V2, OffsetDateTime::now_utc(), 60)
+    }
     pub(super) fn make_owner_at(now: OffsetDateTime) -> CollectorOwner {
         make_owner_at_with_ttl(now, 60)
     }
     pub(super) fn make_owner_at_with_ttl(now: OffsetDateTime, ttl: u64) -> CollectorOwner {
+        make_owner_mode_at(WireMode::V1, now, ttl)
+    }
+    fn make_owner_mode_at(mode: WireMode, now: OffsetDateTime, ttl: u64) -> CollectorOwner {
         let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
         let keys = PolicyKeys::new(&[("test", public)]).unwrap();
@@ -466,9 +501,14 @@ mod capture_tests {
             identity: [ID.into(), ID.into()],
             tls: TlsConnector::from(Arc::new(config)),
             deadline: Duration::from_secs(1),
+            wire_mode: mode,
         };
-        let mut owner =
-            CollectorOwner::new(client, keys, &[ID], QueueLimits::new(1, 10000).unwrap()).unwrap();
+        let limits = QueueLimits::new(2, 10000).unwrap();
+        let mut owner = match mode {
+            WireMode::V1 => CollectorOwner::new(client, keys, &[ID], limits),
+            WireMode::V2 => CollectorOwner::new_v2(client, keys, &[ID], limits),
+        }
+        .unwrap();
         owner.policies.push(PolicyEntry {
             policy,
             bytes: envelope.len(),
@@ -524,6 +564,157 @@ mod capture_tests {
         .unwrap()
     }
     #[test]
+    fn v2_unattributed_stream_is_preserved_and_expiry_clears_on_rejected_start() {
+        let mut owner = make_owner_v2();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner
+            .begin_capture_v2(&scope(), &OriginWitness::Unattributed)
+            .unwrap();
+        owner.capture_fragment(id, br#"{"id":1}"#).unwrap();
+        let now = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        let s = scope();
+        let metadata = contour_core::RecordMetadata {
+            record_id: ID,
+            source_id: ID,
+            workload: [ID; 4],
+            protocol: "http",
+            direction: "request",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: None,
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        owner.finish_and_admit(id, metadata).unwrap();
+        assert!(owner.freeze(ID, 1, 10000).unwrap());
+        let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+        let inputs = AdmissionInputs::new(
+            [ID; 2],
+            refs[0],
+            &refs,
+            &owner.live.as_ref().unwrap().sources,
+        )
+        .unwrap();
+        let mut attempt = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+        let batch = contour_core::BatchV2::from_wire_json(attempt.view().wire()).unwrap();
+        assert_eq!(
+            batch.records()[0].origin_witness(),
+            &OriginWitness::Unattributed
+        );
+        drop(attempt);
+        let id = owner
+            .begin_capture_v2(&scope(), &OriginWitness::Unattributed)
+            .unwrap();
+        owner.capture_fragment(id, b"private").unwrap();
+        owner.live.as_mut().unwrap().deadline = Instant::now();
+        let invalid = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "invalid".into(),
+        };
+        assert!(owner.begin_capture_v2(&scope(), &invalid).is_err());
+        assert!(owner.streams.is_empty());
+        assert!(!owner.is_live());
+        let mut v1 = make_owner();
+        let id = v1.begin_capture(&scope()).unwrap();
+        v1.capture_fragment(id, b"private").unwrap();
+        v1.live.as_mut().unwrap().deadline = Instant::now();
+        assert!(
+            v1.begin_capture_v2(&scope(), &OriginWitness::Unattributed)
+                .is_err()
+        );
+        assert!(v1.streams.is_empty());
+        assert!(!v1.is_live());
+    }
+    #[test]
+    fn v2_stream_witness_is_bound_through_freeze_and_retry() {
+        let mut owner = make_owner_v2();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        assert!(owner.begin_capture(&scope()).is_err());
+        let invalid = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "A".repeat(64),
+        };
+        assert!(owner.begin_capture_v2(&scope(), &invalid).is_err());
+        let mut witness = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "a".repeat(64),
+        };
+        let id = owner.begin_capture_v2(&scope(), &witness).unwrap();
+        witness = OriginWitness::Unattributed;
+        owner
+            .capture_fragment(id, br#"{"id":1,"password":"secret-marker"}"#)
+            .unwrap();
+        let now = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        let s = scope();
+        let metadata = contour_core::RecordMetadata {
+            record_id: ID,
+            source_id: ID,
+            workload: [ID; 4],
+            protocol: "http",
+            direction: "request",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: None,
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        owner.finish_and_admit(id, metadata).unwrap();
+        let charge = owner.stats().bytes;
+        assert!(owner.freeze(ID, 1, 10000).unwrap());
+        assert_eq!(owner.stats().bytes, charge);
+        let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+        let inputs = AdmissionInputs::new(
+            [ID; 2],
+            refs[0],
+            &refs,
+            &owner.live.as_ref().unwrap().sources,
+        )
+        .unwrap();
+        let mut attempt = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+        assert_eq!(attempt.wire_version(), 2);
+        let view = attempt.view();
+        let bytes = view.wire().to_vec();
+        assert!(bytes.len() * 3 <= charge);
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret-marker"));
+        let parsed = contour_core::BatchV2::from_wire_json(&bytes).unwrap();
+        assert_eq!(
+            parsed.records()[0].origin_witness(),
+            &OriginWitness::DownstreamMtlsLeafSha256V1 {
+                leaf_sha256: "a".repeat(64)
+            }
+        );
+        assert_ne!(parsed.records()[0].origin_witness(), &witness);
+        assert_eq!(parsed.request_digest_bytes().unwrap(), *view.digest());
+        drop(attempt);
+        let mut retry = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+        assert_eq!(retry.view().wire(), bytes);
+        owner.client.wire_mode = WireMode::V1;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(owner.client.send_once(&mut retry)),
+            Err(DeliveryError::Configuration)
+        ));
+    }
+    #[test]
     fn expiry_during_copy_preparation_prevents_the_copy_seam() {
         let mut owner = make_owner();
         let id = owner.begin_capture(&scope()).unwrap();
@@ -564,7 +755,7 @@ mod capture_tests {
         owner.admit(first).unwrap();
         let prior_bytes = owner.stats().bytes;
         let second = record(&mut owner, "00000000-0000-4000-8000-000000000003");
-        let result = owner.admit_inner(second, |owner| {
+        let result = owner.admit_inner(second, None, |owner| {
             assert_eq!(owner.stats().records, 2);
             owner.live.as_mut().unwrap().deadline = Instant::now();
         });

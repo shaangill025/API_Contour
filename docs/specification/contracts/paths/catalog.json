@@ -113,6 +113,62 @@
               "connection"
             ]
           }
+        },
+        {
+          "name": "origin_project_id",
+          "in": "query",
+          "description": "All five origin fields and include_origin=true are required together; tenant is authenticated context. Unsupported origin capability returns an error.",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "origin_service_id",
+          "in": "query",
+          "description": "All five origin fields and include_origin=true are required together; tenant is authenticated context. Unsupported origin capability returns an error.",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "origin_environment_id",
+          "in": "query",
+          "description": "All five origin fields and include_origin=true are required together; tenant is authenticated context. Unsupported origin capability returns an error.",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "origin_deployment_id",
+          "in": "query",
+          "description": "All five origin fields and include_origin=true are required together; tenant is authenticated context. Unsupported origin capability returns an error.",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "origin_instance_id",
+          "in": "query",
+          "description": "All five origin fields and include_origin=true are required together; tenant is authenticated context. Unsupported origin capability returns an error.",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "include_origin",
+          "in": "query",
+          "description": "Set true to request bounded historical origin evidence. Omit to retain the legacy response shape. Origin filtering requires true.",
+          "schema": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
         }
       ]
     }
@@ -155,6 +211,17 @@
           "schema": {
             "type": "string",
             "format": "uuid"
+          }
+        },
+        {
+          "name": "include_origin",
+          "in": "query",
+          "description": "Set true to request bounded historical origin evidence. Omit to retain the legacy response shape. Origin filtering requires true.",
+          "schema": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
           }
         }
       ]

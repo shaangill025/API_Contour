@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
 from deploy.gateway.config import IMAGE, config as base_config
 
 
-def config():
+def config(*, origin_v2=False):
+    if type(origin_v2) is not bool:
+        raise ValueError("invalid origin profile")
     result = base_config('native-gateway', 9443, 'native-gateway.test',
                          ca='/run/forwarder/observer-ca.pem', listen_port=9443)
     chain = result['static_resources']['listeners'][0]['filter_chains'][0]
@@ -26,6 +28,10 @@ def config():
     manager = chain['filters'][0]['typed_config']
     manager['route_config']['virtual_hosts'][0]['domains'] = ['*']
     manager['forward_client_cert_details'] = 'SANITIZE'
+    if origin_v2:
+        manager['route_config']['request_headers_to_add'] = [{
+            'header': {'key': 'x-contour-origin-witness', 'value': '%DOWNSTREAM_PEER_FINGERPRINT_256%'},
+            'append_action': 'OVERWRITE_IF_EXISTS_OR_ADD', 'keep_empty_value': True}]
     cluster = result['static_resources']['clusters'][0]
     upstream = cluster['transport_socket']['typed_config']['common_tls_context']
     upstream['tls_certificates'] = [{'certificate_chain': {'filename': '/run/forwarder/forwarder.pem'},

@@ -257,7 +257,7 @@ class Driver:
         deadline=time.monotonic()+30
         while True:
             try:
-                bounded(self.command()+['exec','-T','postgres','pg_isready','-U','postgres','-d','contour_local'],self.base.env,seconds=3)
+                bounded(self.command()+['exec','-T','postgres','sh','-c','test "$(cat /proc/1/comm)" = postgres && pg_isready -h /var/run/postgresql -U postgres -d contour_local'],self.base.env,seconds=3)
                 break
             except pilot.Failure:
                 if time.monotonic()>=deadline: raise
@@ -571,6 +571,40 @@ class OfflineTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): driver.prepare_database()
         self.assertTrue(driver.policy.called)
         self.assertFalse(driver.created)
+
+    def test_database_waits_for_final_postgres_before_provisioning(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                driver=Driver.__new__(Driver)
+                driver.project='fixture-project'; driver.network='fixture-capture'; driver.frontend='fixture-front'
+                driver.override=Path('/private/tmp/fixture-overlay.json')
+                driver.image='contour-privacy-candidate:unique'; driver.verifier='fixture-verifier'
+                driver.image_intent=False; driver.verifier_intent=False; driver.created=False
+                driver.base=mock.Mock(env={})
+                driver.image_tags=lambda: []; driver.verifier_names=lambda: []
+                driver.policy=mock.Mock(return_value=b'envelope')
+                driver.compose=mock.Mock(); driver.service_id=mock.Mock(return_value='container')
+                driver.verify_container=mock.Mock(); driver.provision_database=mock.Mock()
+                attempts=[]
+                def fake(args, env, **kwargs):
+                    if 'pg_isready' in ' '.join(args):
+                        attempts.append(args)
+                        # Temporary server is ready, but its entrypoint remains PID 1.
+                        guarded='/proc/1/comm' in ' '.join(args) and '-h /var/run/postgresql' in ' '.join(args)
+                        if guarded and (timeout or len(attempts)==1): raise pilot.Failure('not final')
+                        return b''
+                    if args[:3]==['docker','inspect','--format']: return b'{"/var/lib/postgresql/data":"rw"}'
+                    return b''
+                ticks=iter([0,31] if timeout else [0,1])
+                with mock.patch(__name__+'.bounded',side_effect=fake), mock.patch(__name__+'.time.monotonic',side_effect=lambda: next(ticks)), mock.patch(__name__+'.time.sleep'):
+                    if timeout:
+                        with self.assertRaises(pilot.Failure): driver.prepare_database()
+                        driver.provision_database.assert_not_called()
+                        driver.verify_container.assert_not_called()
+                    else:
+                        driver.prepare_database()
+                        self.assertEqual(len(attempts),2)
+                        driver.provision_database.assert_called_once_with(b'envelope')
 
     def test_cleanup_removes_only_owned_verifier_and_image_tag(self):
         import tempfile

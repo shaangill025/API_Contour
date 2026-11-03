@@ -70,6 +70,21 @@ class NativePrepare(unittest.TestCase):
             (gateway/'gateway.json').write_text(json.dumps(settings))
             with self.assertRaisesRegex(RuntimeError, 'configuration drift'): prepare.check()
 
+    def test_origin_profile_is_paired_and_checked_for_drift(self):
+        with mock.patch.object(prepare,'live_policy'), mock.patch.object(prepare,'openssl',side_effect=self.fake_openssl), mock.patch('builtins.print'):
+            prepare.prepare(origin_v2=True)
+            native = self.pilot/'native'
+            settings = json.loads((native/'gateway'/'gateway.json').read_text())
+            self.assertEqual(settings['capture_wire_version'], 'v2')
+            edge = json.loads((native/'forwarder'/'envoy.json').read_text())
+            self.assertEqual(edge, prepare.native_envoy.config(origin_v2=True))
+            prepare.check(origin_v2=True)
+            with self.assertRaisesRegex(RuntimeError, 'configuration drift'): prepare.check()
+            route = edge['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']['route_config']
+            route['request_headers_to_add'][0]['header']['value'] = 'forged'
+            (native/'forwarder'/'envoy.json').write_text(json.dumps(edge))
+            with self.assertRaisesRegex(RuntimeError, 'forwarder configuration drift'): prepare.check(origin_v2=True)
+
     def test_pending_journal_stops_before_creating_native_state(self):
         (self.private/'renew.pending').write_text('fixture')
         with self.assertRaisesRegex(RuntimeError,'requires reconciliation'): prepare.prepare()

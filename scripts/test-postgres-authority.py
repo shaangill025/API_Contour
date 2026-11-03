@@ -14,7 +14,7 @@ TENANT = 'aaaaaaaa-0000-0000-0000-000000000000'
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
-def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False):
+def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False, origin_sensor_only=False):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -83,6 +83,21 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         execute(text)
         return (body, collector, source)
 
+    if origin_sensor_only:
+        # Isolated component setup, not a production migration sequence. The
+        # standard SQL gate separately applies 1..14 followed by opt-in 15..17.
+        for path in ['db/migrations/0003_ingestion.sql', 'db/provision_catalog.sql',
+                     'db/migrations/0004_catalog.sql', 'db/migrations/0013_instance_registry.sql',
+                     'db/migrations/0014_observation_evidence.sql',
+                     'db/opt-in-migrations/0015_origin_lifecycle.sql',
+                     'db/provision_v2_ingress.sql', 'db/opt-in-migrations/0016_v2_unattributed.sql',
+                     'db/provision_origin_ingress.sql', 'db/opt-in-migrations/0017_origin_proofs.sql']:
+            execute((ROOT/path).read_text())
+        execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
+        runpy.run_path(str(ROOT/'scripts/test-postgres-origin-sensor.py'))['run_cases'](
+            container,execute,setup,directory,environment)
+        return
+
     if catalog_reader_only:
         submit_probe = str(Path(probe).with_name('submit_probe'))
         runpy.run_path(str(ROOT / 'scripts/test-postgres-submit.py'))['run_cases'](container, execute, setup, submit_probe, port, directory, environment, catalog_reader_only=True)
@@ -106,10 +121,10 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         result = subprocess.run(['docker', 'logs', container], capture_output=True, text=True, check=True, timeout=5)
         return result.stdout + result.stderr
 
-    def check(body, wanted='Ok', expected=None, deadline=5000):
+    def check(body, wanted='Ok', expected=None, deadline=5000, v2=False):
         (directory / 'batch.json').write_text(json.dumps(body))
         identity = expected or (body['tenant_id'], body['collector_id'])
-        process = subprocess.Popen([probe, port, str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(directory / 'batch.json'), wanted, *identity, str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        process = subprocess.Popen([probe, port, str(directory / 'ca.crt'), str(directory / 'signer.raw'), str(directory / 'batch.json'), ('V2:' if v2 else '') + wanted, *identity, str(deadline)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         output = queue.Queue()
         reader = threading.Thread(target=lambda : output.put(process.stdout.readline()), daemon=True)
         reader.start()
@@ -135,6 +150,31 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
                 pipe.close()
     (body, collector, source) = setup('valid')
     check(body)
+    # Both data-only witness variants must receive the same legacy authority result.
+    def v2_body(original, witness):
+        value = copy.deepcopy(original)
+        value['wire_version'] = 2
+        value['records'] = [dict(record=record, origin_witness=witness) for record in value['records']]
+        return value
+    witnesses = [dict(kind='unattributed'), dict(kind='downstream_mtls_leaf_sha256_v1', leaf_sha256='ab' * 32)]
+    for witness in witnesses:
+        candidate = v2_body(body, witness)
+        check(candidate, v2=True)
+        check(candidate, 'Identity', expected=(OTHER, collector), v2=True)
+        bad_source = copy.deepcopy(candidate)
+        bad_source['records'][0]['record']['source_id'] = ITEM
+        check(bad_source, 'Source', v2=True)
+        bad_route = copy.deepcopy(candidate)
+        bad_route['records'][0]['record']['route_template'] = '/not-approved'
+        check(bad_route, 'Admission', v2=True)
+        expired = copy.deepcopy(candidate)
+        expired['records'][0]['record']['expires_at'] = expired['records'][0]['record']['first_seen']
+        check(expired, 'Admission', v2=True)
+    (policy_denied, _, _) = setup('v2_policy_denied', lambda value: value.update(approved_names=['GET', 'id']))
+    (policy_expired, _, _) = setup('v2_policy_expired', lambda value: value.update(expires_at=iso(datetime.datetime.fromisoformat(value['issued_at'].replace('Z', '+00:00')) + datetime.timedelta(seconds=29))))
+    for witness in witnesses:
+        check(v2_body(policy_denied, witness), 'Admission', v2=True)
+        check(v2_body(policy_expired, witness), 'Policy', v2=True)
     missing = copy.deepcopy(body)
     missing['collector_id'] = '00000000-0000-0000-0000-000000999999'
     check(missing, 'Missing')

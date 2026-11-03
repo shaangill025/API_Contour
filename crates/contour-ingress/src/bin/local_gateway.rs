@@ -12,9 +12,19 @@ use serde::Deserialize;
 use std::{env, fs, future::Future, io::Read, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::sleep;
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CaptureWireVersion {
+    #[default]
+    V1,
+    V2,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default)]
+    capture_wire_version: CaptureWireVersion,
     listen: SocketAddr,
     server_certificate_der: String,
     server_key_der: String,
@@ -166,7 +176,11 @@ fn run() -> Result<(), &'static str> {
         .map_err(|_| "invalid policy key")?;
     let mut owners = Vec::new();
     for _ in 0..c.slots {
-        let client = DeliveryClient::from_der(
+        let make_client = match c.capture_wire_version {
+            CaptureWireVersion::V1 => DeliveryClient::from_der,
+            CaptureWireVersion::V2 => DeliveryClient::from_der_v2,
+        };
+        let client = make_client(
             &c.delivery_name,
             delivery_address,
             [&c.tenant, &c.collector],
@@ -180,9 +194,11 @@ fn run() -> Result<(), &'static str> {
             PolicyKeys::new(&[(&c.policy_key_id, policy_key)]).map_err(|_| "invalid policy key")?;
         let limits = QueueLimits::new(c.records_per_slot, c.bytes_per_slot)
             .map_err(|_| "invalid queue limits")?;
-        owners.push(
-            CollectorOwner::new(client, keys, &[&c.source], limits).map_err(|_| "invalid owner")?,
-        );
+        let owner = match c.capture_wire_version {
+            CaptureWireVersion::V1 => CollectorOwner::new(client, keys, &[&c.source], limits),
+            CaptureWireVersion::V2 => CollectorOwner::new_v2(client, keys, &[&c.source], limits),
+        };
+        owners.push(owner.map_err(|_| "invalid owner")?);
     }
     let pool = CollectorPool::new(owners).map_err(|_| "invalid pool")?;
     let upstream_ca = read(&c.upstream_ca_der, 65536)?;
@@ -252,6 +268,27 @@ fn run() -> Result<(), &'static str> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn wire_profile_is_closed_and_defaults_to_v1() {
+        #[derive(Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            capture_wire_version: CaptureWireVersion,
+        }
+        for (json, v2) in [
+            ("{}", false),
+            (r#"{"capture_wire_version":"v1"}"#, false),
+            (r#"{"capture_wire_version":"v2"}"#, true),
+        ] {
+            let profile: Profile = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                matches!(profile.capture_wire_version, CaptureWireVersion::V2),
+                v2
+            );
+        }
+        assert!(serde_json::from_str::<Profile>(r#"{"capture_wire_version":"V2"}"#).is_err());
+        assert!(serde_json::from_str::<Profile>(r#"{"capture_wire_version":"v3"}"#).is_err());
+    }
     #[test]
     fn resolves_configured_hostname_once_and_retains_first_address() {
         let runtime = tokio::runtime::Builder::new_current_thread()

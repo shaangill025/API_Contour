@@ -11,7 +11,7 @@ mod declared_store;
 mod human_authorization;
 mod human_catalog;
 pub use human_catalog::{
-    HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource,
+    HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource, HumanOrigin,
 };
 mod service_import_store;
 pub use catalog_reader::{CatalogCursor, CatalogPage, CatalogReadError, CatalogReadScope};
@@ -34,7 +34,7 @@ mod transport;
 pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
-pub use submit::{DurableReceipt, ReceiptStatus, SubmitError};
+pub use submit::{DurableReceipt, OriginIngress, ReceiptStatus, SubmitError, V2Ingress};
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

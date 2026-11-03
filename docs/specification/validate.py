@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Offline checks for this specification, not a product acceptance runner.
 
-The schema interpreter supports only the vocabulary used in batch.schema.json.
+The schema interpreter supports only the vocabulary used in the batch schemas.
 It rejects unknown keywords. It is not a full JSON Schema conformance validator.
 """
 import datetime
+import copy
 import json
 from pathlib import Path
 import re
@@ -61,6 +62,11 @@ def schema_check(value, schema, document, depth=0):
                'minLength', 'maxLength', 'pattern', 'enum', 'const', 'minimum',
                'maximum', 'items', 'minItems', 'maxItems', 'uniqueItems', 'oneOf',
                'anyOf', 'format'}
+    # The V2 document has one root annotation. Keep V1's accepted vocabulary
+    # unchanged and do not admit annotations on arbitrary nested schemas.
+    if depth == 0 and schema is document and document.get('$id') == 'https://apicontour.invalid/spec/v2/batch-v2.schema.json':
+        allowed.add('description')
+        require(isinstance(schema.get('description'), str), 'invalid V2 description')
     require(not set(schema) - allowed, 'unsupported schema keyword')
     if '$ref' in schema:
         ref = schema['$ref']
@@ -147,6 +153,78 @@ def semantic_check(batch):
                 require(all(x['kind'] != 'union' for x in node['alternatives']), 'nested union')
                 for child in node['alternatives']: walk(child, depth+1)
         walk(record['structure'])
+
+
+def semantic_check_v2(batch):
+    """Validate V2 wrappers and then the unchanged V1 record semantics.
+
+    A witness is untrusted data; these syntax checks confer no authority.
+    The enclosing JSON loader must already reject duplicate raw keys.
+    """
+    require(type(batch) is dict and type(batch.get('wire_version')) is int and batch['wire_version'] == 2, 'invalid V2 envelope')
+    require(len(json.dumps(batch, ensure_ascii=False).encode()) <= 1048576, 'batch bytes')
+    require(type(batch.get('records')) is list and 1 <= len(batch['records']) <= 500, 'V2 record count')
+    records = []
+    for wrapper in batch['records']:
+        require(type(wrapper) is dict and set(wrapper) == {'record','origin_witness'}, 'invalid V2 wrapper')
+        witness = wrapper['origin_witness']
+        require(type(witness) is dict, 'invalid origin witness')
+        kind = witness.get('kind')
+        if kind == 'unattributed':
+            require(set(witness) == {'kind'}, 'invalid unattributed witness')
+        elif kind == 'downstream_mtls_leaf_sha256_v1':
+            require(set(witness) == {'kind','leaf_sha256'}, 'invalid leaf witness')
+            digest = witness['leaf_sha256']
+            require(type(digest) is str and re.fullmatch(r'[0-9a-f]{64}', digest) is not None, 'invalid leaf digest')
+        else:
+            raise ValueError('invalid origin witness kind')
+        records.append(wrapper['record'])
+    semantic_check({'created_at':batch['created_at'], 'records':records})
+
+
+def batch_v2_regressions(schema, fixtures, legacy_schema, legacy_fixtures):
+    """Exercise wrapper rejection and inherited semantic rules on decoded fixtures."""
+    valid = next(row['body'] for row in fixtures if row['id'] == 'valid_claim')
+    legacy = next(row['body'] for row in legacy_fixtures if row['id'] == 'valid_structure')
+    schema_check(legacy, legacy_schema, legacy_schema)
+    semantic_check(legacy)
+
+    def rejects(function, value):
+        try:
+            function(value)
+        except ValueError:
+            return True
+        return False
+
+    for change in ('invalid_digest', 'witness_extra', 'wrapper_extra', 'missing_witness'):
+        candidate = copy.deepcopy(valid)
+        wrapper = candidate['records'][0]
+        if change == 'invalid_digest': wrapper['origin_witness']['leaf_sha256'] = 'g'*64
+        elif change == 'witness_extra': wrapper['origin_witness']['verified'] = True
+        elif change == 'wrapper_extra': wrapper['verified'] = True
+        else: del wrapper['origin_witness']
+        require(rejects(lambda value: schema_check(value, schema, schema), candidate), 'V2 schema regression: '+change)
+        require(rejects(semantic_check_v2, candidate), 'V2 wrapper regression: '+change)
+
+    v2_duplicate = copy.deepcopy(valid)
+    v2_duplicate['records'].append(copy.deepcopy(v2_duplicate['records'][0]))
+    schema_check(v2_duplicate, schema, schema)
+    require(rejects(semantic_check_v2, v2_duplicate), 'V2 duplicate record ID regression')
+    for source, check in ((valid, semantic_check_v2), (legacy, semantic_check)):
+        candidate = copy.deepcopy(source)
+        record = candidate['records'][0]['record'] if check is semantic_check_v2 else candidate['records'][0]
+        record['sample_numerator'] = record['sample_denominator'] + 1
+        require(rejects(check, candidate), 'inherited record semantics regression')
+    v1_extra = copy.deepcopy(legacy)
+    v1_extra['records'][0]['origin_witness'] = {'kind':'unattributed'}
+    require(rejects(lambda value: schema_check(value, legacy_schema, legacy_schema), v1_extra), 'V1 witness rejection regression')
+    remote = copy.deepcopy(schema)
+    remote['$defs']['v2_record']['properties']['record']['$ref'] = 'https://example.invalid/record'
+    require(rejects(lambda value: check_references(value, ROOT/'contracts/batch-v2.schema.json'), remote), 'remote reference regression')
+    # Duplicate raw JSON keys are rejected by the loader, not JSON Schema.
+    class DuplicateInput:
+        def read_text(self): return '{"origin_witness":{"kind":"unattributed","kind":"unattributed"}}'
+    require(rejects(load, DuplicateInput()), 'duplicate raw key regression')
 
 
 def canonical(node):
@@ -261,6 +339,17 @@ def main():
         except ValueError:
             actual = 'reject'
         require(actual == fixture['expected'], 'fixture outcome: '+fixture['id'])
+    schema_v2 = load(ROOT/'contracts/batch-v2.schema.json')
+    fixtures_v2 = load(ROOT/'fixtures/batches-v2.json')
+    for fixture in fixtures_v2:
+        try:
+            schema_check(fixture['body'], schema_v2, schema_v2)
+            semantic_check_v2(fixture['body'])
+            actual = 'accept'
+        except ValueError:
+            actual = 'reject'
+        require(actual == fixture['expected'], 'V2 fixture outcome: '+fixture['id'])
+    batch_v2_regressions(schema_v2, fixtures_v2, schema, fixtures)
     goldens = load(ROOT/'fixtures/canonical.json')
     for fixture in goldens:
         schema_check(fixture['node'], {'$ref':'#/$defs/node'}, schema)
@@ -285,7 +374,7 @@ def main():
         for prerequisite in prerequisites:
             completed = set(tasks) - {tid, prerequisite}
             require(not set(tasks[tid]['depends_on']) <= completed, 'premature task readiness: '+tid)
-    print(json.dumps({'status':'PASS','scope':'Offline specification links, traceability, DAG and local schema-subset/semantic fixture checks only','json_files':len(paths),'local_links':links,'requirements':len(requirements),'phases':len(phases),'tasks':len(tasks),'capabilities':len(caps),'acceptance_cases':len(tests),'batch_fixtures':len(fixtures),'canonical_vectors':len(goldens),'local_contract_references':reference_count,'api_operations':len(operations),'product_acceptance':'NOT_RUN','full_schema_standard_validation':'NOT_RUN','full_openapi_standard_validation':'NOT_RUN'},indent=2))
+    print(json.dumps({'status':'PASS','scope':'Offline specification links, traceability, DAG and local schema-subset/semantic fixture checks only','json_files':len(paths),'local_links':links,'requirements':len(requirements),'phases':len(phases),'tasks':len(tasks),'capabilities':len(caps),'acceptance_cases':len(tests),'batch_fixtures':len(fixtures),'batch_v2_fixtures':len(fixtures_v2),'canonical_vectors':len(goldens),'local_contract_references':reference_count,'api_operations':len(operations),'product_acceptance':'NOT_RUN','full_schema_standard_validation':'NOT_RUN','full_openapi_standard_validation':'NOT_RUN'},indent=2))
 
 
 if __name__ == '__main__':

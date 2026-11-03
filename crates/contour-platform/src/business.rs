@@ -7,7 +7,7 @@ use contour_core::{
 };
 use contour_postgres::{
     ComparisonInput, ComparisonRequest, ComparisonStoreError, ComparisonStored, DatabaseSettings,
-    DeclaredScope, HumanCatalogError, HumanCatalogOperation, HumanCatalogResource,
+    DeclaredScope, HumanCatalogError, HumanCatalogOperation, HumanCatalogResource, HumanOrigin,
     HumanReviewDecisionRequest, HumanReviewRequest, ReviewStatus, ReviewStoreError, ReviewStored,
     ServiceImportError, ServiceImportScope, TrustedCa,
 };
@@ -164,9 +164,20 @@ impl Business {
             .await
             .map_err(|_| 503u16)?;
         if method == "GET" && path == "/v1/operations" {
-            let (limit, cursor) = query(request.uri().query())?;
-            let page = db
-                .list_operations_as_human_until(
+            let (limit, cursor, origin, include_origin) = query(request.uri().query())?;
+            let page = if let Some(origin) = origin {
+                let origin = HumanOrigin::new(origin.0).map_err(catalog_error)?;
+                db.list_operations_by_origin_as_human_until(
+                    identity,
+                    &scope,
+                    limit,
+                    cursor.as_deref(),
+                    &origin,
+                    deadline,
+                )
+                .await
+            } else if include_origin {
+                db.list_operations_with_origins_as_human_until(
                     identity,
                     &scope,
                     limit,
@@ -174,19 +185,37 @@ impl Business {
                     deadline,
                 )
                 .await
-                .map_err(catalog_error)?;
+            } else {
+                db.list_operations_as_human_until(
+                    identity,
+                    &scope,
+                    limit,
+                    cursor.as_deref(),
+                    deadline,
+                )
+                .await
+            }
+            .map_err(catalog_error)?;
             return Ok(
-                json!({"items":page.items.into_iter().map(operation).collect::<Vec<_>>(),"next_cursor":page.next_cursor}),
+                json!({"items":page.items.into_iter().map(|o| operation(o, include_origin)).collect::<Vec<_>>(),"next_cursor":page.next_cursor}),
             );
         }
         if method == "GET" && path.starts_with("/v1/operations/") {
-            no_query(&request)?;
+            let include_origin = match request.uri().query() {
+                None => false,
+                Some("include_origin=true") => true,
+                _ => return Err(400),
+            };
             let id = segment(path, "/v1/operations/")?;
-            let op = db
-                .read_operation_as_human_until(identity, &scope, id, deadline)
-                .await
-                .map_err(catalog_error)?;
-            return Ok(operation(op));
+            let op = if include_origin {
+                db.read_operation_with_origins_as_human_until(identity, &scope, id, deadline)
+                    .await
+            } else {
+                db.read_operation_as_human_until(identity, &scope, id, deadline)
+                    .await
+            }
+            .map_err(catalog_error)?;
+            return Ok(operation(op, include_origin));
         }
         if method == "POST" && path == "/v1/contracts/import" {
             no_query(&request)?;
@@ -419,9 +448,13 @@ fn segment<'a>(path: &'a str, prefix: &str) -> Result<&'a str, u16> {
         Ok(id)
     }
 }
-fn query(q: Option<&str>) -> Result<(u16, Option<String>), u16> {
+#[derive(Debug, PartialEq, Eq)]
+struct OriginFilter([String; 5]);
+fn query(q: Option<&str>) -> Result<(u16, Option<String>, Option<OriginFilter>, bool), u16> {
     let mut limit = None;
     let mut cursor = None;
+    let mut include_origin = false;
+    let mut origin: [Option<String>; 5] = Default::default();
     if let Some(q) = q {
         for item in q.split('&') {
             let (key, value) = item.split_once('=').ok_or(400u16)?;
@@ -432,15 +465,53 @@ fn query(q: Option<&str>) -> Result<(u16, Option<String>), u16> {
                 "cursor" if cursor.is_none() && !value.is_empty() => {
                     cursor = Some(value.to_owned())
                 }
+                "include_origin" if !include_origin && value == "true" => include_origin = true,
+                "origin_project_id"
+                | "origin_service_id"
+                | "origin_environment_id"
+                | "origin_deployment_id"
+                | "origin_instance_id" => {
+                    let index = match key {
+                        "origin_project_id" => 0,
+                        "origin_service_id" => 1,
+                        "origin_environment_id" => 2,
+                        "origin_deployment_id" => 3,
+                        _ => 4,
+                    };
+                    if origin[index].is_some() || !canonical_uuid(value) {
+                        return Err(400);
+                    }
+                    origin[index] = Some(value.to_owned());
+                }
                 _ => return Err(400),
             }
         }
+    }
+    let origin = if origin.iter().all(Option::is_none) {
+        None
+    } else if origin.iter().all(Option::is_some) {
+        Some(OriginFilter(origin.map(Option::unwrap)))
+    } else {
+        return Err(400);
+    };
+    if origin.is_some() && !include_origin {
+        return Err(400);
     }
     let limit = limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return Err(400);
     }
-    Ok((limit, cursor))
+    Ok((limit, cursor, origin, include_origin))
+}
+fn canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, c)| {
+            if [8, 13, 18, 23].contains(&i) {
+                c == b'-'
+            } else {
+                c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+            }
+        })
 }
 fn idempotency_key(request: &BusinessRequest) -> Result<Option<String>, u16> {
     let mut values = request.headers().get_all("idempotency-key").iter();
@@ -516,8 +587,18 @@ fn timestamp(micros: i64) -> Result<String, u16> {
         .format(&Rfc3339)
         .map_err(|_| 503u16)
 }
-fn operation(o: HumanCatalogOperation) -> Value {
-    json!({"id":o.id,"project_id":o.project_id,"service_id":o.service_id,"environment_id":o.environment_id,"protocol":o.protocol,"direction":o.direction,"operation":o.operation,"route_template":o.route_template,"approved_contract_id":o.approved_contract_id,"last_seen":o.last_seen,"visibility":o.visibility,"completeness":o.completeness})
+fn operation(o: HumanCatalogOperation, include_origin: bool) -> Value {
+    let mut result = json!({"id":o.id,"project_id":o.project_id,"service_id":o.service_id,"environment_id":o.environment_id,"protocol":o.protocol,"direction":o.direction,"operation":o.operation,"route_template":o.route_template,"approved_contract_id":o.approved_contract_id,"last_seen":o.last_seen,"visibility":o.visibility,"completeness":o.completeness});
+    if include_origin {
+        let map = result.as_object_mut().expect("operation object");
+        map.insert(
+            "origin_evidence_available".into(),
+            json!(o.origin_evidence_available),
+        );
+        map.insert("origins_truncated".into(), json!(o.origins_truncated));
+        map.insert("origins".into(), json!(o.origins.into_iter().map(|v| json!({"project_id":v.ids[0],"service_id":v.ids[1],"environment_id":v.ids[2],"deployment_id":v.ids[3],"instance_id":v.ids[4],"proof_status":"verified"})).collect::<Vec<_>>()));
+    }
+    result
 }
 fn comparison(c: &ComparisonStored, operation: &str, direction: &str) -> Result<Value, u16> {
     let inputs = c.public_inputs().ok_or(503u16)?;
@@ -593,15 +674,84 @@ mod tests {
     use super::*;
     #[test]
     fn queries_are_bounded_and_unambiguous() {
-        assert_eq!(query(None), Ok((50, None)));
+        assert_eq!(query(None), Ok((50, None, None, false)));
         assert_eq!(
             query(Some("limit=200&cursor=abc")),
-            Ok((200, Some("abc".into())))
+            Ok((200, Some("abc".into()), None, false))
         );
         assert_eq!(query(Some("limit=1&limit=2")), Err(400));
         assert_eq!(query(Some("limit=201")), Err(400));
         assert_eq!(query(Some("cursor=")), Err(400));
         assert_eq!(query(Some("tenant=other")), Err(400));
+        let id = "12345678-1234-4234-8234-123456789abc";
+        let full = format!(
+            "origin_project_id={id}&origin_service_id={id}&origin_environment_id={id}&origin_deployment_id={id}&origin_instance_id={id}&include_origin=true"
+        );
+        assert_eq!(
+            query(Some(&full)),
+            Ok((
+                50,
+                None,
+                Some(OriginFilter(std::array::from_fn(|_| id.to_owned()))),
+                true
+            ))
+        );
+        assert_eq!(query(Some(&format!("origin_project_id={id}"))), Err(400));
+        for missing in [
+            "origin_project_id",
+            "origin_service_id",
+            "origin_environment_id",
+            "origin_deployment_id",
+            "origin_instance_id",
+        ] {
+            let partial = full
+                .split('&')
+                .filter(|part| !part.starts_with(missing))
+                .collect::<Vec<_>>()
+                .join("&");
+            assert_eq!(query(Some(&partial)), Err(400));
+        }
+        assert_eq!(
+            query(Some(&format!("{full}&origin_tenant_id={id}"))),
+            Err(400)
+        );
+        assert_eq!(
+            query(Some(&format!("{full}&origin_instance_id={id}"))),
+            Err(400)
+        );
+        assert_eq!(query(Some(&full.replace(id, &id.to_uppercase()))), Err(400));
+    }
+    #[test]
+    fn origin_fields_require_explicit_opt_in() {
+        let op = HumanCatalogOperation {
+            id: "x".into(),
+            project_id: "p".into(),
+            service_id: "s".into(),
+            environment_id: "e".into(),
+            protocol: "http".into(),
+            direction: "request".into(),
+            operation: "GET".into(),
+            route_template: "/".into(),
+            approved_contract_id: None,
+            last_seen: None,
+            visibility: None,
+            completeness: None,
+            origin_evidence_available: false,
+            origins: vec![],
+            origins_truncated: false,
+        };
+        let legacy = operation(op.clone(), false);
+        assert!(legacy.get("origins").is_none());
+        assert!(legacy.get("origin_evidence_available").is_none());
+        assert!(legacy.get("origins_truncated").is_none());
+        let included = operation(op, true);
+        assert_eq!(included["origins"], json!([]));
+        assert_eq!(included["origin_evidence_available"], json!(false));
+        assert_eq!(query(Some("include_origin=false")), Err(400));
+        assert_eq!(
+            query(Some("include_origin=true&include_origin=true")),
+            Err(400)
+        );
     }
     #[test]
     fn request_objects_reject_unknown_and_duplicate_fields() {
