@@ -48,6 +48,64 @@ def resolve_local(reference, path):
     return target
 
 
+def causal_semantic_check(body):
+    events = body['events']
+    require(events[0]['seq'] == body['first_seq'] and events[-1]['seq'] == body['last_seq'], 'causal endpoints')
+    require(all(a['seq'] < b['seq'] for a, b in zip(events, events[1:])), 'causal ordering')
+    require(len({e['event_id'] for e in events}) == len(events), 'causal duplicate event')
+    roots, activities, attempts, activity_roots = set(), {}, {}, {}
+    for e in events:
+        kind = e['kind']
+        if kind == 'root':
+            require(e['root'] not in roots, 'duplicate root'); roots.add(e['root'])
+        if kind in ('delivery', 'attempt'):
+            require(e['activity'] not in activity_roots or activity_roots[e['activity']] == e['root'], 'contradictory activity root')
+            activity_roots[e['activity']] = e['root']
+            key = e['activity'] if kind == 'delivery' else e['attempt']
+            value = (e['root'], e['parent']) if kind == 'delivery' else (e['root'], e['activity'], e['marker_digest'])
+            seen = activities if kind == 'delivery' else attempts
+            require(key not in seen or seen[key] == value, 'contradictory identifier'); seen[key] = value
+        if kind == 'loss':
+            a, b = e['first_missing_seq'], e['last_missing_seq']
+            require(a <= b < e['seq'] and not any(a <= x['seq'] <= b for x in events), 'invalid loss range')
+
+
+    for e in events:
+        if e['kind'] == 'delivery':
+            require(e['activity'] != e['parent'] and e['activity'] not in roots, 'contradictory delivery activity')
+        if e['kind'] == 'attempt':
+            require(e['activity'] not in roots or e['activity'] == e['root'], 'contradictory root activity')
+
+
+def grant_timestamp_nanos(value):
+    # Match the Rust Timestamp grammar and retain all nine fractional digits.
+    require(isinstance(value, str) and len(value) <= 35, 'grant timestamp length')
+    match = re.fullmatch(r'([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})', value)
+    require(match is not None, 'grant timestamp syntax')
+    year, month, day, hour, minute, second = map(int, match.group(1, 2, 3, 4, 5, 6))
+    require(year != 0 and second <= 59, 'grant timestamp range')
+    try:
+        day_number = datetime.date(year, month, day).toordinal()
+    except ValueError as error:
+        raise ValueError('grant timestamp calendar') from error
+    require(hour <= 23 and minute <= 59, 'grant timestamp clock')
+    zone = match.group(8)
+    offset = 0
+    if zone != 'Z':
+        hours, minutes = int(zone[1:3]), int(zone[4:6])
+        require(hours <= 23 and minutes <= 59, 'grant timestamp offset')
+        offset = (hours * 60 + minutes) * (1 if zone[0] == '+' else -1)
+    seconds = day_number * 86400 + hour * 3600 + minute * 60 + second - offset * 60
+    fraction = int((match.group(7) or '').ljust(9, '0') or '0')
+    return seconds * 1_000_000_000 + fraction
+
+
+def causal_grant_semantic_check(body):
+    issued = grant_timestamp_nanos(body['issued_at'])
+    expires = grant_timestamp_nanos(body['expires_at'])
+    require(0 < expires - issued <= 900_000_000_000, 'causal grant lease')
+
+
 def date(value):
     require(isinstance(value, str), 'timestamp is not a string')
     result = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -350,6 +408,33 @@ def main():
             actual = 'reject'
         require(actual == fixture['expected'], 'V2 fixture outcome: '+fixture['id'])
     batch_v2_regressions(schema_v2, fixtures_v2, schema, fixtures)
+    causal_schema = load(ROOT/'contracts/causal-event-batch.schema.json')
+    causal_fixtures = load(ROOT/'fixtures/causal-events.json')
+    import hashlib
+    for fixture in causal_fixtures:
+        try:
+            schema_check(fixture['body'], causal_schema, causal_schema)
+            causal_semantic_check(fixture['body'])
+            actual = 'accept'
+        except ValueError:
+            actual = 'reject'
+        require(actual == fixture['expected'], 'causal fixture outcome: '+fixture['id'])
+        if actual == 'accept':
+            require(len(fixture['events']) == len(fixture['body']['events']), 'causal event golden count')
+            for value, vector, domain in [(fixture['body'], fixture, 'apicontour/causal-events/1')] + [(e, v, 'apicontour/causal-event/1') for e, v in zip(fixture['body']['events'], fixture['events'])]:
+                encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+                require(encoded.decode() == vector['canonical'] and len(encoded) == vector['bytes'] and hashlib.sha256(domain.encode()+b'\n'+encoded).hexdigest() == vector['sha256'], 'causal golden mismatch')
+    envelope_schema = load(ROOT/'contracts/causal-grant-envelope.schema.json')
+    schema_check(load(ROOT/'fixtures/causal-grant-envelope.json'), envelope_schema, envelope_schema)
+    grant_schema = load(ROOT/'contracts/causal-grant.schema.json')
+    for fixture in load(ROOT/'fixtures/causal-grants.json'):
+        try:
+            schema_check(fixture['body'], grant_schema, grant_schema)
+            causal_grant_semantic_check(fixture['body'])
+            actual = 'accept'
+        except ValueError:
+            actual = 'reject'
+        require(actual == fixture['expected'], 'causal grant fixture outcome: '+fixture['id'])
     goldens = load(ROOT/'fixtures/canonical.json')
     for fixture in goldens:
         schema_check(fixture['node'], {'$ref':'#/$defs/node'}, schema)

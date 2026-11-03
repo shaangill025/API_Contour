@@ -40,6 +40,31 @@ for fixture in fixtures_v2:
     except (ValueError, ValidationError):
         actual = "reject"
     local.require(actual == fixture["expected"], "standard V2 fixture outcome: " + fixture["id"])
+causal_schema = local.load(ROOT / "contracts/causal-event-batch.schema.json")
+Draft202012Validator.check_schema(causal_schema)
+causal_validator = Draft202012Validator(causal_schema)
+for fixture in local.load(ROOT / "fixtures/causal-events.json"):
+    try:
+        causal_validator.validate(fixture["body"])
+        local.causal_semantic_check(fixture["body"])
+        actual = "accept"
+    except (ValueError, ValidationError):
+        actual = "reject"
+    local.require(actual == fixture["expected"], "standard causal fixture outcome: " + fixture["id"])
+grant_envelope_schema = local.load(ROOT / "contracts/causal-grant-envelope.schema.json")
+Draft202012Validator.check_schema(grant_envelope_schema)
+Draft202012Validator(grant_envelope_schema).validate(local.load(ROOT / "fixtures/causal-grant-envelope.json"))
+grant_schema = local.load(ROOT / "contracts/causal-grant.schema.json")
+Draft202012Validator.check_schema(grant_schema)
+grant_validator = Draft202012Validator(grant_schema, format_checker=FormatChecker())
+for fixture in local.load(ROOT / "fixtures/causal-grants.json"):
+    try:
+        grant_validator.validate(fixture["body"])
+        local.causal_grant_semantic_check(fixture["body"])
+        actual = "accept"
+    except (ValueError, ValidationError):
+        actual = "reject"
+    local.require(actual == fixture["expected"], "standard causal grant fixture outcome: " + fixture["id"])
 # Standard schema validation operates on already decoded JSON; duplicate raw
 # keys are rejected by the loader/codec, not by JSON Schema itself.
 v2_valid = next(row["body"] for row in fixtures_v2 if row["id"] == "valid_claim")
