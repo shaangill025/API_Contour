@@ -1,0 +1,873 @@
+[
+  {
+    "id": "valid",
+    "expected": "accept",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "tenant_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001\n",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "collector_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001\n",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "runtime_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001\n",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "source_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001\n",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "lifecycle_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001\n",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "instance_id_newline",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001\n",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "profile_sha256_7",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "causal_profile_8",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "other",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "revision_9",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 0,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "grant_version_10",
+    "expected": "reject",
+    "body": {
+      "grant_version": 2,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "event_kinds_11",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "attempt"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "event_kinds_12",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "other"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "max_batch_events_13",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 501,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "max_batch_bytes_14",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 0,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "queue_bytes_15",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435457,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "queue_ttl_seconds_16",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 0
+    }
+  },
+  {
+    "id": "expires_at_17",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:01Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "unknown",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400,
+      "url": "secret"
+    }
+  },
+  {
+    "id": "lease_1ns",
+    "expected": "accept",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:00:00.000000001Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "lease_900s",
+    "expected": "accept",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "lease_900s_plus_1ns",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00.000000001Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "offset_equivalence",
+    "expected": "accept",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T05:00:00-07:00",
+      "expires_at": "2026-10-07T14:15:00+02:00",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "zero_offset_equivalence",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T05:00:00-07:00",
+      "expires_at": "2026-10-07T14:00:00+02:00",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "fraction_10_digits",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:00:00.0000000001Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "lowercase_t",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07t12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "lowercase_z",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "invalid_calendar",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-02-30T12:00:00Z",
+      "expires_at": "2026-03-01T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "invalid_offset",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00+24:00",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "leap_second",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:60Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  }
+]

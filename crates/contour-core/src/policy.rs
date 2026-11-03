@@ -201,15 +201,15 @@ impl VerifiedPolicy {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope {
+pub(crate) struct Envelope {
     #[serde(deserialize_with = "bounded_string::<_, 1048576>")]
-    payload_base64url: String,
+    pub(crate) payload_base64url: String,
     #[serde(deserialize_with = "bounded_string::<_, 4096>")]
-    signature_base64url: String,
+    pub(crate) signature_base64url: String,
     #[serde(deserialize_with = "bounded_string::<_, 64>")]
-    key_id: String,
+    pub(crate) key_id: String,
     #[serde(deserialize_with = "bounded_string::<_, 64>")]
-    signature_profile: String,
+    pub(crate) signature_profile: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,7 +297,7 @@ pub(crate) fn uuid(text: &str) -> bool {
             }
         })
 }
-fn text_bound(text: &str, max: usize) -> bool {
+pub(crate) fn text_bound(text: &str, max: usize) -> bool {
     !text.is_empty() && text.chars().take(max + 1).count() <= max
 }
 pub(crate) fn profile(text: &str) -> bool {
@@ -312,7 +312,7 @@ pub(crate) fn profile(text: &str) -> bool {
 fn unique(values: &[String]) -> bool {
     values.iter().collect::<HashSet<_>>().len() == values.len()
 }
-fn bounded_string<'de, D: Deserializer<'de>, const N: usize>(
+pub(crate) fn bounded_string<'de, D: Deserializer<'de>, const N: usize>(
     decoder: D,
 ) -> Result<String, D::Error> {
     struct Text<const N: usize>;

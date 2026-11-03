@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apicontour.invalid/spec/v1/causal-grant-envelope.schema.json",
+  "type": "object",
+  "properties": {
+    "payload_base64url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1048576,
+      "pattern": "^[A-Za-z0-9_-]+$(?!\\n)"
+    },
+    "signature_base64url": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]+$(?!\\n)"
+    },
+    "key_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "signature_profile": {
+      "type": "string",
+      "const": "ed25519-v1"
+    }
+  },
+  "required": [
+    "payload_base64url",
+    "signature_base64url",
+    "key_id",
+    "signature_profile"
+  ],
+  "additionalProperties": false
+}
