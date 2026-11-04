@@ -145,6 +145,22 @@ def cleanup_fixture_containers(resources, label, inspect, remove, remains, attem
     if errors: raise RuntimeError('fixture container cleanup uncertain or failed') from errors[0]
 
 
+def parse_drain_diagnostic(value):
+    categories = {'ok', 'loss', 'deadline', 'empty', 'owner_paused', 'owner_history_limit',
+        'owner_queue', 'owner_transport', 'owner_retry', 'deferred_retry',
+        'deferred_discard_invalid', 'deferred_renew_authorized_enrollment',
+        'deferred_stop_conflict', 'deferred_require_split', 'deferred_stop_rejected',
+        'deferred_stop_configuration', 'deferred_expired'}
+    fields = value.split()
+    if (len(fields) != 4 or fields[0] != 'DIAG' or fields[1] not in categories
+        or any(not re.fullmatch(r'[0-9]{1,20}', x) or int(x) > 2**64-1 for x in fields[2:])):
+        raise ValueError('invalid drain diagnostic')
+    category, losses, acknowledgements = fields[1], int(fields[2]), int(fields[3])
+    if (category == 'ok' and losses != 0) or (category == 'loss' and losses == 0):
+        raise ValueError('invalid drain diagnostic')
+    return category, losses, acknowledgements
+
+
 def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
     if any(row[0]==old_leaf for row in rows if row[13] not in before_old_attempt):
         raise AssertionError('closed lifecycle received new proof')
@@ -267,7 +283,7 @@ def run_cases(container, execute, setup, directory, environment):
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
-        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json'])
+        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--replacement-diagnostic'] if replacement else [])])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
         edge=prefix+'-edge'
@@ -408,7 +424,13 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             before={row[13] for row in snapshot()}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
             before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
             oldprobe=replacement_node('old-leaf','a',1882)
-            before={row[13] for row in snapshot()}; trigger(oldprobe,'normal',1882); drain()
+            before={row[13] for row in snapshot()}; trigger(oldprobe,'normal',1882)
+            try:
+                category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
+            except ValueError:
+                raise RuntimeError('invalid replacement drain diagnostic') from None
+            print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
+            if category != 'ok': raise RuntimeError('replacement drain diagnostic reported failure')
             rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
             assert_replacement_history(rows,oldrows,before,cert_hash('a'))
             fresh=[row for row in rows if row[13] not in before]

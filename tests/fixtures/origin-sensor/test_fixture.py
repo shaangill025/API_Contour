@@ -112,6 +112,14 @@ class Fixture(unittest.TestCase):
                 lambda _: info, removed.append, lambda _: False, attempts=1)
         self.assertEqual(removed, [ident])
 
+    def test_diagnostic_protocol_is_strict_and_safe(self):
+        self.assertEqual(fixture.parse_drain_diagnostic('DIAG deferred_discard_invalid 0 1'), ('deferred_discard_invalid', 0, 1))
+        self.assertEqual(fixture.parse_drain_diagnostic('DIAG ok 0 2'), ('ok', 0, 2))
+        for bad in ('DIAG unknown 0 1', 'DIAG deferred_discard_invalid 0 -1',
+                    'DIAG ok 0 1 secret', 'DIAG ok 1 2', 'DRAIN 0 0 1',
+                    'DIAG owner_transport 0 18446744073709551616'):
+            with self.assertRaises(ValueError): fixture.parse_drain_diagnostic(bad)
+
     def test_stock_flow_has_fixed_identity_and_target(self):
         nodes={node['id']:node for node in fixture.flows('b'*64, 'a')}
         self.assertEqual(nodes['send']['url'],'https://127.0.0.1:9443/pilot')
