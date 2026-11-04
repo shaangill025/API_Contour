@@ -1,16 +1,15 @@
 """Generate SQL parser assertions from the checked-in Core causal vectors.
 
-Usage: python3 scripts/test-postgres-causal-inbox.py > /tmp/inbox-vectors.sql
-Run the generated script against a disposable database migrated through 20.
-This only tests the SQL codec, not transport, session races, quota or retention.
+Run without arguments to qualify the complete internal inbox on a disposable
+network-isolated PostgreSQL. --emit-vectors emits codec assertions only.
+Synthetic assertions do not prove transport, producer, graph or retention.
 """
 import json
 from pathlib import Path
 
 
 def emit_vectors():
-    root = Path(__file__).resolve().parent.parent
-    fixtures = json.loads((root / 'docs/specification/fixtures/causal-events.json').read_text())
+    fixtures = json.loads(checked_source('docs/specification/fixtures/causal-events.json'))
     print('SET ROLE contour_owner;')
     for fixture in fixtures:
         body = fixture.get('canonical') or json.dumps(fixture['body'], separators=(',', ':'), sort_keys=True, ensure_ascii=False)
@@ -124,9 +123,6 @@ def run_session_races(fresh):
                 raise AssertionError('race committed unexpected inbox row')
 
 
-if __name__ == '__main__':
-    emit_vectors()
-
 
 def run_shared_quota_races(fresh, core_example):
     """Exercise genuine restricted 17 and 20 writers against the same Q/ledger.
@@ -157,7 +153,7 @@ def run_shared_quota_races(fresh, core_example):
                           service_id=service, environment_id=environment, deployment_id=deployment)
     item['origin_witness'] = {'kind': 'downstream_mtls_leaf_sha256_v1', 'leaf_sha256': '11' * 32}
     encoded = json.loads(subprocess.run([str(core_example)], input=json.dumps(body).encode(),
-                                        capture_output=True, check=True).stdout)
+                                        capture_output=True, check=True, timeout=15).stdout)
     canonical, digest = encoded['canonical_hex'], encoded['digest']
     if any(c not in '0123456789abcdef' for c in canonical + digest) or len(digest) != 64:
         raise AssertionError('invalid Core fixture output')
@@ -167,7 +163,7 @@ def run_shared_quota_races(fresh, core_example):
     second_body['batch_id'] = second_batch
     second_body['records'][0]['record']['record_id'] = second_record
     second_encoded = json.loads(subprocess.run([str(core_example)], input=json.dumps(second_body).encode(),
-                                               capture_output=True, check=True).stdout)
+                                               capture_output=True, check=True, timeout=15).stdout)
     second_canonical, second_digest = second_encoded['canonical_hex'], second_encoded['digest']
     if any(c not in '0123456789abcdef' for c in second_canonical + second_digest) or len(second_digest) != 64:
         raise AssertionError('invalid second Core fixture output')
@@ -240,3 +236,279 @@ def run_shared_quota_races(fresh, core_example):
         if int(execute(f"SELECT count(*) FROM contour.ingestion_batches WHERE batch_id='{second_batch}';")) != 0:
             raise AssertionError('quota rejection leaked origin ingestion')
         execute(f"UPDATE contour.origin_logical_usage SET used_bytes={before} WHERE tenant_id='{tenant}';")
+
+# Complete, disposable qualification driver. Reuse the 18/19 safety helpers;
+# never import the root-only qualification harness or modify the older driver.
+import hashlib
+import os
+import re
+import runpy
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path(__file__).absolute().parent.parent
+PROVISIONS = ('approval','authority','catalog','comparison','declared','human','origin_ingress','review','v2_ingress')
+MIGRATIONS = ('0001_identity','0002_policy','0003_ingestion','0004_catalog','0005_declared',
+              '0006_approval','0007_comparison','0008_review','0009_human','0010_public_contracts',
+              '0011_import_selectors','0012_public_comparisons','0013_instance_registry','0014_observation_evidence')
+OPT_INS = ('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs',
+           '0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox')
+GROUPS = {
+    'vectors': ('causal_inbox_vectors.sql',),
+    'basic': ('causal_inbox_basic.sql','causal_inbox_stored_parse.sql','causal_inbox_malleability.sql',
+              'causal_inbox_quota.sql','causal_inbox_corruption.sql','causal_inbox_clock.sql'),
+    'cross-batches': ('causal_inbox_basic.sql','causal_inbox_cross_batches.sql'),
+    'history-limit': ('causal_inbox_basic.sql','causal_inbox_history_limit.sql'),
+    'history-work': ('causal_inbox_basic.sql','causal_inbox_history_work.sql'),
+}
+SOURCE_PATHS = (('Cargo.toml','Cargo.lock','crates/contour-core/examples/fixture_v2_canonical.rs','db/bootstrap.sql')
+    + tuple('crates/'+x+'/Cargo.toml' for x in ('contour-platform','contour-auth','contour-core','contour-postgres','contour-ingress','contour-delivery','contour-abi','contour-wasm'))
+    + tuple('db/provision_'+x+'.sql' for x in PROVISIONS)
+    + tuple('db/migrations/'+x+'.sql' for x in MIGRATIONS)
+    + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS)
+    + ('db/tests/causal_runtime_registry_pre.sql','db/tests/causal_session_setup.sql',
+       'scripts/test-postgres-causal-registry.py','scripts/test-postgres-causal-sessions.py',
+       'scripts/test-postgres-causal-inbox.py','tests/fixtures/causal-inbox/test_inbox_driver.py',
+       'collectors/nodered/qualified-runtime-profile.json','collectors/nodered/error-integration/profile.js',
+       'docs/specification/fixtures/causal-events.json','docs/specification/fixtures/batches-v2.json',
+       '.github/workflows/native.yml')
+    + tuple('db/tests/'+name for name in dict.fromkeys(n for group in GROUPS.values() for n in group)))
+
+
+def checked_source(relative):
+    path = ROOT / relative
+    for component in (path, *path.parents):
+        if component.is_symlink():
+            raise ValueError('symlink in qualification source')
+    if not path.is_file():
+        raise ValueError('qualification source missing')
+    return path.read_bytes()
+
+
+def verify_vector_sync():
+    import contextlib
+    import io
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):
+        emit_vectors()
+    if output.getvalue().encode() != checked_source('db/tests/causal_inbox_vectors.sql'):
+        raise ValueError('causal vector fixture differs from Core vectors')
+
+
+def source_snapshot():
+    for pattern, expected in (
+        ('db/provision_*.sql', {'db/provision_'+x+'.sql' for x in PROVISIONS}),
+        ('db/migrations/*.sql', {'db/migrations/'+x+'.sql' for x in MIGRATIONS}),
+        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS}),
+    ):
+        if {str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)} != expected:
+            raise ValueError('qualification source list changed')
+    # Cargo can compile any workspace crate, build script, manifest or fixture.
+    # Refuse symlinked trees and snapshot every file; additions also change the map.
+    cargo = []
+    def walk_error(_error):
+        raise ValueError('qualification source unavailable')
+    for directory, dirs, files in os.walk(ROOT / 'crates', followlinks=False, onerror=walk_error):
+        base = Path(directory)
+        for name in dirs + files:
+            path = base / name
+            if path.is_symlink():
+                raise ValueError('symlink in qualification source')
+        cargo.extend(str((base/name).relative_to(ROOT)) for name in files)
+    if not cargo or not (ROOT/'crates').is_dir():
+        raise ValueError('qualification source missing')
+    return {name: hashlib.sha256(checked_source(name)).hexdigest() for name in sorted(set(SOURCE_PATHS) | set(cargo))}
+
+
+def helpers():
+    checked_source('scripts/test-postgres-causal-registry.py')
+    checked_source('scripts/test-postgres-causal-sessions.py')
+    registry = runpy.run_path(str(ROOT/'scripts/test-postgres-causal-registry.py'))
+    session = runpy.run_path(str(ROOT/'scripts/test-postgres-causal-sessions.py'))
+    return registry, session
+
+
+def build_core(run):
+    # Cargo's JSON artifact is authoritative even with CARGO_TARGET_DIR or a
+    # configured target triple. --offline never falls back to network access.
+    output = run(['cargo','build','--locked','--offline','--manifest-path',str(ROOT/'Cargo.toml'),
+                  '-p','contour-core','--example','fixture_v2_canonical','--message-format=json'], timeout=300)
+    executables=[]
+    for line in output.splitlines():
+        try:
+            item=json.loads(line)
+        except ValueError:
+            raise RuntimeError('invalid Core build output') from None
+        target=item.get('target') or {}
+        if item.get('reason')=='compiler-artifact' and target.get('name')=='fixture_v2_canonical' and item.get('executable'):
+            executables.append(Path(item['executable']))
+    if len(executables)!=1 or not executables[0].is_file() or executables[0].is_symlink():
+        raise RuntimeError('Core fixture executable unavailable')
+    return executables[0]
+
+
+def assert_fresh(execute, database):
+    probe=execute(database,"SELECT current_database() || '|' || (SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations) || '|' || (SELECT count(*) FROM contour.causal_sessions) || '|' || (SELECT count(*) FROM contour.causal_inbox_batches) || '|' || (SELECT count(*) FROM contour.origin_proofs);")
+    expected=database+'|{'+','.join(str(x) for x in range(1,21))+'}|0|0|0'
+    if probe!=expected:
+        raise AssertionError('clone identity, ledger or initial state mismatch')
+
+
+def qualify_cases(container, execute, session, core):
+    """One checked clone per fixture group and per race; drop between cases."""
+    if tuple(GROUPS)!=('vectors','basic','cross-batches','history-limit','history-work'):
+        raise RuntimeError('invalid inbox qualification groups')
+    active=None
+    count=0
+    def drop():
+        nonlocal active
+        if active is not None:
+            execute('postgres','DROP DATABASE IF EXISTS '+active+';')
+            active=None
+    def fresh():
+        nonlocal count, active
+        drop()
+        count+=1
+        active='inbox_case_'+str(count)
+        execute('postgres','CREATE DATABASE '+active+' TEMPLATE contour_local;')
+        assert_fresh(execute,active)
+        database=active
+        return session['psql_args'](container,database), lambda sql:execute(database,sql)
+    try:
+        for label, files in GROUPS.items():
+            _, run_sql=fresh()
+            output=run_sql('\n'.join(checked_source('db/tests/'+name).decode() for name in files))
+            if label=='history-work':
+                # The fixture's final scalar is elapsed milliseconds for the
+                # largest admissible cross-batch comparison; disclose only it.
+                elapsed=output.splitlines()[-1] if output else ''
+                if not re.fullmatch(r'[0-9]{1,12}(?:\.[0-9]{1,9})?',elapsed):
+                    raise RuntimeError('history work timing unavailable')
+                print('history work elapsed milliseconds:',elapsed,flush=True)
+            print('PASS:',label,flush=True)
+        phase_start=count
+        run_session_races(fresh)
+        if count-phase_start!=16:
+            raise RuntimeError('incomplete session races')
+        print('PASS: all 16 session and policy races',flush=True)
+        phase_start=count
+        run_shared_quota_races(fresh,core)
+        if count-phase_start!=2:
+            raise RuntimeError('incomplete shared quota races')
+        print('PASS: real origin and inbox shared quota in both orders',flush=True)
+        if count!=23:
+            raise RuntimeError('incomplete inbox qualification')
+    finally:
+        drop()
+
+
+def inspect_owned_name(container_name):
+    result=subprocess.run(['docker','inspect',container_name],text=True,capture_output=True,timeout=30)
+    if result.returncode:
+        # Match only known Docker absence messages for the exact requested name.
+        if re.fullmatch(r'(?:Error: No such object: |error: no such object: )'+re.escape(container_name)+r'(?:\r?\n)?',result.stderr):
+            return None
+        raise RuntimeError('container inspection failed')
+    try:
+        return json.loads(result.stdout)
+    except (ValueError,TypeError):
+        raise RuntimeError('invalid container inspection') from None
+
+
+def main():
+    if sys.argv[1:]==['--emit-vectors']:
+        emit_vectors()
+        return
+    if len(sys.argv)!=1:
+        raise ValueError('expected no arguments or --emit-vectors')
+    os.umask(0o077)
+    before=None
+    registry=None
+    run=None
+    run_id=uuid.uuid4().hex
+    name='contour-causal-inbox-'+run_id
+    cid=None
+    create_attempted=False
+    def deadline_handler(_signum,_frame):
+        raise TimeoutError('inbox qualification exceeded overall deadline')
+    previous=signal.signal(signal.SIGALRM,deadline_handler)
+    signal.setitimer(signal.ITIMER_REAL,900)
+    try:
+        before=source_snapshot()
+        verify_vector_sync()
+        registry,session=helpers()
+        registry['verify_qualified_profile']()
+        run=session['_run']
+        core=build_core(run)
+        run(['docker','image','inspect',registry['IMAGE']])
+        create_attempted=True
+        candidate=run(['docker','create','--pull=never','--name',name,'--label','org.apicontour.registry-run='+run_id,
+                       '--network','none','--memory','512m','--cpus','1','--pids-limit','128',
+                       '--tmpfs','/var/lib/postgresql/data:rw,nosuid,noexec,size=256m',
+                       '-e','POSTGRES_DB=contour_local','-e','POSTGRES_PASSWORD=isolated-fixture-only',
+                       '-e','POSTGRES_HOST_AUTH_METHOD=reject','-e','POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=reject',
+                       registry['IMAGE'],'-c','listen_addresses=','-c','unix_socket_directories=/var/run/postgresql'])
+        if not re.fullmatch(r'[0-9a-f]{64}',candidate):
+            raise RuntimeError('invalid container identity')
+        cid=candidate
+        run(['docker','start',cid])
+        deadline=time.monotonic()+60
+        while True:
+            ready=subprocess.run(['docker','exec',cid,'sh','-c','test "$(cat /proc/1/comm)" = postgres && pg_isready -h /var/run/postgresql -U postgres -d contour_local'],capture_output=True,timeout=5)
+            if ready.returncode==0:
+                break
+            if time.monotonic()>=deadline:
+                raise TimeoutError('PostgreSQL readiness deadline')
+            time.sleep(.2)
+        def execute(database,sql):
+            return run(session['psql_args'](cid,database),input=sql,timeout=120)
+        execute('contour_local',checked_source('db/bootstrap.sql').decode())
+        for x in PROVISIONS:
+            execute('contour_local',checked_source('db/provision_'+x+'.sql').decode())
+        for x in MIGRATIONS:
+            execute('contour_local',checked_source('db/migrations/'+x+'.sql').decode())
+        for x in OPT_INS[:3]:
+            execute('contour_local',checked_source('db/opt-in-migrations/'+x+'.sql').decode())
+        execute('contour_local',checked_source('db/tests/causal_runtime_registry_pre.sql').decode())
+        execute('contour_local',checked_source('db/opt-in-migrations/'+OPT_INS[3]+'.sql').decode())
+        execute('contour_local',checked_source('db/tests/causal_session_setup.sql').decode())
+        for x in OPT_INS[4:]:
+            execute('contour_local',checked_source('db/opt-in-migrations/'+x+'.sql').decode())
+        assert_fresh(execute,'contour_local')
+        qualify_cases(cid,execute,session,core)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL,0)
+        signal.signal(signal.SIGALRM,previous)
+        try:
+            if create_attempted and not cid:
+                cid=registry['recover_owned_container'](inspect_owned_name,name,run_id)
+            if cid:
+                registry['cleanup_owned'](run,cid,name,run_id)
+        finally:
+            if before is not None and source_snapshot()!=before:
+                raise RuntimeError('qualification source changed')
+    print('PASS: complete internal causal inbox qualification; no transport or retention proof')
+
+
+def safe_failure(error):
+    # Never expose command arguments, SQL, server messages, paths or source.
+    state=getattr(error,'sqlstate',None)
+    detail=(' SQLSTATE '+state) if isinstance(state,str) and re.fullmatch(r'[0-9A-Z]{5}',state) else ''
+    categories={'database unavailable','role unavailable','server starting','server stopping',
+                'authentication failed','postgres fatal','connection refused','connection socket unavailable',
+                'connection closed','connection timeout','command failure'}
+    category=getattr(error,'category',None)
+    if isinstance(category,str) and category in categories:
+        detail+=' '+category
+    return 'FAIL: internal causal inbox qualification ('+type(error).__name__+detail+')'
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:
+        print(safe_failure(error),file=sys.stderr)
+        raise SystemExit(1) from None
