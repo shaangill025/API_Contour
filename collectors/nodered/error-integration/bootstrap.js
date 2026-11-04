@@ -45,7 +45,7 @@ try {
     phase='hooks';
     const hooks=redRequire('@node-red/util').hooks;
     let control;
-    adapter=require('./private-runtime.js').install(hooks,{inbound:['in'],requests:['request'],maxPending:32,maxEvents:128,maxBytes:32768,ttlMs:5000},c=>{control=c;});
+    adapter=require('./private-runtime.js').install(hooks,{inbound:['in'],requests:['request'],maxPending:32,maxEvents:128,maxBytes:32768,ttlMs:5000,ingressPoint:profile.INGRESS_POINT},c=>{control=c;});
     if(!control || !adapter.snapshot().registryIntact) throw Error('hooks');
     // Stable lexical facades forward without ownership until the fixed fixture
     // has started and the private bridge has been constructed.

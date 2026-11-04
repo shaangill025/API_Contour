@@ -11,12 +11,21 @@ const id = () => randomBytes(16).toString('hex');
 
 function install(hooks, options, initialize) {
     if (typeof initialize !== 'function') throw new TypeError('trusted initializer required');
-    const { inbound, requests, maxPending, maxEvents, maxBytes, ttlMs } = options;
+    const { inbound, requests, maxPending, maxEvents, maxBytes, ttlMs, ingressPoint } = options;
     if (!Array.isArray(inbound) || !inbound.length || !Array.isArray(requests) ||
         ![maxPending, maxEvents, maxBytes, ttlMs].every(Number.isSafeInteger) ||
         maxPending < 1 || maxPending > 4096 || maxEvents < 1 || maxEvents > 4096 ||
         maxBytes < 256 || maxBytes > 1048576 || ttlMs < 1 || ttlMs > 60000) {
         throw new Error('unsupported adapter bounds');
+    }
+    // Unscoped mode exists only for prior white-box tests. Qualified bootstrap
+    // supplies its immutable owner-selected point explicitly.
+    let point;
+    if (ingressPoint !== undefined) {
+        if (!ingressPoint || typeof ingressPoint !== 'object' ||
+            ![ingressPoint.node, ingressPoint.method, ingressPoint.url].every(x => typeof x === 'string' && x.length > 0 && x.length <= 64) ||
+            !inbound.includes(ingressPoint.node)) throw new Error('unsupported ingress point');
+        point = Object.freeze({node:ingressPoint.node, method:ingressPoint.method, url:ingressPoint.url});
     }
     const inboundIds = new Set(inbound), requestIds = new Set(requests);
     if (inboundIds.size !== inbound.length || requestIds.size !== requests.length ||
@@ -46,6 +55,19 @@ function install(hooks, options, initialize) {
             if (continued) throw err;
             invalidate(); done();
         }
+    }
+    function atPoint(source, msg) {
+        if (!point) return true;
+        try {
+            if (source !== point.node || !msg || typeof msg !== 'object') return false;
+            const rd = Object.getOwnPropertyDescriptor(msg, 'req');
+            const req = rd && 'value' in rd && rd.value;
+            if (!req || typeof req !== 'object') return false;
+            const method = Object.getOwnPropertyDescriptor(req, 'method');
+            const url = Object.getOwnPropertyDescriptor(req, 'url');
+            return !!(method && 'value' in method && method.value === point.method &&
+                url && 'value' in url && url.value === point.url);
+        } catch (_) { return false; }
     }
     // Never remove ordinary application fields. Only these reserved names are
     // controlled by the adapter, with data descriptors to avoid invoking getters.
@@ -141,7 +163,8 @@ function install(hooks, options, initialize) {
             if (!valid || !Array.isArray(batch) || !batch.length) return next();
             const src = batch[0].source;
             if (src && inboundIds.has(src.id)) {
-                if (!batch.every(e => e.source && e.source.id === src.id && scrub(e.msg))) { lose(); return als.run(undefined, next); }
+                if (!batch.every(e => e.source && e.source.id === src.id && atPoint(src.id, e.msg)) ||
+                    !batch.every(e => scrub(e.msg))) { lose(); return als.run(undefined, next); }
                 const root = id();
                 record({ kind: 'ROOT_INTENT', root });
                 return als.run({ root, activity: root, source: src.id, deadline: now() + ttlMs }, next);

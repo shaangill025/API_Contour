@@ -56,9 +56,9 @@ function diagnostic(stage, status = null) {
         roots:count('ROOT_INTENT'), deliveries:count('DELIVERY_INTENT'),
         requests:count('REQUEST_INTENT') }) + '\n');
 }
-function request(port, body) {
+function request(port, body, route = '/run') {
     return new Promise((resolve, reject) => {
-        const req = http.request({ host:'127.0.0.1', port, path:'/run', method:'POST',
+        const req = http.request({ host:'127.0.0.1', port, path:route, method:'POST',
             headers:{'content-type':'text/plain', 'x-apicontour-spoof':'fake'} }, res => {
             res.on('error', reject);
             res.on('aborted', () => reject(new Error('response aborted')));
@@ -203,7 +203,31 @@ async function main() {
     // synthetic missing-context probe, not proof of real dispatch cancellation.
     const drainDeadline = Date.now() + 2000;
     while (adapter.snapshot().pending && Date.now() < drainDeadline) await new Promise(resolve => setTimeout(resolve, 20));
-    const beforeLoss = adapter.snapshot();
+    // Express accepts these route variants, but the selected observation point
+    // is exactly POST /run. Wait for all downstream forwarding before comparing.
+    const chainRoots = adapter.snapshot().events.filter(e => e.kind === 'ROOT_INTENT').slice(-2).map(e => e.root);
+    function finalChainsDone() {
+        const events = adapter.snapshot().events;
+        return chainRoots.length === 2 && chainRoots.every(root => {
+            const requests = events.filter(e => e.kind === 'REQUEST_INTENT' && e.root === root);
+            return requests.length === 2 && events.some(e => e.kind === 'DELIVERY_INTENT' && e.parent === requests[1].activity);
+        });
+    }
+    const finalChainDeadline = Date.now() + 3000;
+    while (!finalChainsDone() && Date.now() < finalChainDeadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert(finalChainsDone(), 'normal chain completion before offscope checks');
+    const offscopeBefore = adapter.snapshot();
+    for (const [route, label] of [['/run?fixture=1','scope-query'],['/RUN','scope-case'],['/run/','scope-slash']]) {
+        const before = arrivals.length;
+        assert.equal(await request(server.address().port, label, route), 200);
+        const end = Date.now() + 3000;
+        while (arrivals.length < before + 2 && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(arrivals.length, before + 2, 'offscope request must forward');
+    }
+    const offscopeAfter = adapter.snapshot();
+    assert.equal(offscopeAfter.events.length, offscopeBefore.events.length, 'offscope must not create owned events');
+    assert(offscopeAfter.loss > offscopeBefore.loss, 'offscope must record loss');
+    const beforeLoss = offscopeAfter;
     assert.equal(beforeLoss.pending, 0);
     const deliveries = beforeLoss.events.filter(e => e.kind === 'DELIVERY_INTENT');
     const byActivity = new Map(deliveries.map(e => [e.activity, e]));
