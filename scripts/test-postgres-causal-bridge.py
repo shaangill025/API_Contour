@@ -95,15 +95,17 @@ def snapshot():
 
 
 
-def resolve_cargo_artifact(lines, target_dir):
+def resolve_cargo_artifact(lines, target_dir, package="contour-postgres", example="causal_bridge_probe"):
     """Select only this checkout's example from Cargo JSON, within fresh target."""
+    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe')):
+        raise ValueError('unsupported cargo fixture')
     found=[]
-    expected=ROOT/'crates/contour-postgres/examples/causal_bridge_probe.rs'
+    expected=ROOT/'crates'/package/'examples'/(example+'.rs')
     for line in lines:
         try: item=json.loads(line)
         except (ValueError,UnicodeDecodeError) as error: raise RuntimeError('invalid cargo artifact output') from error
         target=item.get('target') or {}
-        if (item.get('reason')=='compiler-artifact' and target.get('name')=='causal_bridge_probe'
+        if (item.get('reason')=='compiler-artifact' and target.get('name')==example
             and target.get('kind')==['example'] and target.get('src_path')==str(expected)
             and not (item.get('profile') or {}).get('test',False)):
             executable=item.get('executable')
@@ -193,11 +195,13 @@ def bounded_process_output(args, *, cwd, env, timeout=300, limit=16_777_216):
     return result.stdout.splitlines()
 
 
-def build_probe(target_dir):
+def build_probe(target_dir, package='contour-postgres', example='causal_bridge_probe'):
+    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe')):
+        raise ValueError('unsupported cargo fixture')
     env=os.environ.copy(); env['CARGO_TARGET_DIR']=str(target_dir)
-    output=bounded_process_output(['cargo','build','-p','contour-postgres','--example','causal_bridge_probe',
+    output=bounded_process_output(['cargo','build','-p',package,'--example',example,
                                    '--locked','--offline','--message-format=json'],cwd=ROOT,env=env)
-    return resolve_cargo_artifact(output,target_dir)
+    return resolve_cargo_artifact(output,target_dir,package,example)
 
 
 def command(args, *, data=None, timeout=30, env=None, expected=0):
@@ -586,7 +590,7 @@ def main():
                         if not (state['cleanup_container'] and state['cleanup_network'] and state['cleanup_build'] and state['source_unchanged']): state['status']='failed'
                         (result_dir/'result.json').write_text(json.dumps(state,sort_keys=True,indent=2)+'\n')
     if state['status']!='passed': raise RuntimeError('fixture qualification or cleanup failed')
-    print('PASS: synthetic causal bridge over PostgreSQL TLS; no mTLS ingress or producer attestation')
+    print('PASS: '+state['boundary'])
 
 
 if __name__=='__main__':

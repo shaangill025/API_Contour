@@ -141,7 +141,7 @@ jobs:
         run: python3 -B scripts/test-postgres-causal-sessions.py
 
   causal-inbox:
-    name: Internal causal inbox qualification
+    name: Authenticated causal ingestion qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -165,6 +165,20 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -B scripts/test-postgres-causal-inbox.py
+      - name: Test signed causal bridge qualification driver
+        run: python3 -B -m unittest discover -s tests/fixtures/causal-bridge -p 'test_bridge_driver.py'
+      - name: Qualify signed causal bridge through PostgreSQL TLS
+        timeout-minutes: 16
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 -B scripts/test-postgres-causal-bridge.py
+      - name: Test causal HTTPS qualification driver
+        run: python3 -B -m unittest discover -s tests/fixtures/causal-https -p 'test_https_driver.py'
+      - name: Qualify causal mTLS receipt through PostgreSQL TLS
+        timeout-minutes: 16
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: python3 -B scripts/test-postgres-causal-https.py
 
   causal-runtime:
     name: Fixed Node-RED causal runtime
