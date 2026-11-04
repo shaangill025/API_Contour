@@ -4,7 +4,7 @@ This does not prepare credentials, enroll origins, start services, or qualify a
 pilot. SQL is restricted to the fixed local database provisioning connection.
 """
 from deploy.local import capture_profiles, provision
-from deploy.pilot import origin_catalog_capture, origin_credentials, origin_enrollment, origin_logins, origin_schema, origin_setup_state as state
+from deploy.pilot import origin_catalog_capture, origin_credentials, origin_enrollment, origin_logins, origin_renewal, origin_schema, origin_setup_state as state
 
 ROOT = capture_profiles.ROOT
 GROUPS = ('contour_v2_ingress', 'contour_origin_ingress')
@@ -173,7 +173,7 @@ class Migration:
         self.psql(text.replace('\nBEGIN;\n', '\nBEGIN;\n'+guard, 1))
 
 
-def _prepare(profile, psql, credential=None, login=None, enrollment=False):
+def _prepare(profile, psql, credential=None, login=None, enrollment=False, renew=False):
     if profile is not capture_profiles.ORIGIN_PILOT: raise ValueError('unsupported origin profile')
     if psql('SELECT pg_catalog.current_database()::text;') != 'contour_local': raise RuntimeError('wrong local database')
     context={'login':False}
@@ -194,6 +194,9 @@ def _prepare(profile, psql, credential=None, login=None, enrollment=False):
         if current['completed'] >= 7 or current['pending']=='observer':
             if observer is None or credential is None: raise ValueError('observer context unavailable')
             if observer.policy() is not None: credential.allow_observer_policy=True
+            allowed,pending=origin_renewal.artifacts(profile)
+            if pending is not None and not renew: raise ValueError('origin renewal requires reconciliation')
+            credential.allow_renewal_artifacts=frozenset(allowed)
         if current['completed'] >= len(state.LOGIN_PHASES) or current['pending']=='logins':
             if login is None or credential is None or credential.inspect()!=state.EXACT or credential.commitment()!=current['credential_digest']:
                 raise ValueError('login context credential drift')
@@ -201,8 +204,10 @@ def _prepare(profile, psql, credential=None, login=None, enrollment=False):
             if status==state.EXACT: context['login']=True
             elif status!=state.ABSENT or current['completed'] >= len(state.LOGIN_PHASES):
                 raise ValueError('login context drift')
-    state.run(profile, operations, bind_sources=bind_sources, through_credentials=credential is not None,
-              through_logins=login is not None, through_enrollment=enrollment, set_context=set_context)
+    return state.run(profile, operations, bind_sources=bind_sources, through_credentials=credential is not None,
+              through_logins=login is not None, through_enrollment=enrollment, set_context=set_context,
+              after_complete=(lambda check: origin_renewal.renew_locked(profile,psql,check_source=check)) if renew else None,
+              require_enrolled=renew)
 
 
 def prepare_schema(profile=capture_profiles.ORIGIN_PILOT, *, psql=provision.psql):
@@ -231,10 +236,23 @@ def prepare_enrollment(profile, ca_cert, ca_key, *, psql=provision.psql, sensiti
     login=origin_logins.Logins(profile,psql,sensitive_execute,authenticate)
     _prepare(profile,psql,credential,login,enrollment=True)
     import datetime
-    policy=origin_enrollment.Observer(profile,psql).policy()
-    if policy is None: raise ValueError('initial observer policy unavailable')
-    issued=datetime.datetime.fromisoformat(policy[1]['issued_at'].replace('Z','+00:00'))
-    expires=datetime.datetime.fromisoformat(policy[1]['expires_at'].replace('Z','+00:00'))
+    rows=origin_renewal.history(profile,psql)
+    if not rows: raise ValueError('observer policy unavailable')
+    issued=datetime.datetime.fromisoformat(rows.head_policy['issued_at'].replace('Z','+00:00'))
+    expires=datetime.datetime.fromisoformat(rows.head_policy['expires_at'].replace('Z','+00:00'))
     now=datetime.datetime.now(datetime.timezone.utc)
     return {'schema_ready':True,'credentials_ready':True,'logins_ready':True,'enrollment_prepared':True,
             'policy_current':issued<=now<expires,'pilot_ready':False}
+
+
+def renew_enrolled(profile, ca_cert, ca_key, *, psql=provision.psql, sensitive_execute, authenticate):
+    """Renew a committed origin policy without exposing runtime startup."""
+    credential=origin_credentials.Credentials(profile,ca_cert,ca_key)
+    login=origin_logins.Logins(profile,psql,sensitive_execute,authenticate)
+    policy=_prepare(profile,psql,credential,login,enrollment=True,renew=True)
+    issued=provision.sql_quote(policy['issued_at']); expires=provision.sql_quote(policy['expires_at'])
+    tenant=provision.sql_quote(provision.IDS[0]); collector=provision.sql_quote(profile.capture.collector)
+    revision=policy['revision']
+    current=psql(f"SELECT (EXISTS (SELECT 1 FROM contour.collector_authorization WHERE tenant_id={tenant} AND collector_id={collector} AND enabled AND revoked_at IS NULL AND active_revision={revision}) AND pg_catalog.clock_timestamp()>={issued}::timestamptz AND pg_catalog.clock_timestamp()<{expires}::timestamptz)::text;")
+    if current not in ('true','false'): raise RuntimeError('policy freshness check failed')
+    return {'renewal_reconciled':True,'policy_current':current=='true','pilot_ready':False}

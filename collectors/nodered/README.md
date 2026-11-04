@@ -19,7 +19,7 @@ The command requires Python 3, OpenSSL and Docker. It uses only this image:
 docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963
 ```
 
-It pulls that exact digest only when absent. All 23 offline regressions run inside
+It pulls that exact digest only when absent. All 24 offline regressions run inside
 the image against its Node 24 and unmodified vendor source. Four separate runtime
 cases then exercise the legacy HTTP baseline and the instrumented HTTPS profile
 with valid trust, an unrelated CA, and a mismatched server name. The TLS fixture
@@ -77,3 +77,14 @@ ingestion, signed runtime enrollment or live sessions, a real gateway attempt
 witness, cross-instance identity, durable graph storage, platform lifecycle
 handling, performance targets, universal product coverage or full MVP acceptance.
 Those capabilities need their own implementation and execution evidence.
+
+The separate `causal-codec.js` encoder accepts untrusted data in the existing
+causal event batch format and returns canonical JSON and domain-separated batch
+and event digests. It performs no runtime collection, transport, enrollment,
+authorization, or conversion of request intents into attempts. Pass unsigned
+64-bit values as `BigInt` when they exceed JavaScript's safe integer range;
+unsafe `Number` values are rejected. Its offline tests cover normative vectors,
+closed fields, contradictions, `u64` boundaries, and the 500-event limit. The
+encoder also checks the 1 MiB canonical output limit; the current closed field
+and event limits keep valid batches below that size, so the tests reject an
+oversized malformed input before reaching that final size check.

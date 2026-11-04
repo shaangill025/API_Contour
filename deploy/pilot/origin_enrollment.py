@@ -86,7 +86,7 @@ class Observer:
         except (OSError,ValueError,RuntimeError): return journal.DRIFT
         t,p,s,e,c,src,d,i,n=_scope(self.profile)
         envelope=policy[0].hex() if policy else ''
-        return _result(self.psql,f"""SELECT CASE WHEN
+        status = _result(self.psql,f"""SELECT CASE WHEN
           (SELECT count(*) FROM contour.collectors WHERE tenant_id={t} AND collector_id={c})=0 AND
           (SELECT count(*) FROM contour.deployments WHERE tenant_id={t} AND deployment_id={d})=0 AND
           (SELECT count(*) FROM contour.workload_instances WHERE tenant_id={t} AND instance_id={i})=0 AND
@@ -105,10 +105,17 @@ class Observer:
           (SELECT count(*) FROM contour.source_instance_bindings WHERE tenant_id={t} AND collector_id={c} AND source_id={src} AND project_id={p} AND service_id={s} AND environment_id={e} AND deployment_id={d} AND instance_id={i})=1 AND
           (SELECT count(*) FROM contour.source_authorization WHERE tenant_id={t} AND collector_id={c})=1 AND
           (SELECT count(*) FROM contour.source_authorization WHERE tenant_id={t} AND collector_id={c} AND source_id={src} AND technique='gateway' AND parser_profiles=ARRAY['http_json_v1'])=1 AND
-          (SELECT count(*) FROM contour.policy_revisions WHERE tenant_id={t} AND collector_id={c})=1 AND
+          (SELECT count(*) FROM contour.policy_revisions WHERE tenant_id={t} AND collector_id={c})>=1 AND
           (SELECT count(*) FROM contour.policy_revisions WHERE tenant_id={t} AND collector_id={c} AND revision=1 AND signed_envelope=decode('{envelope}','hex'))=1 AND
-          (SELECT count(*) FROM contour.collector_authorization WHERE tenant_id={t} AND collector_id={c} AND enabled AND revoked_at IS NULL AND active_revision=1)=1
+          (SELECT count(*) FROM contour.collector_authorization WHERE tenant_id={t} AND collector_id={c} AND enabled AND revoked_at IS NULL AND active_revision>=1)=1
         THEN 'EXACT' ELSE 'DRIFT' END;""")
+        if status == journal.EXACT:
+            from deploy.pilot import origin_renewal
+            try:
+                _,pending=origin_renewal.artifacts(self.profile)
+                if origin_renewal.history(self.profile,self.psql,pending) is None: return journal.DRIFT
+            except (OSError,ValueError,RuntimeError): return journal.DRIFT
+        return status
 
     def apply(self):
         policy=self.policy() or self._new_policy()

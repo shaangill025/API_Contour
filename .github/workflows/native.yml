@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   native:
-    needs: [business, delivery, local-mvp, gateway, origin, origin-setup, causal-runtime]
+    needs: [business, delivery, local-mvp, gateway, origin, origin-setup, causal-runtime, causal-registry]
     if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - name: Require all prerequisite TLS jobs
-        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' || needs.origin.result != 'success' || needs['origin-setup'].result != 'success' || needs['causal-runtime'].result != 'success' }}
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' || needs.origin.result != 'success' || needs['origin-setup'].result != 'success' || needs['causal-runtime'].result != 'success' || needs['causal-registry'].result != 'success' }}
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,6 +99,26 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -u scripts/test-postgres-tls.py --comparison-store
+
+  causal-registry:
+    name: Causal runtime registry qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Fetch pinned database fixture
+        run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Test qualification driver failures
+        run: python3 -B -m unittest discover -s tests/fixtures/causal-registry -p 'test_registry_driver.py'
+      - name: Qualify causal runtime registry
+        timeout-minutes: 8
+        run: python3 -B scripts/test-postgres-causal-registry.py
 
   causal-runtime:
     name: Fixed Node-RED causal runtime

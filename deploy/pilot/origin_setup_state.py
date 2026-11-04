@@ -20,7 +20,7 @@ SCHEMA_PHASES = PHASES[:4]
 CREDENTIAL_PHASES = PHASES[:5]
 LOGIN_PHASES = PHASES[:6]
 ENROLLMENT_PHASES = PHASES[:15]
-SOURCE_FILES = ('deploy/pilot/origin_enrollment.py', 'deploy/pilot/origin_logins.py', 'deploy/pilot/origin_credentials.py', 'deploy/pilot/origin_setup.py', 'deploy/pilot/origin_setup_state.py',
+SOURCE_FILES = ('deploy/pilot/origin_renewal.py', 'deploy/pilot/origin_enrollment.py', 'deploy/pilot/origin_logins.py', 'deploy/pilot/origin_credentials.py', 'deploy/pilot/origin_setup.py', 'deploy/pilot/origin_setup_state.py',
                 'deploy/pilot/origin_schema.py', 'deploy/pilot/origin_catalog_capture.py',
                 'deploy/pilot/origin_reference_catalog.json',
                 'deploy/pilot/origin_reference_catalog_15.json', 'deploy/pilot/origin_reference_catalog_16.json',
@@ -108,7 +108,7 @@ def _initial(path, state):
         raise
 
 
-def run(profile, operations, *, after_pending=None, bind_sources=None, through_credentials=False, through_logins=False, through_enrollment=False, set_context=None):
+def run(profile, operations, *, after_pending=None, bind_sources=None, through_credentials=False, through_logins=False, through_enrollment=False, set_context=None, after_complete=None, require_enrolled=False):
     """Reconcile fixed ordered phases; operation failures retain the journal.
 
     A phase with no pending intent must be absent; an existing exact state is
@@ -138,8 +138,11 @@ def run(profile, operations, *, after_pending=None, bind_sources=None, through_c
         if os.path.lexists(path):
             state = _read(path, identity, source)
         else:
+            if require_enrolled: raise ValueError('committed origin setup required')
             state = dict(version=1, descriptor=identity, source=source, completed=0, pending=None, credential_digest=None)
             _initial(path, state)
+        if require_enrolled and (state['completed'] != len(ENROLLMENT_PHASES) or state['pending'] is not None):
+            raise ValueError('committed origin setup required')
         if state['completed'] > len(phases):
             raise ValueError('setup prefix cannot inspect later phases')
         if set_context is not None: set_context(state)
@@ -171,5 +174,6 @@ def run(profile, operations, *, after_pending=None, bind_sources=None, through_c
             state['completed'] += 1
             state['pending'] = None
             capture_renew.replace_durable(path, _encode(state))
+        if after_complete is not None: return after_complete(lambda: _source_identity()==source)
     finally:
         os.close(fd)
