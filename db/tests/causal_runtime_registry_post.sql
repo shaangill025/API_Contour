@@ -1,0 +1,121 @@
+-- Synthetic isolated post-18 fixture. Run after causal_runtime_registry_pre.sql
+-- and migration18; each statement runs in its own READ COMMITTED transaction.
+DO $$ DECLARE r text; BEGIN
+ IF (SELECT array_agg(version ORDER BY version) FROM contour.schema_migrations) IS DISTINCT FROM ARRAY(SELECT generate_series(1,18)) THEN RAISE EXCEPTION 'unexpected opt-in ledger'; END IF;
+ IF pg_catalog.pg_has_role('contour_causal_provisioner','contour_runtime','MEMBER') THEN RAISE EXCEPTION 'unexpected inherited runtime role'; END IF;
+ IF NOT has_function_privilege('contour_admin','contour.enroll_origin_credential(uuid,uuid,uuid,bytea)','EXECUTE') OR has_function_privilege('contour_admin','contour.begin_origin_operation(uuid)','EXECUTE') THEN RAISE EXCEPTION 'legacy helper grant changed'; END IF;
+ FOREACH r IN ARRAY ARRAY['causal_leaf_reservations','causal_runtime_profiles','causal_runtime_bindings','causal_runtime_terminal_events'] LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='contour' AND c.relname=r AND c.relrowsecurity AND c.relforcerowsecurity) THEN RAISE EXCEPTION 'missing forced RLS'; END IF;
+  IF has_table_privilege('contour_causal_provisioner','contour.'||r,'SELECT') OR has_table_privilege('contour_causal_provisioner','contour.'||r,'INSERT') OR has_table_privilege('contour_runtime','contour.'||r,'SELECT') OR has_table_privilege('contour_causal_provisioner','contour.'||r,'UPDATE') OR has_table_privilege('contour_causal_provisioner','contour.'||r,'DELETE') OR has_table_privilege('contour_causal_provisioner','contour.'||r,'TRUNCATE') THEN RAISE EXCEPTION 'unexpected registry privilege'; END IF;
+ END LOOP;
+ FOREACH r IN ARRAY ARRAY['contour_causal_provisioner','contour_ingestion','contour_origin_ingress','contour_catalog_worker','contour_catalog_reader'] LOOP
+  IF has_function_privilege(r,'contour.causal_legacy_authorized(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)','EXECUTE') THEN RAISE EXCEPTION 'untrusted legacy helper access'; END IF;
+ END LOOP;
+ IF has_function_privilege('contour_causal_provisioner','contour.causal_legacy_authorized(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)','EXECUTE')
+ OR has_function_privilege('contour_runtime','contour.causal_legacy_authorized(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)','EXECUTE')
+ OR NOT has_function_privilege('contour_owner','contour.causal_legacy_authorized(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)','EXECUTE')
+ THEN RAISE EXCEPTION 'legacy helper privilege drift'; END IF;
+ IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(p.proacl,pg_catalog.acldefault('f',p.proowner))) a WHERE p.oid='contour.causal_legacy_authorized(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid)'::regprocedure AND a.grantee=0) THEN RAISE EXCEPTION 'public helper access'; END IF;
+ IF (SELECT count(*) FROM contour.causal_leaf_reservations WHERE leaf_class='product')<>3 OR NOT EXISTS (SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode(repeat('11',32),'hex') AND leaf_class='product') OR NOT EXISTS (SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode(repeat('22',32),'hex') AND leaf_class='product') THEN RAISE EXCEPTION 'cross-tenant backfill mismatch'; END IF;
+END $$;
+SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000001',false);
+SET ROLE contour_owner;
+DO $$ BEGIN
+ IF contour.causal_legacy_authorized(NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)
+ OR contour.causal_legacy_authorized('f0000000-0000-4000-8000-000000000002','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001') THEN RAISE EXCEPTION 'legacy helper leaked cross tenant'; END IF;
+ IF NOT contour.causal_legacy_authorized('f0000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001') THEN RAISE EXCEPTION 'legacy helper rejected fixed source'; END IF;
+END $$;
+RESET ROLE;
+SET ROLE contour_causal_provisioner;
+DO $$ BEGIN
+ BEGIN PERFORM contour.causal_legacy_authorized(NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL); RAISE EXCEPTION 'direct helper call allowed'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),'node_in','POST','/run','runtime','http_json_v1',clock_timestamp()); RAISE EXCEPTION 'direct write allowed'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+END $$;
+SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'));
+SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'));
+DO $$ BEGIN
+ BEGIN PERFORM contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode(repeat('bb',32),'hex')); RAISE EXCEPTION 'profile conflict accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
+DO $$ BEGIN
+ BEGIN PERFORM contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000502',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')); RAISE EXCEPTION 'unknown profile accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
+-- Wrong scope and artifact are refused, even with valid fixed identities.
+DO $$ BEGIN
+ BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000004','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000002','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('44',32),'hex')); RAISE EXCEPTION 'wrong instance accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
+DO $$ BEGIN
+ BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000004','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode(repeat('bb',32),'hex'),decode(repeat('44',32),'hex')); RAISE EXCEPTION 'wrong artifact accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
+RESET ROLE;
+SET ROLE contour_causal_provisioner; DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000004','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000502',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('44',32),'hex')); RAISE EXCEPTION 'unknown profile enrollment accepted'; EXCEPTION WHEN check_violation THEN NULL; END; END $$; RESET ROLE;
+-- Test immutable profile constraints as its owner, inside rollback. These
+-- fixture-only direct inserts never grant the provisioner table access.
+BEGIN; SET LOCAL ROLE contour_owner;
+DO $$ BEGIN
+ BEGIN INSERT INTO contour.causal_runtime_bindings VALUES ('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000099','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode(repeat('bb',32),'hex'),decode(repeat('dd',32),'hex'),clock_timestamp()); RAISE EXCEPTION 'unknown binding digest accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000502',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),'node_in','POST','/run','runtime','http_json_v1',clock_timestamp()); RAISE EXCEPTION 'unknown profile row accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode(repeat('bb',32),'hex'),'node_in','POST','/run','runtime','http_json_v1',clock_timestamp()); RAISE EXCEPTION 'unknown digest row accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),'node_in','GET','/run','runtime','http_json_v1',clock_timestamp()); RAISE EXCEPTION 'wrong method accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),'node_in','POST','/other','runtime','http_json_v1',clock_timestamp()); RAISE EXCEPTION 'wrong route accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO contour.causal_runtime_profiles VALUES ('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),'node_in','POST','/run','runtime','http_json_v1','infinity'::timestamptz); RAISE EXCEPTION 'nonfinite time accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+END $$;
+ROLLBACK;
+SET ROLE contour_causal_provisioner;
+RESET ROLE;
+BEGIN; SET LOCAL ROLE contour_admin; SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001'); UPDATE contour.collector_authorization SET enabled=false WHERE tenant_id='f0000000-0000-4000-8000-000000000001' AND collector_id='f6000000-0000-4000-8000-000000000001'; COMMIT;
+SET ROLE contour_causal_provisioner; DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000004','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('44',32),'hex')); RAISE EXCEPTION 'disabled collector accepted'; EXCEPTION WHEN check_violation THEN NULL; END; END $$; RESET ROLE;
+BEGIN; SET LOCAL ROLE contour_admin; SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001'); UPDATE contour.collector_authorization SET enabled=true WHERE tenant_id='f0000000-0000-4000-8000-000000000001' AND collector_id='f6000000-0000-4000-8000-000000000001'; COMMIT;
+BEGIN; SET LOCAL ROLE contour_admin; SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001'); UPDATE contour.source_authorization SET parser_profiles=ARRAY['http_xml_v1'] WHERE tenant_id='f0000000-0000-4000-8000-000000000001' AND collector_id='f6000000-0000-4000-8000-000000000001'; COMMIT;
+SET ROLE contour_causal_provisioner; DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000004','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('44',32),'hex')); RAISE EXCEPTION 'wrong parser accepted'; EXCEPTION WHEN check_violation THEN NULL; END; END $$; RESET ROLE;
+BEGIN; SET LOCAL ROLE contour_admin; SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001'); UPDATE contour.source_authorization SET parser_profiles=ARRAY['http_json_v1'] WHERE tenant_id='f0000000-0000-4000-8000-000000000001' AND collector_id='f6000000-0000-4000-8000-000000000001'; COMMIT;
+SET ROLE contour_causal_provisioner;
+-- Both existing product leaves, including another tenant's, are unavailable as exports.
+DO $$ DECLARE leaf text; BEGIN
+ FOREACH leaf IN ARRAY ARRAY['11','22'] LOOP
+  BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat(leaf,32),'hex')); RAISE EXCEPTION 'product leaf accepted as export'; EXCEPTION WHEN unique_violation THEN NULL; END;
+ END LOOP;
+END $$;
+SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('33',32),'hex'));
+SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('33',32),'hex'));
+DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000009','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('99',32),'hex')); RAISE EXCEPTION 'live lifecycle reused'; EXCEPTION WHEN unique_violation THEN NULL; END; END $$;
+RESET ROLE;
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode(repeat('99',32),'hex')) THEN RAISE EXCEPTION 'failed lifecycle reservation retained'; END IF; END $$;
+-- Export→product must also fail in both the original and another tenant.
+SET ROLE contour_admin;
+DO $$ BEGIN
+ BEGIN PERFORM contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000001','fa000000-0000-4000-8000-000000000099','f9000000-0000-4000-8000-000000000001',decode(repeat('33',32),'hex')); RAISE EXCEPTION 'export leaf accepted as product'; EXCEPTION WHEN unique_violation THEN NULL; END;
+END $$;
+RESET ROLE;
+SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000002',false);
+SET ROLE contour_admin;
+DO $$ BEGIN
+ BEGIN PERFORM contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000002','fa000000-0000-4000-8000-000000000098','f9000000-0000-4000-8000-000000000002',decode(repeat('33',32),'hex')); RAISE EXCEPTION 'cross-tenant export accepted as product'; EXCEPTION WHEN unique_violation THEN NULL; END;
+END $$;
+RESET ROLE;
+SET ROLE contour_causal_provisioner;
+SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'));
+DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000002','fc000000-0000-4000-8000-000000000007','f6000000-0000-4000-8000-000000000002','f7000000-0000-4000-8000-000000000002','f1000000-0000-4000-8000-000000000002','f2000000-0000-4000-8000-000000000002','f3000000-0000-4000-8000-000000000002','f4000000-0000-4000-8000-000000000002','f5000000-0000-4000-8000-000000000002','f9000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('77',32),'hex')); RAISE EXCEPTION 'missing current policy accepted'; EXCEPTION WHEN check_violation THEN NULL; END; END $$;
+RESET ROLE;
+BEGIN; SET LOCAL ROLE contour_admin;
+SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000002','f6000000-0000-4000-8000-000000000002');
+INSERT INTO contour.policy_revisions VALUES ('f0000000-0000-4000-8000-000000000002','f6000000-0000-4000-8000-000000000002',1,decode('01','hex'));
+UPDATE contour.collector_authorization SET active_revision=1,enabled=true WHERE tenant_id='f0000000-0000-4000-8000-000000000002' AND collector_id='f6000000-0000-4000-8000-000000000002'; COMMIT;
+BEGIN; SET LOCAL ROLE contour_admin;
+SELECT contour.lock_collector('f0000000-0000-4000-8000-000000000002','f6000000-0000-4000-8000-000000000002');
+UPDATE contour.collector_authorization SET enabled=false,revoked_at=clock_timestamp() WHERE tenant_id='f0000000-0000-4000-8000-000000000002' AND collector_id='f6000000-0000-4000-8000-000000000002'; COMMIT;
+SET ROLE contour_causal_provisioner;
+DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000002','fc000000-0000-4000-8000-000000000007','f6000000-0000-4000-8000-000000000002','f7000000-0000-4000-8000-000000000002','f1000000-0000-4000-8000-000000000002','f2000000-0000-4000-8000-000000000002','f3000000-0000-4000-8000-000000000002','f4000000-0000-4000-8000-000000000002','f5000000-0000-4000-8000-000000000002','f9000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('77',32),'hex')); RAISE EXCEPTION 'revoked collector accepted'; EXCEPTION WHEN check_violation THEN NULL; END; END $$;
+RESET ROLE;
+SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000001',false);
+SET ROLE contour_causal_provisioner;
+BEGIN; SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008','f6000000-0000-4000-8000-000000000003','f7000000-0000-4000-8000-000000000003','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000003','f9000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('88',32),'hex')); ROLLBACK;
+RESET ROLE;
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode(repeat('88',32),'hex')) THEN RAISE EXCEPTION 'rolled-back export leaf retained'; END IF; END $$;
+SET ROLE contour_causal_provisioner;
+SELECT contour.end_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001','runtime_closed');
+DO $$ BEGIN
+ BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('33',32),'hex')); RAISE EXCEPTION 'closed runtime reused'; EXCEPTION WHEN unique_violation THEN NULL; END;
+END $$;
+DO $$ BEGIN BEGIN PERFORM contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000010','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000501',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),decode(repeat('77',32),'hex')); RAISE EXCEPTION 'closed lifecycle reused'; EXCEPTION WHEN unique_violation THEN NULL; END; END $$;
+RESET ROLE;
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode(repeat('77',32),'hex')) THEN RAISE EXCEPTION 'closed replacement retained a leaf claim'; END IF; END $$;
