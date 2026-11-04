@@ -173,6 +173,11 @@ pub struct CausalSession {
     digest: [u8; 32],
 }
 impl CausalSession {
+    /// Compare an operator-configured verified leaf pin without exposing the
+    /// retained credential or constructing a session from request data.
+    pub fn matches_peer(&self, peer: &[u8; 32]) -> bool {
+        self.issue.binding.peer == *peer
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -588,6 +593,11 @@ impl fmt::Debug for CausalInbox {
     }
 }
 impl CausalInbox {
+    /// Return the owned connection to a bounded pool; cancellation/reuse state
+    /// remains on the connection and is not reset by this transfer.
+    pub fn into_database(self) -> ConnectedDatabase {
+        self.connection
+    }
     pub fn new(connection: ConnectedDatabase) -> Self {
         Self { connection }
     }
@@ -1078,6 +1088,8 @@ mod tests {
         let v = fixture();
         let mut r = request(&v, "grant", "policy");
         let saved = session(r.clone());
+        assert!(saved.matches_peer(&[3; 32]));
+        assert!(!saved.matches_peer(&[4; 32]));
         let value = json!({"wire_version":1,"batch_id":ID,"tenant_id":ID,"runtime_id":ID,"session_epoch":u64::MAX,"first_seq":1,"last_seq":1,"events":[{"kind":"root","event_id":"11111111111111111111111111111111","seq":1,"root":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]});
         let raw = serde_json::to_vec(&value).unwrap();
         let batch = CausalEventBatch::from_wire_json(&raw).unwrap();
