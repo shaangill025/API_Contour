@@ -107,6 +107,50 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[2].args[0], ['docker','rm','-f',owned_id])
         self.assertFalse(any(call.args[0] == ['docker','rm','-f','b'*64] for call in run.call_args_list))
 
+    def test_missing_normative_fixture_fails_before_any_process(self):
+        with tempfile.TemporaryDirectory() as outer, \
+             mock.patch.object(driver, 'ROOT', Path(outer)), \
+             mock.patch.object(driver.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'normative causal fixture missing'):
+                driver.qualify()
+            run.assert_not_called()
+
+    def test_symlinked_normative_parent_fails_before_process(self):
+        parts = ('docs','specification','fixtures')
+        for index in range(len(parts)):
+            with self.subTest(ancestor=parts[index]), tempfile.TemporaryDirectory() as outer, tempfile.TemporaryDirectory() as external:
+                root = Path(outer)
+                link = root.joinpath(*parts[:index+1]); link.parent.mkdir(parents=True, exist_ok=True)
+                fixture = Path(external).joinpath(*parts[index+1:])/'causal-events.json'
+                fixture.parent.mkdir(parents=True, exist_ok=True); fixture.write_text('synthetic')
+                link.symlink_to(external, target_is_directory=True)
+                with mock.patch.object(driver, 'ROOT', root), \
+                     mock.patch.object(driver.subprocess, 'run', side_effect=AssertionError('process ran')) as run:
+                    with self.assertRaisesRegex(RuntimeError, 'symlink'):
+                        driver.qualify()
+                    run.assert_not_called()
+
+    def test_normative_fixture_mutation_fails_complete_run(self):
+        with tempfile.TemporaryDirectory() as outer:
+            root = Path(outer)
+            fixture = root/'docs/specification/fixtures/causal-events.json'
+            fixture.parent.mkdir(parents=True); fixture.write_text('before')
+            ok = subprocess.CompletedProcess([], 0, stdout=b'')
+            def make_certs(folder):
+                for name in ('ca','unrelated-ca','server','server-key','wrong-name','wrong-name-key'):
+                    (folder/name).write_text('synthetic')
+            def case(name, _run_id, mounts, _args, **_kwargs):
+                if name == 'offline':
+                    self.assertIn(str(fixture)+':/work/docs/specification/fixtures/causal-events.json:ro', mounts)
+                    fixture.write_text('changed')
+            with mock.patch.object(driver, 'ROOT', root), \
+                 mock.patch.object(driver.subprocess, 'run', return_value=ok), \
+                 mock.patch.object(driver, 'certificates', side_effect=make_certs), \
+                 mock.patch.object(driver, 'container', side_effect=case):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, 'source changed'):
+                        driver.qualify()
+
     def test_changed_source_prevents_pass(self):
         with tempfile.TemporaryDirectory() as outer:
             directory = Path(outer)/'owned'; directory.mkdir()
