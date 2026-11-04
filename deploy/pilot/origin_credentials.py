@@ -68,7 +68,7 @@ def _dir(path):
         raise ValueError('credential directory')
 
 
-def _walk(root):
+def _walk(root, allow_renewal=False):
     result=set()
     for directory, dirs, files in os.walk(root, followlinks=False):
         base=Path(directory)
@@ -78,7 +78,14 @@ def _walk(root):
             path=base/name
             if base == root and name in ('setup.lock','setup.json'):
                 result.add(name); continue
-            _file(path); result.add(str(path.relative_to(root)))
+            relative=str(path.relative_to(root))
+            if allow_renewal and relative=='capture/private/origin-renew.lock':
+                info=os.lstat(path)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1: raise ValueError('renewal lock drift')
+            elif allow_renewal and relative=='capture/private/origin-renew.pending':
+                _file(path,9*((capture_renew.MAX_ENVELOPE+2)//3)*4+4096)
+            else: _file(path)
+            result.add(relative)
     return result
 
 
@@ -90,12 +97,14 @@ class Credentials:
         if profile is not capture_profiles.ORIGIN_PILOT: raise ValueError('unsupported origin profile')
         self.profile, self.ca_cert, self.ca_key = profile, Path(ca_cert), Path(ca_key)
         self.allow_observer_policy = False
+        self.allow_renewal_artifacts = frozenset()
 
     def inspect(self):
         root=self.profile.state
         try:
             _dir(root)
-            entries = _walk(root) - {'setup.lock','setup.json'}
+            entries = _walk(root, bool(self.allow_renewal_artifacts)) - {'setup.lock','setup.json'}
+            entries -= self.allow_renewal_artifacts
             if self.allow_observer_policy: entries.discard('capture/private/observer-policy.json')
             if not entries: return state.ABSENT
             if entries != _expected(): return state.DRIFT

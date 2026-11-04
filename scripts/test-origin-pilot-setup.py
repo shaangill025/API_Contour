@@ -140,7 +140,7 @@ def main():
                 if credential_fixture(profile,cert,key,wrong_ca_cert=wrong_cert)!='synthetic origin credential fixture passed':
                     raise RuntimeError('credential negative matrix incomplete')
                 if fixture(sql,cert,key,sensitive_execute=sensitive_with_schema_check,authenticate=authenticate,
-                           wrong_database_execute=wrong_database,enrollment=True)!='origin schema preparation fault fixture passed':
+                           wrong_database_execute=wrong_database,enrollment=True,renewal=True)!='origin schema preparation fault fixture passed':
                     raise RuntimeError('combined PostgreSQL setup matrix incomplete')
         finally:
             ca_cleanup=scratch is not None and not os.path.lexists(scratch)
@@ -168,7 +168,7 @@ def main():
             cleanup_ok=True
         if not cleanup_ok or audit_failed: raise RuntimeError('owned fixture cleanup or logging audit failed')
     if source_snapshot()!=before: raise RuntimeError('qualification source changed during execution')
-    print('Synthetic internal origin setup qualification passed; runtime capture and platform attestation are not qualified.')
+    print('Synthetic internal origin setup and committed renewal qualification passed; runtime capture and platform attestation are not qualified.')
 
 
 if __name__=='__main__':

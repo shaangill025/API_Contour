@@ -9,10 +9,12 @@ from pathlib import Path
 from unittest import mock
 
 from deploy.local import capture_profiles
-from deploy.pilot import origin_credentials, origin_enrollment, origin_enrollment_fixture, origin_logins, origin_schema, origin_setup, origin_setup_state
+from deploy.pilot import origin_credentials, origin_enrollment, origin_enrollment_fixture, origin_logins, origin_renewal_fixture, origin_schema, origin_setup, origin_setup_state
 
 
-def run_cases(execute, ca_cert=None, ca_key=None, authenticate=None, sensitive_execute=None, wrong_database_execute=None, enrollment=False):
+def run_cases(execute, ca_cert=None, ca_key=None, authenticate=None, sensitive_execute=None, wrong_database_execute=None, enrollment=False, renewal=False):
+    if type(renewal) is not bool or (renewal and not enrollment):
+        raise ValueError('renewal fixture requires enrollment')
     if type(enrollment) is not bool or (enrollment and authenticate is None):
         raise ValueError('enrollment fixture requires authentication callbacks')
     if authenticate is not None and (ca_cert is None or ca_key is None or not callable(authenticate) or not callable(sensitive_execute)):
@@ -264,4 +266,6 @@ def run_cases(execute, ca_cert=None, ca_key=None, authenticate=None, sensitive_e
                         credential.allow_observer_policy=True
                         if credential.commitment()!=identity:
                             raise AssertionError('enrollment changed credential identity')
+                        if renewal:
+                            origin_renewal_fixture.run_cases(profile,ca_cert,ca_key,execute,sensitive_execute,authenticate)
     return 'origin schema preparation fault fixture passed'
