@@ -27,13 +27,15 @@ class Fixture(unittest.TestCase):
                 os.chdir(previous)
     def test_inherited_image_cannot_activate_the_sensor_mode(self):
         environment = runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
-        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1'}):
+        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1'}):
             ordinary = environment('inert', '/tmp/unused-target')
             self.assertNotIn('CONTOUR_ORIGIN_SENSOR_IMAGE', ordinary)
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', ordinary)
+            self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', ordinary)
             selected = environment('inert', '/tmp/unused-target', 'contour-origin-sensor-fixture:selected')
             self.assertEqual(selected['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:selected')
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', selected)
+            self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', selected)
             self.assertEqual(os.environ['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:stale')
     def test_generated_production_envoy_keeps_exact_overwrite(self):
         cfg = fixture.generated_edge(12345)
@@ -68,6 +70,48 @@ class Fixture(unittest.TestCase):
         unattributed=[row('request','request',None),row('response','response',None)]
         fixture.assert_transition(unattributed,set(),'a',allow_unattributed=True)
         with self.assertRaises(AssertionError): fixture.assert_transition(unattributed,set(),'a')
+    def test_replacement_ownership_and_history_fail_closed(self):
+        info={'Id':'a'*64,'Name':'/owned','Config':{'Labels':{'org.apicontour.origin-replacement':'label'}}}
+        fixture.assert_owned_replacement(info,'owned','label')
+        for bad in ({**info,'Id':'truncated'}, {**info,'Name':'/foreign'}, {**info,'Config':{'Labels':{}}}):
+            with self.assertRaises(AssertionError): fixture.assert_owned_replacement(bad,'owned','label')
+        def row(leaf,record):
+            result=[None]*22; result[0]=leaf; result[13]=record; return result
+        old=row('old','one'); peer=row('peer','two'); new=row('new','three')
+        fixture.assert_replacement_history([old,peer,new],{'one':old,'two':peer},{'one','two','three'},'old')
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([old,peer,new,row('old','four')],{'one':old}, {'one','two','three'},'old')
+        altered=old.copy(); altered[1]='changed'
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([altered,peer,new],{'one':old}, {'one','two','three'},'old')
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([peer,new],{'one':old}, {'one','two','three'},'old')
+
+    def test_cleanup_reconciles_late_creation_and_fails_if_absence_uncertain(self):
+        name = 'owned'; label = 'label'; ident = 'a' * 64
+        info = {'Id':ident,'Name':'/'+name,'Config':{'Labels':{'org.apicontour.origin-replacement':label}}}
+        checks = iter([None, info])
+        removed = []
+        fixture.cleanup_fixture_containers([{'name':name,'id':None}], label,
+            lambda _: next(checks), removed.append, lambda _: False,
+            attempts=2, pause=lambda: None)
+        self.assertEqual(removed, [ident])
+        with self.assertRaisesRegex(RuntimeError, 'uncertain'):
+            fixture.cleanup_fixture_containers([{'name':name,'id':None}], label,
+                lambda _: None, removed.append, lambda _: False,
+                attempts=2, pause=lambda: None)
+
+    def test_cleanup_requires_owned_identity_and_continues_after_failure(self):
+        ident = 'a' * 64
+        info = {'Id':ident,'Name':'/owned','Config':{'Labels':{'org.apicontour.origin-replacement':'label'}}}
+        removed = []
+        resources = [{'name':'owned','id':ident}, {'name':'foreign','id':'b'*64}]
+        with self.assertRaisesRegex(RuntimeError, 'uncertain or failed'):
+            fixture.cleanup_fixture_containers(resources, 'label', lambda _: info,
+                removed.append, lambda _: False, attempts=1)
+        self.assertEqual(removed, [ident])
+        with self.assertRaisesRegex(RuntimeError, 'uncertain or failed'):
+            fixture.cleanup_fixture_containers([{'name':'owned','id':'b'*64}], 'label',
+                lambda _: info, removed.append, lambda _: False, attempts=1)
+        self.assertEqual(removed, [ident])
+
     def test_stock_flow_has_fixed_identity_and_target(self):
         nodes={node['id']:node for node in fixture.flows('b'*64, 'a')}
         self.assertEqual(nodes['send']['url'],'https://127.0.0.1:9443/pilot')

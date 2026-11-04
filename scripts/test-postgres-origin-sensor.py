@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -111,8 +112,50 @@ def assert_concurrent(rows, before, a, b):
     if observed != shapes: raise AssertionError('concurrent shape attribution mismatch')
 
 
+
+def assert_owned_replacement(info, name, label):
+    if (not re.fullmatch('[0-9a-f]{64}',info.get('Id','')) or info.get('Name')!='/'+name
+        or (info.get('Config',{}).get('Labels') or {}).get('org.apicontour.origin-replacement')!=label):
+        raise AssertionError('replacement container ownership mismatch')
+
+
+def cleanup_fixture_containers(resources, label, inspect, remove, remains, attempts=20, pause=lambda: time.sleep(.1)):
+    errors = []
+    for resource in reversed(resources):
+        try:
+            name, known_id = resource['name'], resource['id']
+            info = None
+            for attempt in range(attempts):
+                info = inspect(name)
+                if info is not None: break
+                if known_id is not None: break
+                if attempt + 1 < attempts: pause()
+            if info is None:
+                if known_id is None:
+                    raise RuntimeError('fixture container creation uncertain: ' + name)
+                if remains(known_id): raise RuntimeError('fixture container remained')
+                continue
+            assert_owned_replacement(info, name, label)
+            if known_id is not None and info['Id'] != known_id:
+                raise RuntimeError('fixture container identity changed')
+            remove(info['Id'])
+            if remains(info['Id']): raise RuntimeError('fixture container remained')
+        except Exception as exc:
+            errors.append(exc)
+    if errors: raise RuntimeError('fixture container cleanup uncertain or failed') from errors[0]
+
+
+def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
+    if any(row[0]==old_leaf for row in rows if row[13] not in before_old_attempt):
+        raise AssertionError('closed lifecycle received new proof')
+    actual={row[13]:row for row in rows}
+    if any(actual.get(key)!=value for key,value in prior.items()):
+        raise AssertionError('historical proof changed')
+
+
 def run_cases(container, execute, setup, directory, environment):
     """Requires migrations 1,2,3,4,13-17 and origin login, and built origin_sensor_probe."""
+    replacement = environment.get('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE') == '1'
     fixture_image = environment['CONTOUR_ORIGIN_SENSOR_IMAGE']
     if not fixture_image.startswith('contour-origin-sensor-fixture:'):
         raise ValueError('fixture image tag invalid')
@@ -202,12 +245,13 @@ def run_cases(container, execute, setup, directory, environment):
             fingerprint = cert_hash(name)
             execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s'); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex')); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex')); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,tenant,ITEM,origin_service,ITEM,origin_deployment,instance, tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,credential,lifecycle,fingerprint,tenant,grant,lifecycle,collector,source,ITEM,ITEM,ITEM,ITEM))
             expected[fingerprint] = (instance,lifecycle,credential,grant)
-        common=['--pull','never','--network','container:'+container,'--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','256m','--log-driver','local']
+        common=['--label','org.apicontour.origin-replacement='+prefix,'--pull','never','--network','container:'+container,'--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','256m','--log-driver','local']
         def child(name, mounts, image, argv, env_names=(), entrypoint=None):
-            cname=prefix+'-'+name; resources.append(('container',cname))
+            cname=prefix+'-'+name
             args=['docker','run','-i','--name',cname,*common]
             for key in env_names: args += ['-e',key]
             if entrypoint: args += ['--entrypoint',entrypoint]
+            resources.append({'name':cname,'id':None})
             return start([*args,*mounts,image,*argv]),cname
         def files(*names):
             return sum((mount(folder/n,'/fixture/'+n) for n in names),[])
@@ -226,15 +270,17 @@ def run_cases(container, execute, setup, directory, environment):
         gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json'])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
-        edge=prefix+'-edge'; resources.append(('container',edge))
+        edge=prefix+'-edge'
         edge_mounts = files('edge.crt','edge.key','forwarder.crt','forwarder.key','ca.crt','envoy.json')
-        docker('run','-d','--name',edge,*common,*edge_mounts,ENVOY,'envoy','-c','/fixture/envoy.json','--log-level','error','--concurrency','1')
+        resources.append({'name':edge,'id':None})
+        resources[-1]['id']=docker('run','-d','--name',edge,*common,*edge_mounts,ENVOY,'envoy','-c','/fixture/envoy.json','--log-level','error','--concurrency','1')
         nodes=[]
         for name,other,port in [('a','b',1880),('b','a',1881)]:
             flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash(other),name)))
-            cname=prefix+'-'+name; resources.append(('container',cname))
+            cname=prefix+'-'+name
             mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(name+'.crt'),'/fixture/client.crt')+mount(folder/(name+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
-            docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
+            resources.append({'name':cname,'id':None})
+            resources[-1]['id']=docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
             nodes.append((cname,port))
         def trigger(node,mode,port,extra=''):
             result=docker('exec',node,'node','/fixture/trigger.js',mode,str(port),extra,seconds=10)
@@ -313,6 +359,65 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         drain()
         final_rows=snapshot(); assert_proofs(final_rows,expected,origin_service,origin_deployment,source)
         if len(final_rows) != 30: raise AssertionError('final record count mismatch')
+        if replacement:
+            # Controlled operator transition: Docker inspection is fixture evidence,
+            # not platform attestation or proof of host PID/IP allocator reuse.
+            def inspected(name):
+                result=json.loads(docker('inspect',name))
+                if len(result)!=1: raise AssertionError('ambiguous container inspection')
+                return result[0]
+            old=inspected(nodes[0][0]); assert_owned_replacement(old,nodes[0][0],prefix)
+            peer=inspected(nodes[1][0]); assert_owned_replacement(peer,nodes[1][0],prefix)
+            namespace=inspected(container)
+            addresses={name:network['IPAddress'] for name,network in namespace['NetworkSettings']['Networks'].items()}
+            if len(addresses)!=1 or not all(addresses.values()): raise AssertionError('missing shared network address')
+            def durable_history():
+                return json.loads(execute("""SELECT coalesce(json_agg(json_build_array(p.record_id,to_jsonb(p),to_jsonb(b),encode(d.checked_batch,'hex'),to_jsonb(m)) ORDER BY p.record_id),'[]'::json)
+FROM contour.origin_proofs p JOIN contour.ingestion_batches b USING (tenant_id,collector_id,batch_id)
+JOIN contour.ingestion_payloads d USING (tenant_id,collector_id,batch_id)
+JOIN contour.ingestion_v2_metadata m USING (tenant_id,collector_id,batch_id,record_id)
+WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s','hex'),decode('%s','hex'));""" % (tenant,collector,cert_hash('a'),cert_hash('b'))))
+            oldrows={row[13]:row for row in final_rows if row[0] in (cert_hash('a'),cert_hash('b'))}
+            durable_before=durable_history()
+            if not durable_before or not {cert_hash('a'),cert_hash('b')} <= {row[0] for row in oldrows.values()}: raise AssertionError('missing original proofs')
+            old_lifecycle=expected[cert_hash('a')][1]
+            execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.end_origin('%s','lifecycle_closed','%s');" % (tenant,tenant,old_lifecycle))
+            docker('rm','-f',old['Id']); resources.remove(next(resource for resource in resources if resource['name']==nodes[0][0]))
+            certificate('c','instance-c','clientAuth')
+            if cert_hash('c') in expected: raise AssertionError('replacement leaf reused')
+            instance,lifecycle,credential,grant=['00000000-0000-0000-0000-%012x' % (0xd120+n) for n in range(4)]
+            execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s'); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('cc',32),'hex')); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex')); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,tenant,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,credential,lifecycle,cert_hash('c'),tenant,grant,lifecycle,collector,source,ITEM,ITEM,ITEM,ITEM))
+            expected[cert_hash('c')]=(instance,lifecycle,credential,grant)
+            def replacement_node(name,leaf,port):
+                cname=prefix+'-'+name
+                flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash('b'),'a')))
+                mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(leaf+'.crt'),'/fixture/client.crt')+mount(folder/(leaf+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
+                resources.append({'name':cname,'id':None})
+                resources[-1]['id']=docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
+                until=time.monotonic()+30
+                while True:
+                    try: trigger(cname,'ready',port); break
+                    except RuntimeError:
+                        if time.monotonic()>=until: raise AssertionError('replacement listener unavailable')
+                        time.sleep(.1)
+                return cname
+            newname=replacement_node('c','c',1880); new=inspected(newname); assert_owned_replacement(new,newname,prefix)
+            if old['Id']==new['Id'] or old['State']['StartedAt']==new['State']['StartedAt'] or old['HostConfig']['NetworkMode']!=new['HostConfig']['NetworkMode'] or new['HostConfig']['NetworkMode']!='container:'+container:
+                raise AssertionError('replacement process identity or network mismatch')
+            if {name:network['IPAddress'] for name,network in inspected(container)['NetworkSettings']['Networks'].items()}!=addresses: raise AssertionError('shared address changed')
+            before={row[13] for row in snapshot()}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
+            before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
+            oldprobe=replacement_node('old-leaf','a',1882)
+            before={row[13] for row in snapshot()}; trigger(oldprobe,'normal',1882); drain()
+            rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
+            assert_replacement_history(rows,oldrows,before,cert_hash('a'))
+            fresh=[row for row in rows if row[13] not in before]
+            if len(fresh)!=2 or any(row[20]!='unattributed' for row in fresh):
+                raise RuntimeError('stale-leaf ingress outcome unavailable: explicit resolution diagnostic required')
+            assert_transition(rows,before,cert_hash('a'),allow_unattributed=True)
+            if durable_history()!=durable_before: raise AssertionError('durable historical evidence changed')
+            before={row[13] for row in rows}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
+            print('Operator-controlled replacement retained historical attribution on the same shared namespace/address/port; allocator and host PID reuse not tested',flush=True)
         # Stop the gateway before shutting down the origin HTTP server, then
         # demand its normal two-phase cancellation and database cleanup.
         gateway.stdin.write('STOP\n'); gateway.stdin.flush(); gateway.wait(timeout=5)
@@ -332,14 +437,22 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         errors=[]
         # Remove only containers created by this fixture before waiting for
         # attached Docker clients. Container PID 1 need not handle SIGTERM.
-        for kind,name in reversed(resources):
-            try:
-                if kind != 'container': raise RuntimeError('unexpected fixture resource')
-                docker('rm','-f',name)
-            except Exception as exc: errors.append(exc)
+        def inspect_resource(name):
+            result=subprocess.run(['docker','inspect',name],capture_output=True,text=True,timeout=30,env=environment,cwd=ROOT)
+            if result.returncode:
+                if re.fullmatch(r'Error: No such object: '+re.escape(name)+r'\s*',result.stderr): return None
+                raise RuntimeError('fixture container inspection failed')
+            infos=json.loads(result.stdout)
+            if len(infos)!=1: raise RuntimeError('ambiguous fixture container')
+            return infos[0]
+        try:
+            cleanup_fixture_containers(resources, prefix, inspect_resource,
+                lambda ident: docker('rm','-f',ident),
+                lambda ident: bool(docker('ps','-aq','--no-trunc','--filter','id='+ident)))
+        except Exception as exc: errors.append(exc)
         try:
             remaining=set(docker('ps','-a','--format','{{.Names}}').splitlines())
-            if any(name in remaining for kind,name in resources):
+            if any(resource['name'] in remaining for resource in resources):
                 errors.append(RuntimeError('fixture container remained'))
         except Exception as exc: errors.append(exc)
         for p in reversed(processes):
@@ -355,6 +468,6 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         for p in processes:
             if p.stdout and not p.stdout.closed: p.stdout.close()
         if errors:
-            failure = RuntimeError('origin sensor fixture cleanup failed')
+            failure = RuntimeError('origin sensor fixture cleanup failed or container creation uncertain')
             if prior is not None: raise BaseExceptionGroup('fixture and cleanup failed', [prior, failure])
             raise failure from errors[0]
