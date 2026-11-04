@@ -1,8 +1,8 @@
 //! Fixed slots bound potentially live sessions across receiver cancellation.
-use contour_core::{Batch, BatchV2, PolicyKeys};
+use contour_core::{Batch, BatchV2, CausalGrantKeys, PolicyKeys};
 use contour_postgres::{
-    AuthorityError, AuthorityRead, AuthorityReadRequest, ConnectedDatabase, DatabaseSettings,
-    DurableReceipt, SubmitError, TrustedCa,
+    AuthorityError, AuthorityRead, AuthorityReadRequest, CausalError, CausalInbox, CausalReceipt,
+    CausalSession, ConnectedDatabase, DatabaseSettings, DurableReceipt, SubmitError, TrustedCa,
 };
 use std::sync::{Arc, Mutex};
 use tokio::{
@@ -25,6 +25,13 @@ pub(crate) enum PoolError {
     Closed,
 }
 enum Job {
+    Causal(
+        Arc<CausalSession>,
+        [u8; 32],
+        Vec<u8>,
+        Arc<CausalGrantKeys>,
+        oneshot::Sender<Result<CausalReceipt, CausalError>>,
+    ),
     Submit(
         Batch,
         [String; 2],
@@ -45,6 +52,10 @@ enum Job {
     ),
 }
 enum Outcome {
+    Causal(
+        oneshot::Sender<Result<CausalReceipt, CausalError>>,
+        Result<CausalReceipt, CausalError>,
+    ),
     Submit(
         oneshot::Sender<Result<DurableReceipt, SubmitError>>,
         Result<DurableReceipt, SubmitError>,
@@ -57,6 +68,9 @@ enum Outcome {
 impl Outcome {
     fn send(self) {
         match self {
+            Self::Causal(reply, result) => {
+                let _ = reply.send(result);
+            }
             Self::Submit(reply, result) => {
                 let _ = reply.send(result);
             }
@@ -185,6 +199,21 @@ impl DatabasePool {
             closed: ledger.closed,
         }
     }
+    pub(crate) fn submit_causal(
+        &self,
+        session: Arc<CausalSession>,
+        peer: [u8; 32],
+        bytes: Vec<u8>,
+        grant_keys: Arc<CausalGrantKeys>,
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<CausalReceipt, CausalError>>, PoolError> {
+        let (reply, receive) = oneshot::channel();
+        self.start(
+            Job::Causal(session, peer, bytes, grant_keys, reply),
+            deadline,
+        )?;
+        Ok(receive)
+    }
     pub(crate) fn submit(
         &self,
         batch: Batch,
@@ -259,6 +288,23 @@ impl DatabasePool {
                 None => settings.connect_single_until(&trust, deadline).await,
             };
             let outcome = match job {
+                Job::Causal(session, peer, bytes, grant_keys, reply) => {
+                    let result = match connected {
+                        Ok(connection) => {
+                            let mut inbox = CausalInbox::new(connection);
+                            let result = inbox
+                                .accept_until(&session, &peer, &bytes, &grant_keys, &keys, deadline)
+                                .await;
+                            connected = Ok(inbox.into_database());
+                            result
+                        }
+                        Err(error) => {
+                            connected = Err(error);
+                            Err(CausalError::Database)
+                        }
+                    };
+                    Outcome::Causal(reply, result)
+                }
                 Job::Submit(batch, identity, reply) => {
                     let result = match &mut connected {
                         Ok(session) => {

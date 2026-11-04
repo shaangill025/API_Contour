@@ -24,7 +24,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, timeout_at},
 };
-type Reply = Response<Full<Bytes>>;
+pub(crate) type Reply = Response<Full<Bytes>>;
 const BODY_LIMIT: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +75,9 @@ impl PrincipalRegistry {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct HttpLimits {
-    connections: usize,
-    database_sessions: usize,
-    deadline: Duration,
+    pub(crate) connections: usize,
+    pub(crate) database_sessions: usize,
+    pub(crate) deadline: Duration,
 }
 impl HttpLimits {
     pub fn new(connections: usize, deadline: Duration) -> Result<Self, IngressError> {
@@ -465,7 +465,7 @@ async fn authority_response(
         ),
     }
 }
-fn reply(status: StatusCode, value: serde_json::Value) -> Result<Reply, IngressError> {
+pub(crate) fn reply(status: StatusCode, value: serde_json::Value) -> Result<Reply, IngressError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| IngressError::Connection)?;
     Response::builder()
         .status(status)
@@ -474,13 +474,18 @@ fn reply(status: StatusCode, value: serde_json::Value) -> Result<Reply, IngressE
         .body(Full::new(Bytes::from(bytes)))
         .map_err(|_| IngressError::Connection)
 }
-fn error(status: StatusCode, code: &str, retryable: bool, id: &str) -> Result<Reply, IngressError> {
+pub(crate) fn error(
+    status: StatusCode,
+    code: &str,
+    retryable: bool,
+    id: &str,
+) -> Result<Reply, IngressError> {
     reply(
         status,
         json!({"code":code,"message":"Request could not be completed","request_id":id,"retryable":retryable}),
     )
 }
-fn request_id() -> Result<String, IngressError> {
+pub(crate) fn request_id() -> Result<String, IngressError> {
     let mut bytes = [0u8; 16];
     SystemRandom::new()
         .fill(&mut bytes)
