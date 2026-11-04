@@ -24,7 +24,12 @@ def command(args, *, timeout=30, expected=0):
 
 
 def snapshot():
-    paths = [*ROOT.joinpath('collectors/nodered').rglob('*'),
+    normative = ROOT / 'docs/specification/fixtures/causal-events.json'
+    if any(p.is_symlink() for p in (ROOT/'docs', ROOT/'docs/specification', ROOT/'docs/specification/fixtures')):
+        raise RuntimeError('symlink in normative causal fixture path')
+    if normative.is_symlink() or not normative.is_file():
+        raise RuntimeError('normative causal fixture missing or not a regular file')
+    paths = [normative, *ROOT.joinpath('collectors/nodered').rglob('*'),
              *ROOT.joinpath('tests/fixtures/nodered-causal').rglob('*'),
              ROOT / 'scripts/test-nodered-causal.py', ROOT / '.github/workflows/native.yml']
     result = {}
@@ -126,7 +131,8 @@ def qualify():
             command(['docker','image','inspect',IMAGE])
         # Offline modules need the same directory hierarchy as their relative requires.
         mounts=['-v',str(ROOT/'tests/fixtures/nodered-causal')+':/work/tests/fixtures/nodered-causal:ro',
-                '-v',str(ROOT/'collectors/nodered')+':/work/collectors/nodered:ro']
+                '-v',str(ROOT/'collectors/nodered')+':/work/collectors/nodered:ro',
+                '-v',str(ROOT/'docs/specification/fixtures/causal-events.json')+':/work/docs/specification/fixtures/causal-events.json:ro']
         container('offline',run_id,mounts,['/work/tests/fixtures/nodered-causal/complete-offline-suite.js'],timeout=180)
         certs=temp/'certificates'; certs.mkdir(); certificates(certs)
         for case in ('http-regression','https','wrong-ca','wrong-name'):

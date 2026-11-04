@@ -11,7 +11,7 @@ const cases = [
     ...['catch-private-caller-offline.js','catch-compiler-apply-offline.js','node-source-transform-offline.js'].map(x=>[x,node]),
     ...['normal-predeliver-reentry-offline.js','private-runtime-normal-entry-offline.js'].map(x=>[x,hooks,node]),
     ...['flow-claim-offline.js','lexical-bridge-offline.js','catch-lexical-bridge-offline.js'].map(x=>[x,hooks,node,flow]),
-    ...['catch-entry-model-offline.js','catch-literal-model-offline.js','error-profile-offline.js','error-commonjs-offline.js'].map(x=>[x])
+    ...['catch-entry-model-offline.js','catch-literal-model-offline.js','error-profile-offline.js','error-commonjs-offline.js','causal-codec-offline.js'].map(x=>[x])
 ];
 for (const [file,...args] of cases) {
     process.stdout.write('OFFLINE '+file+'\n');
