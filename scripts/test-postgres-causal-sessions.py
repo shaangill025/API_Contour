@@ -1,8 +1,8 @@
-"""Barrier-based SQL race helpers for an owner-supplied disposable PostgreSQL.
+"""Qualify internal causal sessions in one disposable isolated PostgreSQL.
 
-No database is started here. The caller supplies a psql argv and complete fixed
-synthetic SQL statements. Statements must include tenant/role setup; they must
-not contain real signed material. Each contender runs in a fresh transaction.
+The default command runs SQL fixtures and deterministic races in fresh cloned
+databases. Helper callers can supply their own disposable database and psql
+argv. All claims are synthetic; no signature, TLS or runtime is exercised.
 """
 import os
 import re
@@ -61,7 +61,7 @@ def race(psql_argv, winner_sql, contender_sql, retry_sql, *, rollback=False,
         selector.close()
         if process.poll() is None:
             process.kill()
-            process.communicate()
+            process.communicate(timeout=5)
 
 # Each scenario requires a freshly provisioned disposable database after
 # causal_session_setup.sql and migration 19 (without causal_session_basic.sql).
@@ -210,7 +210,7 @@ def run_scenario(psql_argv, execute, scenario):
             for process in (winner, rival):
                 if process is not None and process.poll() is None:
                     process.kill()
-                    process.communicate()
+                    process.communicate(timeout=5)
     elif scenario in ('cas_issue', 'disable_issue', 'revoke_issue'):
         # Legacy administrative CAS owns C without Q. An issuer can take Q and
         # leaf but must fail immediately on C; after CAS it cannot use old head.
@@ -219,3 +219,232 @@ def run_scenario(psql_argv, execute, scenario):
         _assert_rows(execute, 0, 0)
     else:
         raise ValueError('unknown scenario: ' + scenario)
+
+# Self-contained disposable qualification. The registry helper supplies the
+# pinned image, checked reads, typed diagnostics and ownership-safe cleanup.
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import signal
+import sys
+
+ROOT = Path(__file__).absolute().parent.parent
+PROVISIONS = ('approval','authority','catalog','comparison','declared','human','origin_ingress','review','v2_ingress')
+MIGRATIONS = ('0001_identity','0002_policy','0003_ingestion','0004_catalog','0005_declared',
+              '0006_approval','0007_comparison','0008_review','0009_human','0010_public_contracts',
+              '0011_import_selectors','0012_public_comparisons','0013_instance_registry','0014_observation_evidence')
+OPT_INS = ('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs',
+           '0018_causal_runtime_registry','0019_causal_sessions')
+TERMINALS = ('runtime_closed','export_revoked','credential_revoked','lifecycle_closed')
+SCENARIOS = (('issue_issue','rollback') + TERMINALS + tuple('issue_then_'+x for x in TERMINALS)
+             + ('issue_cas','issue_disable','issue_revoke','cas_issue','disable_issue','revoke_issue'))
+SOURCE_PATHS = (('db/bootstrap.sql',) + tuple('db/provision_'+x+'.sql' for x in PROVISIONS)
+                + tuple('db/migrations/'+x+'.sql' for x in MIGRATIONS)
+                + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS)
+                + ('db/tests/causal_runtime_registry_pre.sql','db/tests/causal_runtime_registry_post.sql',
+                   'db/tests/causal_session_setup.sql','db/tests/causal_session_basic.sql',
+                   'db/tests/causal_session_clock.sql','scripts/test-postgres-causal-registry.py',
+                   'scripts/test-postgres-causal-sessions.py',
+                   'tests/fixtures/causal-registry/test_registry_driver.py',
+                   'tests/fixtures/causal-sessions/test_session_driver.py',
+                   'collectors/nodered/qualified-runtime-profile.json',
+                   'collectors/nodered/error-integration/profile.js','.github/workflows/native.yml'))
+
+
+def checked_source(relative):
+    """Fail closed on missing files and symlinks in all absolute ancestors."""
+    path = ROOT / relative
+    for component in (path, *path.parents):
+        if component.is_symlink():
+            raise ValueError('symlink in qualification source: ' + relative)
+    if not path.is_file():
+        raise ValueError('qualification source missing: ' + relative)
+    return path.read_bytes()
+
+
+def source_snapshot():
+    # Fixed lists ensure missing required files fail; reject additional migration
+    # or provisioning SQL instead of silently omitting it from the snapshot.
+    for pattern, expected in (
+        ('db/provision_*.sql', {'db/provision_'+x+'.sql' for x in PROVISIONS}),
+        ('db/migrations/*.sql', {'db/migrations/'+x+'.sql' for x in MIGRATIONS}),
+        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS}),
+    ):
+        actual={str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)}
+        if actual != expected:
+            raise ValueError('qualification source list changed: '+pattern)
+    return {name: hashlib.sha256(checked_source(name)).hexdigest() for name in SOURCE_PATHS}
+
+
+def registry_helpers():
+    # Check the helper before executing its module; its own routines are reused
+    # without modifying the older driver.
+    checked_source('scripts/test-postgres-causal-registry.py')
+    return runpy.run_path(str(ROOT/'scripts/test-postgres-causal-registry.py'))
+
+
+
+class FixtureCommandError(RuntimeError):
+    """Bounded, sanitized diagnostic; never retain SQL, paths or server text."""
+    def __init__(self, category, sqlstate=None):
+        self.category = category
+        self.sqlstate = sqlstate
+        detail = category + ('; SQLSTATE '+sqlstate if sqlstate else '')
+        super().__init__('owned fixture command failed ('+detail+')')
+
+
+def connection_diagnostic(stderr):
+    """Classify only known PostgreSQL connection failures; never return raw text."""
+    text = stderr[:8192]
+    match = re.search(r'FATAL:\s*(?:([0-9A-Z]{5}):\s*)?([^\r\n]*)',text)
+    detail = match.group(2).lower() if match else text.lower()
+    sqlstate = match.group(1) if match else None
+    if match and 'database ' in detail and ' does not exist' in detail:
+        category='database unavailable'
+    elif match and 'role ' in detail and ' does not exist' in detail:
+        category='role unavailable'
+    elif match and 'starting up' in detail:
+        category='server starting'
+    elif match and 'shutting down' in detail:
+        category='server stopping'
+    elif match and 'authentication failed' in detail:
+        category='authentication failed'
+    elif match:
+        category='postgres fatal'
+    elif 'connection refused' in detail:
+        category='connection refused'
+    elif 'no such file or directory' in detail and 'connection' in detail:
+        category='connection socket unavailable'
+    elif 'server closed the connection' in detail:
+        category='connection closed'
+    elif 'connection' in detail and ('timed out' in detail or 'timeout' in detail):
+        category='connection timeout'
+    else:
+        category='command failure'
+    return FixtureCommandError(category,sqlstate)
+
+
+def _run(args, *, input=None, timeout=30):
+    result = subprocess.run(args, input=input, text=True, capture_output=True, timeout=timeout)
+    if result.returncode:
+        match = re.search(r'^ERROR:\s+([0-9A-Z]{5}): (.*)$',result.stderr,re.M)
+        if match:
+            raise registry_helpers()['PostgresDiagnosticError'](match.group(1),match.group(2))
+        raise connection_diagnostic(result.stderr)
+    return result.stdout.strip()
+
+
+def psql_args(container, database):
+    if not re.fullmatch(r'[0-9a-f]{64}',container) or not re.fullmatch(r'[a-z][a-z0-9_]{0,40}',database):
+        raise ValueError('invalid fixture identity')
+    return ['docker','exec','-i',container,'psql','-XqAt','-v','ON_ERROR_STOP=1',
+            '-v','VERBOSITY=verbose','-h','/var/run/postgresql','-U','postgres','-d',database]
+
+
+
+def assert_fresh(execute, database):
+    probe=execute(database,"SELECT current_database() || '|' || (SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations) || '|' || (SELECT count(*) FROM contour.causal_sessions);")
+    expected=database+'|{'+','.join(str(x) for x in range(1,20))+'}|0'
+    if probe != expected:
+        raise AssertionError('clone identity, ledger or initial sessions mismatch')
+
+
+def qualify_cases(container, execute, run_case):
+    """Create an isolated template clone for each required, explicitly named case.
+
+    execute(database, sql) starts a new psql; run_case gets an argv and callback
+    bound to exactly the same clone. It may never connect to the template.
+    """
+    cases = ('basic','clock') + SCENARIOS
+    if len(cases)!=18 or len(set(cases))!=18:
+        raise RuntimeError('invalid qualification case list')
+    for index, case in enumerate(cases):
+        database='session_case_'+str(index)
+        execute('postgres','CREATE DATABASE '+database+' TEMPLATE contour_local;')
+        assert_fresh(execute,database)
+        callback=lambda sql, db=database: execute(db,sql)
+        if case in ('basic','clock'):
+            callback(checked_source('db/tests/causal_session_'+case+'.sql').decode())
+        else:
+            run_case(psql_args(container,database),callback,case)
+        execute('postgres','DROP DATABASE '+database+';')
+        print('PASS:',case,flush=True)
+    return cases
+
+
+def main():
+    if len(sys.argv)!=1:
+        raise ValueError('this qualification takes no arguments')
+    os.umask(0o077)
+    before=source_snapshot()
+    registry=registry_helpers()
+    registry['verify_qualified_profile']()
+    run_id=uuid.uuid4().hex
+    name='contour-causal-sessions-'+run_id
+    cid=None
+    create_attempted=False
+    def inspect_name(container_name):
+        result=subprocess.run(['docker','inspect',container_name],text=True,capture_output=True,timeout=30)
+        if result.returncode:
+            if re.fullmatch(r'Error: No such object: '+re.escape(container_name)+r'\s*',result.stderr):
+                return None
+            raise RuntimeError('container inspection failed')
+        try:
+            return json.loads(result.stdout)
+        except (ValueError,TypeError) as error:
+            raise RuntimeError('invalid container inspection') from error
+    def deadline_handler(_signum,_frame):
+        raise TimeoutError('session qualification exceeded overall deadline')
+    previous=signal.signal(signal.SIGALRM,deadline_handler)
+    signal.setitimer(signal.ITIMER_REAL,600)
+    try:
+        _run(['docker','image','inspect',registry['IMAGE']])
+        create_attempted=True
+        candidate=_run(['docker','create','--pull=never','--name',name,'--label','org.apicontour.registry-run='+run_id,
+                        '--network','none','--memory','512m','--cpus','1','--pids-limit','128',
+                        '--tmpfs','/var/lib/postgresql/data:rw,nosuid,noexec,size=256m',
+                        '-e','POSTGRES_DB=contour_local','-e','POSTGRES_PASSWORD=isolated-fixture-only',
+                        '-e','POSTGRES_HOST_AUTH_METHOD=reject','-e','POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=reject',
+                        registry['IMAGE'],'-c','listen_addresses=','-c','unix_socket_directories=/var/run/postgresql'])
+        if not re.fullmatch(r'[0-9a-f]{64}',candidate):
+            raise RuntimeError('invalid container identity')
+        cid=candidate
+        _run(['docker','start',cid])
+        deadline=time.monotonic()+60
+        while True:
+            result=subprocess.run(['docker','exec',cid,'sh','-c','test "$(cat /proc/1/comm)" = postgres && pg_isready -h /var/run/postgresql -U postgres -d contour_local'],capture_output=True,timeout=5)
+            if result.returncode==0: break
+            if time.monotonic()>=deadline: raise TimeoutError('PostgreSQL readiness deadline')
+            time.sleep(.2)
+        def execute(database,sql):
+            return _run(psql_args(cid,database),input=sql,timeout=120)
+        execute('contour_local',checked_source('db/bootstrap.sql').decode())
+        for name_part in PROVISIONS:
+            execute('contour_local',checked_source('db/provision_'+name_part+'.sql').decode())
+        for name_part in MIGRATIONS:
+            execute('contour_local',checked_source('db/migrations/'+name_part+'.sql').decode())
+        for name_part in OPT_INS[:3]:
+            execute('contour_local',checked_source('db/opt-in-migrations/'+name_part+'.sql').decode())
+        execute('contour_local',checked_source('db/tests/causal_runtime_registry_pre.sql').decode())
+        execute('contour_local',checked_source('db/opt-in-migrations/'+OPT_INS[3]+'.sql').decode())
+        execute('contour_local',checked_source('db/tests/causal_session_setup.sql').decode())
+        execute('contour_local',checked_source('db/opt-in-migrations/'+OPT_INS[4]+'.sql').decode())
+        assert_fresh(execute,'contour_local')
+        qualify_cases(cid,execute,run_scenario)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL,0)
+        signal.signal(signal.SIGALRM,previous)
+        try:
+            if create_attempted and not cid:
+                cid=registry['recover_owned_container'](inspect_name,name,run_id)
+            if cid:
+                registry['cleanup_owned'](_run,cid,name,run_id)
+        finally:
+            if source_snapshot()!=before:
+                raise RuntimeError('qualification source changed')
+    print('PASS: isolated causal session qualification; no runtime or TLS claims')
+
+
+if __name__ == '__main__':
+    main()
