@@ -1,0 +1,86 @@
+[
+  {
+    "id": "tab",
+    "type": "tab",
+    "label": "causal fixture",
+    "disabled": false
+  },
+  {
+    "id": "in",
+    "type": "http in",
+    "z": "tab",
+    "url": "/run",
+    "method": "post",
+    "upload": false,
+    "wires": [
+      [
+        "fanout"
+      ]
+    ]
+  },
+  {
+    "id": "fanout",
+    "type": "function",
+    "z": "tab",
+    "func": "const label = msg.payload;\nmsg.fixtureLabel = label;\nmsg.fixtureStep = 1;\nmsg._msgid = 'same';\nif (label === 'serial' || label === 'retry') {\n    msg.payload = label + ':1';\n    setTimeout(() => { node.send([msg,null,null]); }, 10);\n} else {\n    const delay = label === 'first' ? 500 : 10;\n    setTimeout(() => { node.send([msg,msg,null]); }, delay);\n}\nreturn [null,null,msg];",
+    "outputs": 3,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "request"
+      ],
+      [
+        "request"
+      ],
+      [
+        "response"
+      ]
+    ]
+  },
+  {
+    "id": "request",
+    "type": "http request",
+    "z": "tab",
+    "method": "POST",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "${CAUSAL_FIXTURE_URL}",
+    "persist": false,
+    "proxy": "",
+    "authType": "",
+    "senderr": true,
+    "headers": [],
+    "wires": [
+      [
+        "chain"
+      ]
+    ]
+  },
+  {
+    "id": "response",
+    "type": "http response",
+    "z": "tab",
+    "statusCode": "200",
+    "headers": {},
+    "wires": []
+  },
+  {
+    "id": "chain",
+    "type": "function",
+    "z": "tab",
+    "func": "const serial = msg.fixtureLabel === 'serial' && msg.statusCode === 200;\nconst retry = msg.fixtureLabel === 'retry' && msg.statusCode === 503;\nif (msg.fixtureStep === 1 && (serial || retry)) {\n    msg.fixtureStep = 2;\n    msg.payload = msg.fixtureLabel + ':2';\n    return msg;\n}\nreturn null;",
+    "outputs": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "request"
+      ]
+    ]
+  }
+]
