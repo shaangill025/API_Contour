@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   native:
-    needs: [business, delivery, local-mvp, gateway, origin]
+    needs: [business, delivery, local-mvp, gateway, origin, origin-setup]
     if: ${{ always() }}
     name: Rust 1.88 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - name: Require all prerequisite TLS jobs
-        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' || needs.origin.result != 'success' }}
+        if: ${{ needs.business.result != 'success' || needs.delivery.result != 'success' || needs.local-mvp.result != 'success' || needs.gateway.result != 'success' || needs.origin.result != 'success' || needs['origin-setup'].result != 'success' }}
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -346,3 +346,28 @@ jobs:
       - name: Verify human origin authorization, history and pagination
         timeout-minutes: 5
         run: python3 -B scripts/test-postgres-tls.py --human-origin
+
+  origin-setup:
+    name: Synthetic origin setup qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Fetch pinned database fixture
+        run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Test origin setup and fixture regressions
+        run: |
+          python3 -B -m unittest discover -s tests/fixtures/origin-setup -p 'test*.py'
+          python3 -B -m unittest discover -s deploy/pilot -p 'test_origin*.py'
+          python3 -B -m unittest deploy.local.test_origin_schema
+      - name: Qualify synthetic origin setup
+        timeout-minutes: 25
+        run: python3 -B scripts/test-origin-pilot-setup.py
