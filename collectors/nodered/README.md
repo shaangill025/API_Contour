@@ -19,7 +19,7 @@ The command requires Python 3, OpenSSL and Docker. It uses only this image:
 docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963
 ```
 
-It pulls that exact digest only when absent. All 22 offline regressions run inside
+It pulls that exact digest only when absent. All 23 offline regressions run inside
 the image against its Node 24 and unmodified vendor source. Four separate runtime
 cases then exercise the legacy HTTP baseline and the instrumented HTTPS profile
 with valid trust, an unrelated CA, and a mismatched server name. The TLS fixture
@@ -44,6 +44,10 @@ modules with private lexical handoffs, restores the CommonJS compiler, and binds
 actual node identities after the fixed flow starts. It exports only snapshots and
 invalidation; installed control and bridge objects are not application exports.
 
+The selected profile creates roots only for actual POST `/run` requests at node
+`in`, using own method/URL data descriptors before scrubbing. Queries, case or
+trailing-slash variants remain forwarded but unowned. This predicate conveys no
+capture authorization; server-owned profile and session binding are still needed.
 Normal delivery consumes the exact pending dispatch event before application
 getters run. Error delivery captures its owned parent before the Catch method
 lookup. Stage/target checks, fresh control-event bindings and finally cleanup
