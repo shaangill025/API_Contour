@@ -636,16 +636,25 @@ fn expected_proof_count(batch: &BatchV2) -> Result<i32, SubmitError> {
     .map_err(|_| SubmitError::Corrupt)
 }
 
-// Only the closed quota error from the fresh proof writer is an actionable
-// capacity result. Other resource or database errors retain normal handling.
+// Only the tagged admission and quota errors from the fresh proof writer
+// have special outcomes. All other database errors retain normal handling.
 fn origin_write_error(error: tokio_postgres::Error) -> SubmitError {
-    if error
+    if let Some(classified) = error
         .as_db_error()
-        .is_some_and(|db| is_origin_quota_error(db.code().code(), db.constraint()))
+        .and_then(|db| classify_origin_write_error(db.code().code(), db.constraint()))
     {
-        SubmitError::LogicalQuota
+        classified
     } else {
         database_error(error).into()
+    }
+}
+fn classify_origin_write_error(code: &str, constraint: Option<&str>) -> Option<SubmitError> {
+    if code == "23514" && constraint == Some("origin_live_resolution_unavailable") {
+        Some(AuthorityError::Admission.into())
+    } else if is_origin_quota_error(code, constraint) {
+        Some(SubmitError::LogicalQuota)
+    } else {
+        None
     }
 }
 fn origin_verify_error(error: tokio_postgres::Error) -> SubmitError {
@@ -661,7 +670,27 @@ fn is_origin_quota_error(code: &str, constraint: Option<&str>) -> bool {
 }
 #[cfg(test)]
 mod origin_error_tests {
-    use super::is_origin_quota_error;
+    use super::{AuthorityError, SubmitError, classify_origin_write_error, is_origin_quota_error};
+
+    #[test]
+    fn admission_requires_exact_sqlstate_and_constraint() {
+        let tag = Some("origin_live_resolution_unavailable");
+        assert_eq!(
+            classify_origin_write_error("23514", tag),
+            Some(SubmitError::Authority(AuthorityError::Admission))
+        );
+        assert_eq!(classify_origin_write_error("23514", None), None);
+        assert_eq!(
+            classify_origin_write_error("23514", Some("another_constraint")),
+            None
+        );
+        assert_eq!(classify_origin_write_error("23505", tag), None);
+        assert_eq!(classify_origin_write_error("54000", tag), None);
+        assert_eq!(
+            classify_origin_write_error("54000", Some("origin_logical_quota_exhausted")),
+            Some(SubmitError::LogicalQuota)
+        );
+    }
     #[test]
     fn quota_requires_exact_sqlstate_and_constraint() {
         assert!(is_origin_quota_error(
