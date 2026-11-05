@@ -27,13 +27,17 @@ class Fixture(unittest.TestCase):
                 os.chdir(previous)
     def test_inherited_image_cannot_activate_the_sensor_mode(self):
         environment = runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
-        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1'}):
+        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1', 'CONTOUR_ORIGIN_ADMISSION_FIXTURE':'1'}):
             ordinary = environment('inert', '/tmp/unused-target')
             self.assertNotIn('CONTOUR_ORIGIN_SENSOR_IMAGE', ordinary)
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', ordinary)
+            self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', ordinary)
+            self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', ordinary)
             selected = environment('inert', '/tmp/unused-target', 'contour-origin-sensor-fixture:selected')
             self.assertEqual(selected['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:selected')
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', selected)
+            self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', selected)
+            self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', selected)
             self.assertEqual(os.environ['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:stale')
     def test_generated_production_envoy_keeps_exact_overwrite(self):
         cfg = fixture.generated_edge(12345)
@@ -68,6 +72,124 @@ class Fixture(unittest.TestCase):
         unattributed=[row('request','request',None),row('response','response',None)]
         fixture.assert_transition(unattributed,set(),'a',allow_unattributed=True)
         with self.assertRaises(AssertionError): fixture.assert_transition(unattributed,set(),'a')
+    def test_replacement_ownership_and_history_fail_closed(self):
+        info={'Id':'a'*64,'Name':'/owned','Config':{'Labels':{'org.apicontour.origin-replacement':'label'}}}
+        fixture.assert_owned_replacement(info,'owned','label')
+        for bad in ({**info,'Id':'truncated'}, {**info,'Name':'/foreign'}, {**info,'Config':{'Labels':{}}}):
+            with self.assertRaises(AssertionError): fixture.assert_owned_replacement(bad,'owned','label')
+        def row(leaf,record):
+            result=[None]*22; result[0]=leaf; result[13]=record; return result
+        old=row('old','one'); peer=row('peer','two'); new=row('new','three')
+        fixture.assert_replacement_history([old,peer,new],{'one':old,'two':peer},{'one','two','three'},'old')
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([old,peer,new,row('old','four')],{'one':old}, {'one','two','three'},'old')
+        altered=old.copy(); altered[1]='changed'
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([altered,peer,new],{'one':old}, {'one','two','three'},'old')
+        with self.assertRaises(AssertionError): fixture.assert_replacement_history([peer,new],{'one':old}, {'one','two','three'},'old')
+
+    def test_history_record_id_filter_freezes_the_original_set(self):
+        a='00000000-0000-4000-8000-000000000001'
+        b='00000000-0000-4000-8000-000000000002'
+        later='00000000-0000-4000-8000-000000000003'
+        frozen=fixture.history_record_ids_sql([b,a])
+        self.assertEqual(frozen,"'%s'::uuid,'%s'::uuid" % (a,b))
+        self.assertNotIn(later,frozen)
+        for invalid in ([],[a,a],["not-a-uuid"]):
+            with self.assertRaises(ValueError): fixture.history_record_ids_sql(invalid)
+
+    def test_cleanup_reconciles_late_creation_and_fails_if_absence_uncertain(self):
+        name = 'owned'; label = 'label'; ident = 'a' * 64
+        info = {'Id':ident,'Name':'/'+name,'Config':{'Labels':{'org.apicontour.origin-replacement':label}}}
+        checks = iter([None, info])
+        removed = []
+        fixture.cleanup_fixture_containers([{'name':name,'id':None}], label,
+            lambda _: next(checks), removed.append, lambda _: False,
+            attempts=2, pause=lambda: None)
+        self.assertEqual(removed, [ident])
+        with self.assertRaisesRegex(RuntimeError, 'uncertain'):
+            fixture.cleanup_fixture_containers([{'name':name,'id':None}], label,
+                lambda _: None, removed.append, lambda _: False,
+                attempts=2, pause=lambda: None)
+
+    def test_cleanup_requires_owned_identity_and_continues_after_failure(self):
+        ident = 'a' * 64
+        info = {'Id':ident,'Name':'/owned','Config':{'Labels':{'org.apicontour.origin-replacement':'label'}}}
+        removed = []
+        resources = [{'name':'owned','id':ident}, {'name':'foreign','id':'b'*64}]
+        with self.assertRaisesRegex(RuntimeError, 'uncertain or failed'):
+            fixture.cleanup_fixture_containers(resources, 'label', lambda _: info,
+                removed.append, lambda _: False, attempts=1)
+        self.assertEqual(removed, [ident])
+        with self.assertRaisesRegex(RuntimeError, 'uncertain or failed'):
+            fixture.cleanup_fixture_containers([{'name':'owned','id':'b'*64}], 'label',
+                lambda _: info, removed.append, lambda _: False, attempts=1)
+        self.assertEqual(removed, [ident])
+
+    def test_admission_diagnostic_requires_exact_bounded_shape(self):
+        self.assertEqual(fixture.parse_admission_diagnostic('ADMISSION deferred_discard_invalid 0 2 0 0'),
+                         ('deferred_discard_invalid',0,2,0,0))
+        self.assertEqual(fixture.parse_admission_diagnostic('ADMISSION deferred_retry 0 0 0 2'),
+                         ('deferred_retry',0,0,0,2))
+        fixture.require_terminal_admission(('deferred_discard_invalid',0,2,0,0))
+        for wrong in (('deferred_retry',0,2,0,0), ('deferred_discard_invalid',1,2,0,0),
+                      ('deferred_discard_invalid',0,1,0,0), ('deferred_discard_invalid',0,2,1,0),
+                      ('deferred_discard_invalid',0,2,0,1)):
+            with self.assertRaises(RuntimeError): fixture.require_terminal_admission(wrong)
+        for bad in ('ADMISSION unknown 0 2 0 0', 'ADMISSION deferred_retry -1 0 0 2',
+                    'ADMISSION deferred_retry 0 0 0 2 secret', 'DIAG deferred_retry 0 0',
+                    'ADMISSION deferred_retry 18446744073709551616 0 0 2'):
+            with self.assertRaises(ValueError): fixture.parse_admission_diagnostic(bad)
+
+    def test_diagnostic_protocol_is_strict_and_safe(self):
+        self.assertEqual(fixture.parse_drain_diagnostic('DIAG deferred_discard_invalid 0 1'), ('deferred_discard_invalid', 0, 1))
+        self.assertEqual(fixture.parse_drain_diagnostic('DIAG ok 0 2'), ('ok', 0, 2))
+        for bad in ('DIAG unknown 0 1', 'DIAG deferred_discard_invalid 0 -1',
+                    'DIAG ok 0 1 secret', 'DIAG ok 1 2', 'DRAIN 0 0 1',
+                    'DIAG owner_transport 0 18446744073709551616'):
+            with self.assertRaises(ValueError): fixture.parse_drain_diagnostic(bad)
+
+    def test_pg_diagnostic_reap_timeout_is_bounded_and_sanitized(self):
+        process=mock.Mock()
+        process.poll.return_value=None
+        process.wait.side_effect=fixture.subprocess.TimeoutExpired('secret-sentinel',2)
+        selector=mock.Mock()
+        selector.get_map.return_value={1:True}
+        selector.select.return_value=[]
+        with mock.patch.object(fixture.subprocess,'Popen',return_value=process), \
+             mock.patch.object(fixture.selectors,'DefaultSelector',return_value=selector):
+            with self.assertRaisesRegex(RuntimeError, 'diagnostic cleanup failed') as caught:
+                fixture.read_pg_diagnostic('owned',{},'fixture_marker_0123456789abcdef')
+        process.kill.assert_called_once()
+        process.wait.assert_called_once_with(timeout=2)
+        process.stdout.close.assert_called_once()
+        self.assertNotIn('secret-sentinel',str(caught.exception))
+
+    def test_pg_diagnostic_waits_for_verbose_readback(self):
+        execute=mock.Mock(side_effect=['','t','default','verbose'])
+        with mock.patch.object(fixture.time,'sleep'):
+            fixture.configure_pg_diagnostic(execute)
+        self.assertEqual(execute.call_args_list[0], mock.call("ALTER SYSTEM SET log_error_verbosity = 'verbose';"))
+        self.assertEqual(execute.call_args_list[1], mock.call('SELECT pg_reload_conf();'))
+        self.assertEqual(execute.call_args_list[2].args, ('SHOW log_error_verbosity;',))
+        self.assertEqual(execute.call_count,4)
+
+    def test_pg_diagnostic_redacts_and_requires_new_marker(self):
+        marker = 'fixture_marker_0123456789abcdef'
+        log = ('2026-11-05 12:00:00 UTC [10] ERROR:  23514: old secret\n'
+               '2026-11-05 12:00:01 UTC [10] LOG:  00000: ' + marker + '\n'
+               '2026-11-05 12:00:02 UTC [11] ERROR:  23514: origin unavailable\n'
+               '2026-11-05 12:00:02 UTC [11] STATEMENT:  secret-sentinel\n'
+               '2026-11-05 12:00:03 UTC [11] ERROR:  22000: secret-sentinel\n')
+        result = fixture.parse_pg_diagnostic(log, marker)
+        self.assertEqual(result[0], ('23514', 'origin_unavailable', None))
+        self.assertEqual(result[1][0:2], ('22000', 'unrecognized'))
+        self.assertNotIn('secret-sentinel', repr(result))
+        self.assertEqual(len(result[1][2]), 64)
+        self.assertEqual(fixture.parse_pg_diagnostic(log.split('2026-11-05 12:00:02')[0], marker), [])
+        excess = log + '2026-11-05 12:00:04 UTC [11] ERROR:  23514: origin unavailable\n' * 33
+        with self.assertRaises(ValueError): fixture.parse_pg_diagnostic(excess, marker)
+        for malformed in ('', log.replace(marker, 'other'), log + log, log.replace('23514: origin unavailable', 'xxxxx: origin unavailable')):
+            with self.assertRaises(ValueError): fixture.parse_pg_diagnostic(malformed, marker)
+
     def test_stock_flow_has_fixed_identity_and_target(self):
         nodes={node['id']:node for node in fixture.flows('b'*64, 'a')}
         self.assertEqual(nodes['send']['url'],'https://127.0.0.1:9443/pilot')

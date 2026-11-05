@@ -437,6 +437,7 @@ jobs:
         run: |
           python3 -B scripts/test-envoy-origin-witness.py --self-test
           python3 -B -m unittest discover -s tests/fixtures/origin-sensor -p test_fixture.py
+          python3 -B scripts/test-origin-admission-profile.py
       - name: Verify actual original-peer TLS witness channel
         timeout-minutes: 5
         run: python3 -B scripts/test-envoy-origin-witness.py
@@ -446,6 +447,9 @@ jobs:
       - name: Verify human origin authorization, history and pagination
         timeout-minutes: 5
         run: python3 -B scripts/test-postgres-tls.py --human-origin
+      - name: Verify closed-origin rejection in the full migration profile
+        timeout-minutes: 20
+        run: python3 -B scripts/test-postgres-tls.py --origin-admission-only
 
   origin-setup:
     name: Synthetic origin setup qualification

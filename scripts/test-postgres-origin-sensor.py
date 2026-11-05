@@ -3,11 +3,16 @@
 No existing profiles or keys are used. This module does not launch on import.
 """
 import hashlib
+import copy
+import datetime
+import uuid
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
+import selectors
 import shutil
 import subprocess
 import sys
@@ -111,8 +116,163 @@ def assert_concurrent(rows, before, a, b):
     if observed != shapes: raise AssertionError('concurrent shape attribution mismatch')
 
 
+
+def assert_owned_replacement(info, name, label):
+    if (not re.fullmatch('[0-9a-f]{64}',info.get('Id','')) or info.get('Name')!='/'+name
+        or (info.get('Config',{}).get('Labels') or {}).get('org.apicontour.origin-replacement')!=label):
+        raise AssertionError('replacement container ownership mismatch')
+
+
+def cleanup_fixture_containers(resources, label, inspect, remove, remains, attempts=20, pause=lambda: time.sleep(.1)):
+    errors = []
+    for resource in reversed(resources):
+        try:
+            name, known_id = resource['name'], resource['id']
+            info = None
+            for attempt in range(attempts):
+                info = inspect(name)
+                if info is not None: break
+                if known_id is not None: break
+                if attempt + 1 < attempts: pause()
+            if info is None:
+                if known_id is None:
+                    raise RuntimeError('fixture container creation uncertain: ' + name)
+                if remains(known_id): raise RuntimeError('fixture container remained')
+                continue
+            assert_owned_replacement(info, name, label)
+            if known_id is not None and info['Id'] != known_id:
+                raise RuntimeError('fixture container identity changed')
+            remove(info['Id'])
+            if remains(info['Id']): raise RuntimeError('fixture container remained')
+        except Exception as exc:
+            errors.append(exc)
+    if errors: raise RuntimeError('fixture container cleanup uncertain or failed') from errors[0]
+
+
+def parse_admission_diagnostic(value):
+    fields = value.split()
+    categories = {'deferred_discard_invalid','deferred_retry','deferred_renew_authorized_enrollment',
+        'deferred_stop_conflict','deferred_require_split','deferred_stop_rejected',
+        'deferred_stop_configuration','deferred_expired','acknowledged','empty',
+        'deadline','owner_paused','owner_history_limit','owner_queue','owner_transport','owner_retry'}
+    if (len(fields)!=6 or fields[0]!='ADMISSION' or fields[1] not in categories
+        or any(not re.fullmatch(r'[0-9]{1,20}',x) or int(x)>2**64-1 for x in fields[2:])):
+        raise ValueError('invalid admission diagnostic')
+    return (fields[1],*(int(x) for x in fields[2:]))
+
+
+def require_terminal_admission(diagnostic):
+    if diagnostic != ('deferred_discard_invalid',0,2,0,0):
+        raise RuntimeError('admission drain diagnostic reported failure')
+
+
+def parse_drain_diagnostic(value):
+    categories = {'ok', 'loss', 'deadline', 'empty', 'owner_paused', 'owner_history_limit',
+        'owner_queue', 'owner_transport', 'owner_retry', 'deferred_retry',
+        'deferred_discard_invalid', 'deferred_renew_authorized_enrollment',
+        'deferred_stop_conflict', 'deferred_require_split', 'deferred_stop_rejected',
+        'deferred_stop_configuration', 'deferred_expired'}
+    fields = value.split()
+    if (len(fields) != 4 or fields[0] != 'DIAG' or fields[1] not in categories
+        or any(not re.fullmatch(r'[0-9]{1,20}', x) or int(x) > 2**64-1 for x in fields[2:])):
+        raise ValueError('invalid drain diagnostic')
+    category, losses, acknowledgements = fields[1], int(fields[2]), int(fields[3])
+    if (category == 'ok' and losses != 0) or (category == 'loss' and losses == 0):
+        raise ValueError('invalid drain diagnostic')
+    return category, losses, acknowledgements
+
+
+def parse_pg_diagnostic(log, marker):
+    if not re.fullmatch(r'fixture_marker_[0-9a-f]{16}', marker):
+        raise ValueError('invalid diagnostic marker')
+    prefix = r'^[0-9][0-9T: .+\-]* [A-Z]+ \[\d+\] '
+    marker_line = re.compile(prefix + r'LOG:  00000: ' + re.escape(marker) + r'\s*$')
+    error_line = re.compile(prefix + r'ERROR:  ([0-9A-Z]{5}): (.*)$')
+    lines = log.splitlines()
+    markers = [i for i, line in enumerate(lines) if marker_line.fullmatch(line)]
+    if len(markers) != 1: raise ValueError('diagnostic marker unavailable or ambiguous')
+    records = []
+    for line in lines[markers[0]+1:]:
+        if re.match(prefix + r'ERROR:', line):
+            match = error_line.fullmatch(line)
+            if not match: raise ValueError('invalid diagnostic error')
+            state, message = match.groups()
+            if message == 'origin unavailable':
+                records.append((state, 'origin_unavailable', None))
+            else:
+                records.append((state, 'unrecognized', hashlib.sha256(message.encode()).hexdigest()))
+            if len(records) > 32: raise ValueError('too many diagnostic errors')
+    return records
+
+
+def configure_pg_diagnostic(execute):
+    execute("ALTER SYSTEM SET log_error_verbosity = 'verbose';")
+    if execute('SELECT pg_reload_conf();') != 't':
+        raise RuntimeError('PostgreSQL diagnostic reload failed')
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise RuntimeError('PostgreSQL diagnostic verbosity unavailable')
+        value = execute('SHOW log_error_verbosity;', timeout=min(2, remaining))
+        if time.monotonic() >= deadline: raise RuntimeError('PostgreSQL diagnostic verbosity unavailable')
+        if value == 'verbose': return
+        time.sleep(min(.1, max(0, deadline-time.monotonic())))
+
+
+def read_pg_diagnostic(container, environment, marker):
+    # Bound both retained output and execution time; never persist or emit raw logs.
+    process = subprocess.Popen(['docker','logs','--tail','2000',container], stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, env=environment, cwd=ROOT)
+    selector = selectors.DefaultSelector()
+    data = bytearray()
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 10
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise RuntimeError('PostgreSQL diagnostic unavailable')
+            if not selector.select(remaining): raise RuntimeError('PostgreSQL diagnostic unavailable')
+            chunk = os.read(process.stdout.fileno(), min(65536, 1048577-len(data)))
+            if not chunk:
+                selector.unregister(process.stdout)
+                break
+            data.extend(chunk)
+            if len(data) > 1048576: raise RuntimeError('PostgreSQL diagnostic exceeded bound')
+        if process.wait(timeout=max(.01, deadline-time.monotonic())) != 0:
+            raise RuntimeError('PostgreSQL diagnostic unavailable')
+        return parse_pg_diagnostic(data.decode('utf-8', errors='strict'), marker)
+    finally:
+        selector.close()
+        try:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+        except Exception:
+            raise RuntimeError('PostgreSQL diagnostic cleanup failed') from None
+        finally:
+            process.stdout.close()
+
+
+def history_record_ids_sql(record_ids):
+    # The IDs come from verified persisted fixture rows, never request input.
+    # Validate and freeze the exact original set before constructing SQL.
+    ids=sorted({str(uuid.UUID(value)) for value in record_ids})
+    if not ids or len(ids)!=len(record_ids): raise ValueError('invalid historical record IDs')
+    return ','.join("'%s'::uuid" % value for value in ids)
+
+
+def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
+    if any(row[0]==old_leaf for row in rows if row[13] not in before_old_attempt):
+        raise AssertionError('closed lifecycle received new proof')
+    actual={row[13]:row for row in rows}
+    if any(actual.get(key)!=value for key,value in prior.items()):
+        raise AssertionError('historical proof changed')
+
+
 def run_cases(container, execute, setup, directory, environment):
     """Requires migrations 1,2,3,4,13-17 and origin login, and built origin_sensor_probe."""
+    replacement = environment.get('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE') == '1'
+    admission = environment.get('CONTOUR_ORIGIN_ADMISSION_FIXTURE') == '1'
     fixture_image = environment['CONTOUR_ORIGIN_SENSOR_IMAGE']
     if not fixture_image.startswith('contour-origin-sensor-fixture:'):
         raise ValueError('fixture image tag invalid')
@@ -202,12 +362,40 @@ def run_cases(container, execute, setup, directory, environment):
             fingerprint = cert_hash(name)
             execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s'); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex')); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex')); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,tenant,ITEM,origin_service,ITEM,origin_deployment,instance, tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,credential,lifecycle,fingerprint,tenant,grant,lifecycle,collector,source,ITEM,ITEM,ITEM,ITEM))
             expected[fingerprint] = (instance,lifecycle,credential,grant)
-        common=['--pull','never','--network','container:'+container,'--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','256m','--log-driver','local']
+        def all_durable():
+            tables=('ingestion_batches','ingestion_payloads','ingestion_v2_metadata','origin_proofs','origin_batch_proof_completion','origin_logical_usage','origin_tenant_state','origin_ingress_context','origin_lifecycles','origin_credentials','origin_observer_grants','origin_terminal_events')
+            ledger=execute("SELECT coalesce(json_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::json)::text FROM contour.schema_migrations x;")
+            return [ledger]+[execute("SELECT coalesce(json_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::json)::text FROM contour.%s x WHERE tenant_id='%s';" % (table,tenant)) for table in tables]
+        if admission:
+            direct_leaves={}
+            for i, kind in enumerate(('lifecycle_closed','credential_revoked','grant_revoked')):
+                instance,lifecycle,credential,grant = ['00000000-0000-0000-0000-%012x' % (0xe100+i*16+n) for n in range(4)]
+                leaf=hashlib.sha256(('fixture-direct-'+kind).encode()).hexdigest()
+                prefix_sql="SELECT set_config('apicontour.tenant_id','%s',false); " % tenant
+                execute(prefix_sql+"INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s');" % (tenant,ITEM,origin_service,ITEM,origin_deployment,instance))
+                execute(prefix_sql+"SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex'));" % (tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance))
+                execute(prefix_sql+"SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex'));" % (tenant,credential,lifecycle,leaf))
+                execute(prefix_sql+"SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,grant,lifecycle,source,collector,ITEM,ITEM,ITEM,ITEM))
+                target={'lifecycle_closed':lifecycle,'credential_revoked':credential,'grant_revoked':grant}[kind]
+                execute(prefix_sql+"SELECT contour.end_origin('%s','%s','%s');" % (tenant,kind,target))
+                direct_leaves[kind]=leaf
+            settings={'tenant':tenant,'collector':collector,'source':source,'active':cert_hash('a'),
+                      'closed':direct_leaves['lifecycle_closed'],'credential_revoked':direct_leaves['credential_revoked'],
+                      'grant_revoked':direct_leaves['grant_revoked']}
+            sql=''.join("SELECT set_config('origin_admission_test.%s','%s',false);" % pair for pair in settings.items())
+            before_sql=all_durable()
+            context_key=execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='contour.origin_ingress_context'::regclass AND conname='origin_ingress_context_pkey';")
+            if not context_key: raise AssertionError('origin context constraint unavailable')
+            execute(sql+(ROOT/'db/tests/origin_admission_classification.sql').read_text(),timeout=120)
+            if all_durable()!=before_sql or execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='contour.origin_ingress_context'::regclass AND conname='origin_ingress_context_pkey';")!=context_key:
+                raise AssertionError('direct SQL tests changed durable state or schema')
+        common=['--label','org.apicontour.origin-replacement='+prefix,'--pull','never','--network','container:'+container,'--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','256m','--log-driver','local']
         def child(name, mounts, image, argv, env_names=(), entrypoint=None):
-            cname=prefix+'-'+name; resources.append(('container',cname))
+            cname=prefix+'-'+name
             args=['docker','run','-i','--name',cname,*common]
             for key in env_names: args += ['-e',key]
             if entrypoint: args += ['--entrypoint',entrypoint]
+            resources.append({'name':cname,'id':None})
             return start([*args,*mounts,image,*argv]),cname
         def files(*names):
             return sum((mount(folder/n,'/fixture/'+n) for n in names),[])
@@ -223,29 +411,32 @@ def run_cases(container, execute, setup, directory, environment):
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
-        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json'])
+        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
-        edge=prefix+'-edge'; resources.append(('container',edge))
+        edge=prefix+'-edge'
         edge_mounts = files('edge.crt','edge.key','forwarder.crt','forwarder.key','ca.crt','envoy.json')
-        docker('run','-d','--name',edge,*common,*edge_mounts,ENVOY,'envoy','-c','/fixture/envoy.json','--log-level','error','--concurrency','1')
+        resources.append({'name':edge,'id':None})
+        resources[-1]['id']=docker('run','-d','--name',edge,*common,*edge_mounts,ENVOY,'envoy','-c','/fixture/envoy.json','--log-level','error','--concurrency','1')
         nodes=[]
         for name,other,port in [('a','b',1880),('b','a',1881)]:
             flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash(other),name)))
-            cname=prefix+'-'+name; resources.append(('container',cname))
+            cname=prefix+'-'+name
             mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(name+'.crt'),'/fixture/client.crt')+mount(folder/(name+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
-            docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
+            resources.append({'name':cname,'id':None})
+            resources[-1]['id']=docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
             nodes.append((cname,port))
         def trigger(node,mode,port,extra=''):
             result=docker('exec',node,'node','/fixture/trigger.js',mode,str(port),extra,seconds=10)
             if result != ('READY' if mode=='ready' else 'OK'): raise AssertionError('fixture trigger mismatch')
+        control_record_ids=set()
         def snapshot():
             sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure')), '[]'::json)
 FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_payloads b USING (tenant_id,collector_id,batch_id)
 LEFT JOIN contour.origin_proofs p USING (tenant_id,collector_id,batch_id,record_id)
 CROSS JOIN LATERAL jsonb_array_elements(convert_from(b.checked_batch,'UTF8')::jsonb->'records') r(value)
 WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_id'=m.record_id::text;""" % (tenant,collector)
-            return json.loads(execute(sql))
+            return [row for row in json.loads(execute(sql)) if row[13] not in control_record_ids]
         def drain():
             value=command(gateway,'DRAIN',15).split()
             if len(value)!=4 or value[:3]!=['DRAIN','0','0'] or not value[3].isdigit():
@@ -313,6 +504,142 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         drain()
         final_rows=snapshot(); assert_proofs(final_rows,expected,origin_service,origin_deployment,source)
         if len(final_rows) != 30: raise AssertionError('final record count mismatch')
+        if replacement:
+            # Controlled operator transition: Docker inspection is fixture evidence,
+            # not platform attestation or proof of host PID/IP allocator reuse.
+            def inspected(name):
+                result=json.loads(docker('inspect',name))
+                if len(result)!=1: raise AssertionError('ambiguous container inspection')
+                return result[0]
+            old=inspected(nodes[0][0]); assert_owned_replacement(old,nodes[0][0],prefix)
+            peer=inspected(nodes[1][0]); assert_owned_replacement(peer,nodes[1][0],prefix)
+            namespace=inspected(container)
+            addresses={name:network['IPAddress'] for name,network in namespace['NetworkSettings']['Networks'].items()}
+            if len(addresses)!=1 or not all(addresses.values()): raise AssertionError('missing shared network address')
+            oldrows={row[13]:row for row in final_rows if row[0] in (cert_hash('a'),cert_hash('b'))}
+            original_ids=history_record_ids_sql(oldrows)
+            def durable_history():
+                return json.loads(execute("""SELECT coalesce(json_agg(json_build_array(p.record_id,to_jsonb(p),to_jsonb(b),encode(d.checked_batch,'hex'),to_jsonb(m)) ORDER BY p.record_id),'[]'::json)
+FROM contour.origin_proofs p JOIN contour.ingestion_batches b USING (tenant_id,collector_id,batch_id)
+JOIN contour.ingestion_payloads d USING (tenant_id,collector_id,batch_id)
+JOIN contour.ingestion_v2_metadata m USING (tenant_id,collector_id,batch_id,record_id)
+WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s','hex'),decode('%s','hex')) AND p.record_id IN (%s);""" % (tenant,collector,cert_hash('a'),cert_hash('b'),original_ids)))
+            durable_before=durable_history()
+            if ({row[0] for row in durable_before} != set(oldrows) or len(durable_before)!=len(oldrows)
+                or not {cert_hash('a'),cert_hash('b')} <= {row[0] for row in oldrows.values()}):
+                raise AssertionError('missing original proofs')
+            if admission:
+                def control(body, name):
+                    controlfile=write(name+'.json',json.dumps(body,separators=(',',':')))
+                    mounts=files('ca.crt','http-client.crt','http-client.key')+mount(controlfile,'/fixture/control.json')+mount(ROOT/'tests/fixtures/origin-sensor/admission-control.js','/fixture/control.js')
+                    process,_=child(name,mounts,NODE,['/fixture/control.js',str(origin_port)],entrypoint='node')
+                    result=line(process,10).split()
+                    process.wait(timeout=10)
+                    if process.returncode or len(result)!=5 or result[0]!='CONTROL': raise RuntimeError('origin admission control failed')
+                    return result[1:]
+                historical_hex=execute("SELECT encode(d.checked_batch,'hex') FROM contour.ingestion_payloads d JOIN contour.origin_proofs p USING(tenant_id,collector_id,batch_id) WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256=decode('%s','hex') ORDER BY d.batch_id LIMIT 1;" % (tenant,collector,cert_hash('a')))
+                historical=json.loads(bytes.fromhex(historical_hex))
+                historical_before=control(historical,'control-history-before')
+                if historical_before[:3]!=['200','duplicate','false']: raise AssertionError('historical receipt unavailable before closure')
+            old_lifecycle=expected[cert_hash('a')][1]
+            execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.end_origin('%s','lifecycle_closed','%s');" % (tenant,tenant,old_lifecycle))
+            if admission:
+                historical_after=control(historical,'control-history-after')
+                if historical_after!=historical_before: raise AssertionError('historical duplicate receipt changed after closure')
+            docker('rm','-f',old['Id']); resources.remove(next(resource for resource in resources if resource['name']==nodes[0][0]))
+            certificate('c','instance-c','clientAuth')
+            if cert_hash('c') in expected: raise AssertionError('replacement leaf reused')
+            instance,lifecycle,credential,grant=['00000000-0000-0000-0000-%012x' % (0xd120+n) for n in range(4)]
+            execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s'); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('cc',32),'hex')); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex')); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,tenant,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,credential,lifecycle,cert_hash('c'),tenant,grant,lifecycle,collector,source,ITEM,ITEM,ITEM,ITEM))
+            expected[cert_hash('c')]=(instance,lifecycle,credential,grant)
+            def replacement_node(name,leaf,port):
+                cname=prefix+'-'+name
+                flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash('b'),'a')))
+                mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(leaf+'.crt'),'/fixture/client.crt')+mount(folder/(leaf+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
+                resources.append({'name':cname,'id':None})
+                resources[-1]['id']=docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
+                until=time.monotonic()+30
+                while True:
+                    try: trigger(cname,'ready',port); break
+                    except RuntimeError:
+                        if time.monotonic()>=until: raise AssertionError('replacement listener unavailable')
+                        time.sleep(.1)
+                return cname
+            newname=replacement_node('c','c',1880); new=inspected(newname); assert_owned_replacement(new,newname,prefix)
+            if old['Id']==new['Id'] or old['State']['StartedAt']==new['State']['StartedAt'] or old['HostConfig']['NetworkMode']!=new['HostConfig']['NetworkMode'] or new['HostConfig']['NetworkMode']!='container:'+container:
+                raise AssertionError('replacement process identity or network mismatch')
+            if {name:network['IPAddress'] for name,network in inspected(container)['NetworkSettings']['Networks'].items()}!=addresses: raise AssertionError('shared address changed')
+            before={row[13] for row in snapshot()}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
+            before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
+            oldprobe=replacement_node('old-leaf','a',1882)
+            if admission:
+                def control_body(leaf):
+                    body=copy.deepcopy(historical)
+                    body['batch_id']=str(uuid.uuid4())
+                    body['records']=body['records'][:1]
+                    now=datetime.datetime.now(datetime.timezone.utc)
+                    iso=lambda value: value.isoformat(timespec='microseconds').replace('+00:00','Z')
+                    body['created_at']=iso(now)
+                    body['records'][0]['record'].update(record_id=str(uuid.uuid4()),queued_at=iso(now),first_seen=iso(now),last_seen=iso(now),expires_at=iso(now+datetime.timedelta(seconds=30)))
+                    body['records'][0]['origin_witness']={'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':leaf}
+                    return body
+                good=control_body(cert_hash('c'))
+                control_record_ids.add(good['records'][0]['record']['record_id'])
+                first=control(good,'control-good')
+                duplicate=control(good,'control-duplicate')
+                if first[:3]!=['200','accepted','false'] or duplicate[:3]!=['200','duplicate','false'] or first[3]!=duplicate[3]:
+                    raise AssertionError('control receipt/duplicate mismatch')
+                stale=control_body(cert_hash('a'))
+                # Include every row, including control rows and quota, in the
+                # before/after comparison; no failure may count as a denial.
+                durable_at_control=all_durable()
+                rejected=control(stale,'control-stale')
+                print('Stale control: ' + ' '.join(rejected[:3]),flush=True)
+                if all_durable()!=durable_at_control: raise AssertionError('stale control mutated durable state')
+            configure_pg_diagnostic(execute)
+            before={row[13] for row in snapshot()}
+            marker='fixture_marker_'+secrets.token_hex(8)
+            execute("DO $$ BEGIN RAISE LOG '%s'; END $$;" % marker)
+            if admission and command(gateway,'ADMISSION_BASELINE',10) != 'BASELINE 0':
+                raise RuntimeError('admission baseline unavailable')
+            trigger(oldprobe,'normal',1882)
+            try:
+                try:
+                    if admission:
+                        category, losses, purged, acknowledged, pending = parse_admission_diagnostic(command(gateway,'ADMISSION_DRAIN',15))
+                        print(f'Admission drain diagnostic: {category} capture_losses={losses} purged={purged} acknowledged_records={acknowledged} pending={pending}',flush=True)
+                        require_terminal_admission((category,losses,purged,acknowledged,pending))
+                    else:
+                        category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
+                        print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
+                        if (category,losses,acknowledgements) != ('ok',0,0): raise RuntimeError('replacement drain diagnostic reported failure')
+                except ValueError:
+                    raise RuntimeError('invalid replacement drain diagnostic') from None
+            except Exception:
+                try:
+                    records=read_pg_diagnostic(container, environment, marker)
+                    for state, kind, digest in records:
+                        print(f'PostgreSQL diagnostic: sqlstate={state} kind={kind}' + (f' message_sha256={digest}' if digest else ''),flush=True)
+                    if not records: print('PostgreSQL diagnostic: no new error records',flush=True)
+                except Exception:
+                    print('PostgreSQL diagnostic: unavailable or ambiguous',flush=True)
+                raise
+            if admission and rejected[:3]!=['422','not_admissible','false']:
+                raise AssertionError('stale control expected 422 not_admissible')
+            rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
+            assert_replacement_history(rows,oldrows,before,cert_hash('a'))
+            fresh=[row for row in rows if row[13] not in before]
+            if admission:
+                if fresh or all_durable()!=durable_at_control: raise AssertionError('discard changed durable state')
+            else:
+                if len(fresh)!=2 or any(row[20]!='unattributed' for row in fresh):
+                    raise RuntimeError('stale-leaf ingress outcome unavailable: explicit resolution diagnostic required')
+                assert_transition(rows,before,cert_hash('a'),allow_unattributed=True)
+            if durable_history()!=durable_before: raise AssertionError('durable historical evidence changed')
+            before={row[13] for row in rows}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
+            if admission:
+                before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
+            print('Operator-controlled replacement retained historical attribution on the same shared namespace/address/port; allocator and host PID reuse not tested',flush=True)
         # Stop the gateway before shutting down the origin HTTP server, then
         # demand its normal two-phase cancellation and database cleanup.
         gateway.stdin.write('STOP\n'); gateway.stdin.flush(); gateway.wait(timeout=5)
@@ -332,14 +659,22 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         errors=[]
         # Remove only containers created by this fixture before waiting for
         # attached Docker clients. Container PID 1 need not handle SIGTERM.
-        for kind,name in reversed(resources):
-            try:
-                if kind != 'container': raise RuntimeError('unexpected fixture resource')
-                docker('rm','-f',name)
-            except Exception as exc: errors.append(exc)
+        def inspect_resource(name):
+            result=subprocess.run(['docker','inspect',name],capture_output=True,text=True,timeout=30,env=environment,cwd=ROOT)
+            if result.returncode:
+                if re.fullmatch(r'Error: No such object: '+re.escape(name)+r'\s*',result.stderr): return None
+                raise RuntimeError('fixture container inspection failed')
+            infos=json.loads(result.stdout)
+            if len(infos)!=1: raise RuntimeError('ambiguous fixture container')
+            return infos[0]
+        try:
+            cleanup_fixture_containers(resources, prefix, inspect_resource,
+                lambda ident: docker('rm','-f',ident),
+                lambda ident: bool(docker('ps','-aq','--no-trunc','--filter','id='+ident)))
+        except Exception as exc: errors.append(exc)
         try:
             remaining=set(docker('ps','-a','--format','{{.Names}}').splitlines())
-            if any(name in remaining for kind,name in resources):
+            if any(resource['name'] in remaining for resource in resources):
                 errors.append(RuntimeError('fixture container remained'))
         except Exception as exc: errors.append(exc)
         for p in reversed(processes):
@@ -355,6 +690,6 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
         for p in processes:
             if p.stdout and not p.stdout.closed: p.stdout.close()
         if errors:
-            failure = RuntimeError('origin sensor fixture cleanup failed')
+            failure = RuntimeError('origin sensor fixture cleanup failed or container creation uncertain')
             if prior is not None: raise BaseExceptionGroup('fixture and cleanup failed', [prior, failure])
             raise failure from errors[0]

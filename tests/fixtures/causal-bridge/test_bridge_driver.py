@@ -323,11 +323,14 @@ class DriverTests(unittest.TestCase):
                 for path in MODULE['source_paths']():
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 before=MODULE['snapshot']()
-                target=root/'db/opt-in-migrations/0020_causal_inbox.sql';target.write_bytes(b'mutated')
+                target=root/'db/opt-in-migrations/0021_origin_admission.sql';target.write_bytes(b'mutated')
                 self.assertNotEqual(before,MODULE['snapshot']())
                 target.unlink()
-                with self.assertRaisesRegex(ValueError,'unavailable'): MODULE['snapshot']()
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
                 target.write_bytes(b'original')
+                extra=target.parent/'0099_unknown.sql'; extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
+                extra.unlink()
                 moved=root/'db/moved';parent=target.parent;parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
                 with self.assertRaisesRegex(ValueError,'symlink'): MODULE['snapshot']()
 
