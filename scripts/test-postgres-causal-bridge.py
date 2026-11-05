@@ -57,7 +57,8 @@ def source_paths():
            ROOT/'db/bootstrap.sql',ROOT/'db/tests/causal_runtime_registry_pre.sql',
            ROOT/'db/tests/causal_session_setup.sql',ROOT/'scripts/test-postgres-causal-bridge.py',
            ROOT/'tests/fixtures/causal-bridge/test_bridge_driver.py',
-           ROOT/'db/opt-in-migrations/0020_causal_inbox.sql']
+           ROOT/'db/opt-in-migrations/0020_causal_inbox.sql',
+           ROOT/'db/opt-in-migrations/0021_origin_admission.sql']
     fixed += [ROOT/('db/provision_'+name+'.sql') for name in PROVISIONS]
     fixed += [ROOT/('db/migrations/'+name+'.sql') for name in MIGRATIONS]
     fixed += [ROOT/('db/opt-in-migrations/'+name+'.sql') for name in OPT]
@@ -91,6 +92,9 @@ def digest_file(path):
 
 
 def snapshot():
+    expected = {ROOT / ('db/opt-in-migrations/' + name + '.sql') for name in (*OPT, '0020_causal_inbox', '0021_origin_admission')}
+    if set((ROOT / 'db/opt-in-migrations').glob('*.sql')) != expected:
+        raise ValueError('qualification source list changed')
     return {str(p):digest_file(p) for p in source_paths()}
 
 

@@ -27,15 +27,17 @@ class Fixture(unittest.TestCase):
                 os.chdir(previous)
     def test_inherited_image_cannot_activate_the_sensor_mode(self):
         environment = runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
-        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1'}):
+        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1', 'CONTOUR_ORIGIN_ADMISSION_FIXTURE':'1'}):
             ordinary = environment('inert', '/tmp/unused-target')
             self.assertNotIn('CONTOUR_ORIGIN_SENSOR_IMAGE', ordinary)
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', ordinary)
             self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', ordinary)
+            self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', ordinary)
             selected = environment('inert', '/tmp/unused-target', 'contour-origin-sensor-fixture:selected')
             self.assertEqual(selected['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:selected')
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', selected)
             self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', selected)
+            self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', selected)
             self.assertEqual(os.environ['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:stale')
     def test_generated_production_envoy_keeps_exact_overwrite(self):
         cfg = fixture.generated_edge(12345)

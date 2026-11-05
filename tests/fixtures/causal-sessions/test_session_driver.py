@@ -101,6 +101,30 @@ class SessionDriverTests(unittest.TestCase):
         self.assertEqual(MODULE['OPT_INS'][-1],'0019_causal_sessions')
         self.assertNotIn('0020_causal_inbox',MODULE['OPT_INS'])
 
+    def test_reviewed_21_is_hashed_but_not_applied(self):
+        name='db/opt-in-migrations/0021_origin_admission.sql'
+        source=Path(__file__).resolve().parents[3]/name
+        self.assertEqual(MODULE['source_snapshot']()[name],hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertNotIn('0021_origin_admission',MODULE['OPT_INS'])
+
+    def test_reviewed_21_source_guard(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp).resolve()
+            for name in MODULE['SOURCE_PATHS']:
+                path=root/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(b'original')
+            target=root/'db/opt-in-migrations/0021_origin_admission.sql'
+            with mock.patch.dict(G,{'ROOT':root}):
+                baseline=MODULE['source_snapshot']()
+                target.write_bytes(b'changed')
+                self.assertNotEqual(baseline,MODULE['source_snapshot']())
+                target.unlink()
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['source_snapshot']()
+                target.symlink_to(root/'elsewhere')
+                with self.assertRaisesRegex(ValueError,'symlink'): MODULE['source_snapshot']()
+                target.unlink();target.write_bytes(b'original')
+                extra=target.parent/'0022_unknown.sql';extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['source_snapshot']()
+
     def test_reviewed_20_guard_refuses_missing_unknown_symlink_and_mutation(self):
         with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
             root=Path(temp)/'repo';root.mkdir()

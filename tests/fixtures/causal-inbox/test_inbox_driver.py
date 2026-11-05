@@ -67,6 +67,28 @@ class InboxDriverTests(unittest.TestCase):
                 directory=root/'db/tests'; moved=root/'moved'; directory.rename(moved); directory.symlink_to(moved,target_is_directory=True)
                 with self.assertRaisesRegex(ValueError,'symlink'): MODULE['source_snapshot']()
 
+    def test_migration_21_is_hashed_without_being_applied(self):
+        self.assertIn('db/opt-in-migrations/0021_origin_admission.sql', MODULE['source_snapshot']())
+        self.assertNotIn('0021_origin_admission', MODULE['OPT_INS'])
+
+    def test_reviewed_21_source_guard(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp).resolve()
+            for name in MODULE['SOURCE_PATHS']:
+                path=root/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(b'original')
+            target=root/'db/opt-in-migrations/0021_origin_admission.sql'
+            with mock.patch.dict(G,{'ROOT':root}):
+                baseline=MODULE['source_snapshot']()
+                target.write_bytes(b'changed')
+                self.assertNotEqual(baseline,MODULE['source_snapshot']())
+                target.unlink()
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['source_snapshot']()
+                target.symlink_to(root/'elsewhere')
+                with self.assertRaisesRegex(ValueError,'symlink'): MODULE['source_snapshot']()
+                target.unlink();target.write_bytes(b'original')
+                extra=target.parent/'0022_unknown.sql';extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['source_snapshot']()
+
     def test_extra_migration_is_refused(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp).resolve()

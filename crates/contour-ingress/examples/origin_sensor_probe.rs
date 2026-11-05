@@ -108,9 +108,10 @@ fn main() {
 fn run() -> Result<(), &'static str> {
     let mut args = env::args().skip(1);
     let path = args.next().ok_or("config missing")?;
-    let diagnostic_enabled = match args.next().as_deref() {
-        None => false,
-        Some("--replacement-diagnostic") => true,
+    let (diagnostic_enabled, terminal_expected) = match args.next().as_deref() {
+        None => (false, false),
+        Some("--replacement-diagnostic") => (true, false),
+        Some("--admission-diagnostic") => (true, true),
         _ => return Err("unexpected argument"),
     };
     if args.next().is_some() {
@@ -205,6 +206,7 @@ fn run() -> Result<(), &'static str> {
             }
         });
         println!("READY {port}");
+        let mut accounted_losses = 0u64;
         while let Some(line) = receiver.recv().await {
             let line = line.map_err(|_| "command input failed")?;
             if line == "STOP" {
@@ -218,6 +220,7 @@ fn run() -> Result<(), &'static str> {
             }
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut acknowledgements = 0u64;
+            let mut discarded = false;
             for slot in 0..4 {
                 loop {
                     if Instant::now() >= deadline {
@@ -243,6 +246,8 @@ fn run() -> Result<(), &'static str> {
                         let category = diagnostic_outcome(outcome);
                         if category == "acknowledged" {
                             acknowledgements += 1;
+                        } else if terminal_expected && category == "deferred_discard_invalid" {
+                            discarded = true;
                         } else {
                             println!("DIAG {category} {} {acknowledgements}", pool.losses());
                             return Err("drain delivery failed");
@@ -258,9 +263,16 @@ fn run() -> Result<(), &'static str> {
                     }
                 }
             }
-            let losses = pool.losses();
+            let losses = pool.losses().saturating_sub(accounted_losses);
             if diagnostic {
-                let category = if losses == 0 { "ok" } else { "loss" };
+                let category =
+                    if terminal_expected && discarded && losses == 2 && acknowledgements == 0 {
+                        "deferred_discard_invalid"
+                    } else if losses == 0 {
+                        "ok"
+                    } else {
+                        "loss"
+                    };
                 println!("DIAG {category} {losses} {acknowledgements}");
             } else {
                 println!(
@@ -268,7 +280,13 @@ fn run() -> Result<(), &'static str> {
                     u8::from(losses != 0)
                 );
             }
-            if losses != 0 {
+            if terminal_expected && diagnostic && discarded && losses == 2 && acknowledgements == 0
+            {
+                accounted_losses = pool.losses();
+            }
+            if losses != 0
+                && !(terminal_expected && discarded && losses == 2 && acknowledgements == 0)
+            {
                 return Err("drain loss");
             }
         }

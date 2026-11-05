@@ -3,6 +3,9 @@
 No existing profiles or keys are used. This module does not launch on import.
 """
 import hashlib
+import copy
+import datetime
+import uuid
 import json
 import os
 from pathlib import Path
@@ -244,6 +247,7 @@ def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
 def run_cases(container, execute, setup, directory, environment):
     """Requires migrations 1,2,3,4,13-17 and origin login, and built origin_sensor_probe."""
     replacement = environment.get('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE') == '1'
+    admission = environment.get('CONTOUR_ORIGIN_ADMISSION_FIXTURE') == '1'
     fixture_image = environment['CONTOUR_ORIGIN_SENSOR_IMAGE']
     if not fixture_image.startswith('contour-origin-sensor-fixture:'):
         raise ValueError('fixture image tag invalid')
@@ -333,6 +337,33 @@ def run_cases(container, execute, setup, directory, environment):
             fingerprint = cert_hash(name)
             execute("SELECT set_config('apicontour.tenant_id','%s',false); INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s'); SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex')); SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex')); SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,tenant,ITEM,origin_service,ITEM,origin_deployment,instance, tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance,tenant,credential,lifecycle,fingerprint,tenant,grant,lifecycle,collector,source,ITEM,ITEM,ITEM,ITEM))
             expected[fingerprint] = (instance,lifecycle,credential,grant)
+        def all_durable():
+            tables=('ingestion_batches','ingestion_payloads','ingestion_v2_metadata','origin_proofs','origin_batch_proof_completion','origin_logical_usage','origin_tenant_state','origin_ingress_context','origin_lifecycles','origin_credentials','origin_observer_grants','origin_terminal_events')
+            ledger=execute("SELECT coalesce(json_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::json)::text FROM contour.schema_migrations x;")
+            return [ledger]+[execute("SELECT coalesce(json_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::json)::text FROM contour.%s x WHERE tenant_id='%s';" % (table,tenant)) for table in tables]
+        if admission:
+            direct_leaves={}
+            for i, kind in enumerate(('lifecycle_closed','credential_revoked','grant_revoked')):
+                instance,lifecycle,credential,grant = ['00000000-0000-0000-0000-%012x' % (0xe100+i*16+n) for n in range(4)]
+                leaf=hashlib.sha256(('fixture-direct-'+kind).encode()).hexdigest()
+                prefix_sql="SELECT set_config('apicontour.tenant_id','%s',false); " % tenant
+                execute(prefix_sql+"INSERT INTO contour.workload_instances VALUES ('%s','%s','%s','%s','%s','%s');" % (tenant,ITEM,origin_service,ITEM,origin_deployment,instance))
+                execute(prefix_sql+"SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('aa',32),'hex'));" % (tenant,lifecycle,ITEM,origin_service,ITEM,origin_deployment,instance))
+                execute(prefix_sql+"SELECT contour.enroll_origin_credential('%s','%s','%s',decode('%s','hex'));" % (tenant,credential,lifecycle,leaf))
+                execute(prefix_sql+"SELECT contour.grant_origin_observer('%s','%s','%s','%s','%s','%s','%s','%s','%s');" % (tenant,grant,lifecycle,source,collector,ITEM,ITEM,ITEM,ITEM))
+                target={'lifecycle_closed':lifecycle,'credential_revoked':credential,'grant_revoked':grant}[kind]
+                execute(prefix_sql+"SELECT contour.end_origin('%s','%s','%s');" % (tenant,kind,target))
+                direct_leaves[kind]=leaf
+            settings={'tenant':tenant,'collector':collector,'source':source,'active':cert_hash('a'),
+                      'closed':direct_leaves['lifecycle_closed'],'credential_revoked':direct_leaves['credential_revoked'],
+                      'grant_revoked':direct_leaves['grant_revoked']}
+            sql=''.join("SELECT set_config('origin_admission_test.%s','%s',false);" % pair for pair in settings.items())
+            before_sql=all_durable()
+            context_key=execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='contour.origin_ingress_context'::regclass AND conname='origin_ingress_context_pkey';")
+            if not context_key: raise AssertionError('origin context constraint unavailable')
+            execute(sql+(ROOT/'db/tests/origin_admission_classification.sql').read_text(),timeout=120)
+            if all_durable()!=before_sql or execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='contour.origin_ingress_context'::regclass AND conname='origin_ingress_context_pkey';")!=context_key:
+                raise AssertionError('direct SQL tests changed durable state or schema')
         common=['--label','org.apicontour.origin-replacement='+prefix,'--pull','never','--network','container:'+container,'--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','256m','--log-driver','local']
         def child(name, mounts, image, argv, env_names=(), entrypoint=None):
             cname=prefix+'-'+name
@@ -355,7 +386,7 @@ def run_cases(container, execute, setup, directory, environment):
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
-        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--replacement-diagnostic'] if replacement else [])])
+        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
         edge=prefix+'-edge'
@@ -373,13 +404,14 @@ def run_cases(container, execute, setup, directory, environment):
         def trigger(node,mode,port,extra=''):
             result=docker('exec',node,'node','/fixture/trigger.js',mode,str(port),extra,seconds=10)
             if result != ('READY' if mode=='ready' else 'OK'): raise AssertionError('fixture trigger mismatch')
+        control_record_ids=set()
         def snapshot():
             sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure')), '[]'::json)
 FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_payloads b USING (tenant_id,collector_id,batch_id)
 LEFT JOIN contour.origin_proofs p USING (tenant_id,collector_id,batch_id,record_id)
 CROSS JOIN LATERAL jsonb_array_elements(convert_from(b.checked_batch,'UTF8')::jsonb->'records') r(value)
 WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_id'=m.record_id::text;""" % (tenant,collector)
-            return json.loads(execute(sql))
+            return [row for row in json.loads(execute(sql)) if row[13] not in control_record_ids]
         def drain():
             value=command(gateway,'DRAIN',15).split()
             if len(value)!=4 or value[:3]!=['DRAIN','0','0'] or not value[3].isdigit():
@@ -468,8 +500,24 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             oldrows={row[13]:row for row in final_rows if row[0] in (cert_hash('a'),cert_hash('b'))}
             durable_before=durable_history()
             if not durable_before or not {cert_hash('a'),cert_hash('b')} <= {row[0] for row in oldrows.values()}: raise AssertionError('missing original proofs')
+            if admission:
+                def control(body, name):
+                    controlfile=write(name+'.json',json.dumps(body,separators=(',',':')))
+                    mounts=files('ca.crt','http-client.crt','http-client.key')+mount(controlfile,'/fixture/control.json')+mount(ROOT/'tests/fixtures/origin-sensor/admission-control.js','/fixture/control.js')
+                    process,_=child(name,mounts,NODE,['/fixture/control.js',str(origin_port)],entrypoint='node')
+                    result=line(process,10).split()
+                    process.wait(timeout=10)
+                    if process.returncode or len(result)!=5 or result[0]!='CONTROL': raise RuntimeError('origin admission control failed')
+                    return result[1:]
+                historical_hex=execute("SELECT encode(d.checked_batch,'hex') FROM contour.ingestion_payloads d JOIN contour.origin_proofs p USING(tenant_id,collector_id,batch_id) WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256=decode('%s','hex') ORDER BY d.batch_id LIMIT 1;" % (tenant,collector,cert_hash('a')))
+                historical=json.loads(bytes.fromhex(historical_hex))
+                historical_before=control(historical,'control-history-before')
+                if historical_before[:3]!=['200','duplicate','false']: raise AssertionError('historical receipt unavailable before closure')
             old_lifecycle=expected[cert_hash('a')][1]
             execute("SELECT set_config('apicontour.tenant_id','%s',false); SELECT contour.end_origin('%s','lifecycle_closed','%s');" % (tenant,tenant,old_lifecycle))
+            if admission:
+                historical_after=control(historical,'control-history-after')
+                if historical_after!=historical_before: raise AssertionError('historical duplicate receipt changed after closure')
             docker('rm','-f',old['Id']); resources.remove(next(resource for resource in resources if resource['name']==nodes[0][0]))
             certificate('c','instance-c','clientAuth')
             if cert_hash('c') in expected: raise AssertionError('replacement leaf reused')
@@ -496,6 +544,30 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             before={row[13] for row in snapshot()}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
             before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
             oldprobe=replacement_node('old-leaf','a',1882)
+            if admission:
+                def control_body(leaf):
+                    body=copy.deepcopy(historical)
+                    body['batch_id']=str(uuid.uuid4())
+                    body['records']=body['records'][:1]
+                    now=datetime.datetime.now(datetime.timezone.utc)
+                    iso=lambda value: value.isoformat(timespec='microseconds').replace('+00:00','Z')
+                    body['created_at']=iso(now)
+                    body['records'][0]['record'].update(record_id=str(uuid.uuid4()),queued_at=iso(now),first_seen=iso(now),last_seen=iso(now),expires_at=iso(now+datetime.timedelta(seconds=30)))
+                    body['records'][0]['origin_witness']={'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':leaf}
+                    return body
+                good=control_body(cert_hash('c'))
+                control_record_ids.add(good['records'][0]['record']['record_id'])
+                first=control(good,'control-good')
+                duplicate=control(good,'control-duplicate')
+                if first[:3]!=['200','accepted','false'] or duplicate[:3]!=['200','duplicate','false'] or first[3]!=duplicate[3]:
+                    raise AssertionError('control receipt/duplicate mismatch')
+                stale=control_body(cert_hash('a'))
+                # Include every row, including control rows and quota, in the
+                # before/after comparison; no failure may count as a denial.
+                durable_at_control=all_durable()
+                rejected=control(stale,'control-stale')
+                print('Stale control: ' + ' '.join(rejected[:3]),flush=True)
+                if all_durable()!=durable_at_control: raise AssertionError('stale control mutated durable state')
             configure_pg_diagnostic(execute)
             before={row[13] for row in snapshot()}
             marker='fixture_marker_'+secrets.token_hex(8)
@@ -507,7 +579,8 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
                 except ValueError:
                     raise RuntimeError('invalid replacement drain diagnostic') from None
                 print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
-                if category != 'ok': raise RuntimeError('replacement drain diagnostic reported failure')
+                expected_diagnostic = ('deferred_discard_invalid',2,0) if admission else ('ok',0,0)
+                if (category,losses,acknowledgements) != expected_diagnostic: raise RuntimeError('replacement drain diagnostic reported failure')
             except Exception:
                 try:
                     records=read_pg_diagnostic(container, environment, marker)
@@ -517,14 +590,21 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
                 except Exception:
                     print('PostgreSQL diagnostic: unavailable or ambiguous',flush=True)
                 raise
+            if admission and rejected[:3]!=['422','not_admissible','false']:
+                raise AssertionError('stale control expected 422 not_admissible')
             rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
             assert_replacement_history(rows,oldrows,before,cert_hash('a'))
             fresh=[row for row in rows if row[13] not in before]
-            if len(fresh)!=2 or any(row[20]!='unattributed' for row in fresh):
-                raise RuntimeError('stale-leaf ingress outcome unavailable: explicit resolution diagnostic required')
-            assert_transition(rows,before,cert_hash('a'),allow_unattributed=True)
+            if admission:
+                if fresh or all_durable()!=durable_at_control: raise AssertionError('discard changed durable state')
+            else:
+                if len(fresh)!=2 or any(row[20]!='unattributed' for row in fresh):
+                    raise RuntimeError('stale-leaf ingress outcome unavailable: explicit resolution diagnostic required')
+                assert_transition(rows,before,cert_hash('a'),allow_unattributed=True)
             if durable_history()!=durable_before: raise AssertionError('durable historical evidence changed')
             before={row[13] for row in rows}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
+            if admission:
+                before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
             print('Operator-controlled replacement retained historical attribution on the same shared namespace/address/port; allocator and host PID reuse not tested',flush=True)
         # Stop the gateway before shutting down the origin HTTP server, then
         # demand its normal two-phase cancellation and database cleanup.

@@ -29,6 +29,7 @@ def fixture_environment(password, target, sensor_image=None):
     environment.pop('CONTOUR_ORIGIN_SENSOR_IMAGE', None)
     environment.pop('CONTOUR_HUMAN_ORIGIN_FIXTURE', None)
     environment.pop('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', None)
+    environment.pop('CONTOUR_ORIGIN_ADMISSION_FIXTURE', None)
     if sensor_image is not None:
         environment['CONTOUR_ORIGIN_SENSOR_IMAGE'] = sensor_image
     return environment
@@ -136,9 +137,10 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--origin-replacement-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
-    replacement = flags == ['--origin-replacement-only']
+    admission = flags == ['--origin-admission-only']
+    replacement = flags == ['--origin-replacement-only'] or admission
     origin_sensor = flags == ['--origin-sensor'] or replacement
     if origin_sensor:
         sys.dont_write_bytecode = True
@@ -200,6 +202,7 @@ def main():
         password = secrets.token_hex(24)
         environment = fixture_environment(password, metadata['target_directory'], fixture_image)
         if replacement: environment['CONTOUR_ORIGIN_REPLACEMENT_FIXTURE'] = '1'
+        if admission: environment['CONTOUR_ORIGIN_ADMISSION_FIXTURE'] = '1'
         if human_origin:
             environment['CONTOUR_HUMAN_ORIGIN_FIXTURE'] = '1'
         try:

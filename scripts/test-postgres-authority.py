@@ -37,8 +37,13 @@ def _run_cases(container, sql, probe, port, directory, environment, https_only=F
 
     def execute(text, timeout=30):
         return executor(text, timeout=timeout) if executor is not None else command(sql, text, timeout=timeout)
-    for path in ['bootstrap.sql', 'provision_authority.sql', 'migrations/0001_identity.sql', 'migrations/0002_policy.sql']:
-        execute((ROOT / 'db' / path).read_text())
+    full_origin_admission = origin_sensor_only and environment.get('CONTOUR_ORIGIN_ADMISSION_FIXTURE') == '1'
+    if full_origin_admission:
+        profile = runpy.run_path(str(ROOT / 'scripts/origin-admission-profile.py'))
+        profile['apply_base'](execute)
+    else:
+        for path in ['bootstrap.sql', 'provision_authority.sql', 'migrations/0001_identity.sql', 'migrations/0002_policy.sql']:
+            execute((ROOT / 'db' / path).read_text())
     execute("GRANT contour_ingestion TO contour_tls; ALTER ROLE contour_tls SET log_statement='all';")
     for tenant in [TENANT, OTHER]:
         execute("INSERT INTO contour.tenants VALUES ('%s');" % tenant + "INSERT INTO contour.projects VALUES ('%s','%s');" % (tenant, ITEM) + "INSERT INTO contour.services VALUES ('%s','%s','%s');" % (tenant, ITEM, ITEM) + "INSERT INTO contour.environments VALUES ('%s','%s','%s');" % (tenant, ITEM, ITEM) + "INSERT INTO contour.deployments VALUES ('%s','%s','%s','%s','%s');" % (tenant, ITEM, ITEM, ITEM, ITEM))
@@ -97,13 +102,16 @@ def _run_cases(container, sql, probe, port, directory, environment, https_only=F
     if origin_sensor_only:
         # Isolated component setup, not a production migration sequence. The
         # standard SQL gate separately applies 1..14 followed by opt-in 15..17.
-        for path in ['db/migrations/0003_ingestion.sql', 'db/provision_catalog.sql',
+        if full_origin_admission:
+            profile['apply_opt_ins'](execute)
+        else:
+            for path in ['db/migrations/0003_ingestion.sql', 'db/provision_catalog.sql',
                      'db/migrations/0004_catalog.sql', 'db/migrations/0013_instance_registry.sql',
                      'db/migrations/0014_observation_evidence.sql',
                      'db/opt-in-migrations/0015_origin_lifecycle.sql',
                      'db/provision_v2_ingress.sql', 'db/opt-in-migrations/0016_v2_unattributed.sql',
                      'db/provision_origin_ingress.sql', 'db/opt-in-migrations/0017_origin_proofs.sql']:
-            execute((ROOT/path).read_text())
+                execute((ROOT/path).read_text())
         execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
         runpy.run_path(str(ROOT/'scripts/test-postgres-origin-sensor.py'))['run_cases'](
             container,execute,setup,directory,environment)
