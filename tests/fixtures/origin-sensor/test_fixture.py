@@ -120,6 +120,49 @@ class Fixture(unittest.TestCase):
                     'DIAG owner_transport 0 18446744073709551616'):
             with self.assertRaises(ValueError): fixture.parse_drain_diagnostic(bad)
 
+    def test_pg_diagnostic_reap_timeout_is_bounded_and_sanitized(self):
+        process=mock.Mock()
+        process.poll.return_value=None
+        process.wait.side_effect=fixture.subprocess.TimeoutExpired('secret-sentinel',2)
+        selector=mock.Mock()
+        selector.get_map.return_value={1:True}
+        selector.select.return_value=[]
+        with mock.patch.object(fixture.subprocess,'Popen',return_value=process), \
+             mock.patch.object(fixture.selectors,'DefaultSelector',return_value=selector):
+            with self.assertRaisesRegex(RuntimeError, 'diagnostic cleanup failed') as caught:
+                fixture.read_pg_diagnostic('owned',{},'fixture_marker_0123456789abcdef')
+        process.kill.assert_called_once()
+        process.wait.assert_called_once_with(timeout=2)
+        process.stdout.close.assert_called_once()
+        self.assertNotIn('secret-sentinel',str(caught.exception))
+
+    def test_pg_diagnostic_waits_for_verbose_readback(self):
+        execute=mock.Mock(side_effect=['','t','default','verbose'])
+        with mock.patch.object(fixture.time,'sleep'):
+            fixture.configure_pg_diagnostic(execute)
+        self.assertEqual(execute.call_args_list[0], mock.call("ALTER SYSTEM SET log_error_verbosity = 'verbose';"))
+        self.assertEqual(execute.call_args_list[1], mock.call('SELECT pg_reload_conf();'))
+        self.assertEqual(execute.call_args_list[2].args, ('SHOW log_error_verbosity;',))
+        self.assertEqual(execute.call_count,4)
+
+    def test_pg_diagnostic_redacts_and_requires_new_marker(self):
+        marker = 'fixture_marker_0123456789abcdef'
+        log = ('2026-11-05 12:00:00 UTC [10] ERROR:  23514: old secret\n'
+               '2026-11-05 12:00:01 UTC [10] LOG:  00000: ' + marker + '\n'
+               '2026-11-05 12:00:02 UTC [11] ERROR:  23514: origin unavailable\n'
+               '2026-11-05 12:00:02 UTC [11] STATEMENT:  secret-sentinel\n'
+               '2026-11-05 12:00:03 UTC [11] ERROR:  22000: secret-sentinel\n')
+        result = fixture.parse_pg_diagnostic(log, marker)
+        self.assertEqual(result[0], ('23514', 'origin_unavailable', None))
+        self.assertEqual(result[1][0:2], ('22000', 'unrecognized'))
+        self.assertNotIn('secret-sentinel', repr(result))
+        self.assertEqual(len(result[1][2]), 64)
+        self.assertEqual(fixture.parse_pg_diagnostic(log.split('2026-11-05 12:00:02')[0], marker), [])
+        excess = log + '2026-11-05 12:00:04 UTC [11] ERROR:  23514: origin unavailable\n' * 33
+        with self.assertRaises(ValueError): fixture.parse_pg_diagnostic(excess, marker)
+        for malformed in ('', log.replace(marker, 'other'), log + log, log.replace('23514: origin unavailable', 'xxxxx: origin unavailable')):
+            with self.assertRaises(ValueError): fixture.parse_pg_diagnostic(malformed, marker)
+
     def test_stock_flow_has_fixed_identity_and_target(self):
         nodes={node['id']:node for node in fixture.flows('b'*64, 'a')}
         self.assertEqual(nodes['send']['url'],'https://127.0.0.1:9443/pilot')

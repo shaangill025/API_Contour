@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import selectors
 import shutil
 import subprocess
 import sys
@@ -159,6 +160,77 @@ def parse_drain_diagnostic(value):
     if (category == 'ok' and losses != 0) or (category == 'loss' and losses == 0):
         raise ValueError('invalid drain diagnostic')
     return category, losses, acknowledgements
+
+
+def parse_pg_diagnostic(log, marker):
+    if not re.fullmatch(r'fixture_marker_[0-9a-f]{16}', marker):
+        raise ValueError('invalid diagnostic marker')
+    prefix = r'^[0-9][0-9T: .+\-]* [A-Z]+ \[\d+\] '
+    marker_line = re.compile(prefix + r'LOG:  00000: ' + re.escape(marker) + r'\s*$')
+    error_line = re.compile(prefix + r'ERROR:  ([0-9A-Z]{5}): (.*)$')
+    lines = log.splitlines()
+    markers = [i for i, line in enumerate(lines) if marker_line.fullmatch(line)]
+    if len(markers) != 1: raise ValueError('diagnostic marker unavailable or ambiguous')
+    records = []
+    for line in lines[markers[0]+1:]:
+        if re.match(prefix + r'ERROR:', line):
+            match = error_line.fullmatch(line)
+            if not match: raise ValueError('invalid diagnostic error')
+            state, message = match.groups()
+            if message == 'origin unavailable':
+                records.append((state, 'origin_unavailable', None))
+            else:
+                records.append((state, 'unrecognized', hashlib.sha256(message.encode()).hexdigest()))
+            if len(records) > 32: raise ValueError('too many diagnostic errors')
+    return records
+
+
+def configure_pg_diagnostic(execute):
+    execute("ALTER SYSTEM SET log_error_verbosity = 'verbose';")
+    if execute('SELECT pg_reload_conf();') != 't':
+        raise RuntimeError('PostgreSQL diagnostic reload failed')
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise RuntimeError('PostgreSQL diagnostic verbosity unavailable')
+        value = execute('SHOW log_error_verbosity;', timeout=min(2, remaining))
+        if time.monotonic() >= deadline: raise RuntimeError('PostgreSQL diagnostic verbosity unavailable')
+        if value == 'verbose': return
+        time.sleep(min(.1, max(0, deadline-time.monotonic())))
+
+
+def read_pg_diagnostic(container, environment, marker):
+    # Bound both retained output and execution time; never persist or emit raw logs.
+    process = subprocess.Popen(['docker','logs','--tail','2000',container], stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, env=environment, cwd=ROOT)
+    selector = selectors.DefaultSelector()
+    data = bytearray()
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 10
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise RuntimeError('PostgreSQL diagnostic unavailable')
+            if not selector.select(remaining): raise RuntimeError('PostgreSQL diagnostic unavailable')
+            chunk = os.read(process.stdout.fileno(), min(65536, 1048577-len(data)))
+            if not chunk:
+                selector.unregister(process.stdout)
+                break
+            data.extend(chunk)
+            if len(data) > 1048576: raise RuntimeError('PostgreSQL diagnostic exceeded bound')
+        if process.wait(timeout=max(.01, deadline-time.monotonic())) != 0:
+            raise RuntimeError('PostgreSQL diagnostic unavailable')
+        return parse_pg_diagnostic(data.decode('utf-8', errors='strict'), marker)
+    finally:
+        selector.close()
+        try:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+        except Exception:
+            raise RuntimeError('PostgreSQL diagnostic cleanup failed') from None
+        finally:
+            process.stdout.close()
 
 
 def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
@@ -424,13 +496,27 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             before={row[13] for row in snapshot()}; trigger(newname,'normal',1880); after_request(before,cert_hash('c'))
             before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
             oldprobe=replacement_node('old-leaf','a',1882)
-            before={row[13] for row in snapshot()}; trigger(oldprobe,'normal',1882)
+            configure_pg_diagnostic(execute)
+            before={row[13] for row in snapshot()}
+            marker='fixture_marker_'+secrets.token_hex(8)
+            execute("DO $$ BEGIN RAISE LOG '%s'; END $$;" % marker)
+            trigger(oldprobe,'normal',1882)
             try:
-                category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
-            except ValueError:
-                raise RuntimeError('invalid replacement drain diagnostic') from None
-            print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
-            if category != 'ok': raise RuntimeError('replacement drain diagnostic reported failure')
+                try:
+                    category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
+                except ValueError:
+                    raise RuntimeError('invalid replacement drain diagnostic') from None
+                print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
+                if category != 'ok': raise RuntimeError('replacement drain diagnostic reported failure')
+            except Exception:
+                try:
+                    records=read_pg_diagnostic(container, environment, marker)
+                    for state, kind, digest in records:
+                        print(f'PostgreSQL diagnostic: sqlstate={state} kind={kind}' + (f' message_sha256={digest}' if digest else ''),flush=True)
+                    if not records: print('PostgreSQL diagnostic: no new error records',flush=True)
+                except Exception:
+                    print('PostgreSQL diagnostic: unavailable or ambiguous',flush=True)
+                raise
             rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source)
             assert_replacement_history(rows,oldrows,before,cert_hash('a'))
             fresh=[row for row in rows if row[13] not in before]
