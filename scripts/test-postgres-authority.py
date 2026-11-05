@@ -15,6 +15,17 @@ OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 ITEM = '00000000-0000-0000-0000-000000000001'
 
 def run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False, origin_sensor_only=False):
+    owner = environment.get('CONTOUR_FIXTURE_PSQL_OWNER')
+    if owner is None:
+        return _run_cases(container, sql, probe, port, directory, environment, https_only, delivery_only, refresh_only, catalog_reader_only, origin_sensor_only)
+    if len(sql) < 4 or sql[3] != container:
+        raise ValueError('fixture container identity mismatch')
+    transport_type = runpy.run_path(str(ROOT / 'scripts/fixture_psql_transport.py'))['FreshPsqlTransport']
+    with transport_type(sql, environment, owner) as transport:
+        return _run_cases(container, sql, probe, port, directory, environment, https_only, delivery_only, refresh_only, catalog_reader_only, origin_sensor_only, transport.execute)
+
+
+def _run_cases(container, sql, probe, port, directory, environment, https_only=False, delivery_only=False, refresh_only=False, catalog_reader_only=False, origin_sensor_only=False, executor=None):
 
     def command(argv, input=None, timeout=30):
         result = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, env=environment)
@@ -25,7 +36,7 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
         return result.stdout.strip()
 
     def execute(text, timeout=30):
-        return command(sql, text, timeout=timeout)
+        return executor(text, timeout=timeout) if executor is not None else command(sql, text, timeout=timeout)
     for path in ['bootstrap.sql', 'provision_authority.sql', 'migrations/0001_identity.sql', 'migrations/0002_policy.sql']:
         execute((ROOT / 'db' / path).read_text())
     execute("GRANT contour_ingestion TO contour_tls; ALTER ROLE contour_tls SET log_statement='all';")

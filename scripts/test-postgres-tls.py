@@ -25,6 +25,7 @@ def fixture_environment(password, target, sensor_image=None):
         CONTOUR_ORIGIN_PROBE=str(Path(target)/'debug/examples/origin_submit_probe'),
         CONTOUR_ORIGIN_HTTPS_PROBE=str(Path(target)/'debug/examples/origin_https_probe'))
     # Only the explicit fixture mode can activate the separately bounded pilot.
+    environment.pop('CONTOUR_FIXTURE_PSQL_OWNER', None)
     environment.pop('CONTOUR_ORIGIN_SENSOR_IMAGE', None)
     environment.pop('CONTOUR_HUMAN_ORIGIN_FIXTURE', None)
     if sensor_image is not None:
@@ -222,13 +223,16 @@ def main():
                 volume = "contour-recovery-" + secrets.token_hex(12)
                 run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, volume])
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
-            container = run(["docker", "create", "--network", network,
+            fixture_owner = secrets.token_hex(16)
+            container = run(["docker", "create", "--label", "org.apicontour.fixture-owner="+fixture_owner, "--network", network,
                              *([] if origin_sensor else ['--publish', '127.0.0.1::5432']),
                              "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
                              *data_mount,
                              "-e", "POSTGRES_DB=contour_fixture", "-e", "POSTGRES_PASSWORD="+password,
                              "-e", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256", IMAGE, "sh", "-c",
                              "chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key"])
+            if '--authority' in flags:
+                environment['CONTOUR_FIXTURE_PSQL_OWNER'] = fixture_owner
             if volume:
                 mounts = json.loads(run(["docker", "inspect", container]))[0]["Mounts"]
                 owned = [mount for mount in mounts if mount["Destination"] == "/var/lib/postgresql/data"]
