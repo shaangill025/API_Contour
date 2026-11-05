@@ -1,6 +1,8 @@
 //! Isolated fixture: production Gateway and V2 pool geometry with explicit drain.
 use contour_core::{PolicyKeys, QueueLimits};
-use contour_delivery::{CollectorOwner, CollectorPool, DeliveryClient, SendOutcome};
+use contour_delivery::{
+    CollectorOwner, CollectorPool, DeliveryClient, OwnerError, RetryDirective, SendOutcome,
+};
 use contour_ingress::{
     CollectorTls,
     gateway::{CapturePoint, Gateway, GatewayTransport},
@@ -73,6 +75,30 @@ fn id() -> Result<String, &'static str> {
         b[15]
     ))
 }
+fn diagnostic_outcome(
+    outcome: Result<Result<SendOutcome, OwnerError>, tokio::time::error::Elapsed>,
+) -> &'static str {
+    match outcome {
+        Err(_) => "deadline",
+        Ok(Err(OwnerError::Paused)) => "owner_paused",
+        Ok(Err(OwnerError::HistoryLimit)) => "owner_history_limit",
+        Ok(Err(OwnerError::Queue(_))) => "owner_queue",
+        Ok(Err(OwnerError::Transport(_))) => "owner_transport",
+        Ok(Err(OwnerError::Retry(_))) => "owner_retry",
+        Ok(Ok(SendOutcome::Empty)) => "empty",
+        Ok(Ok(SendOutcome::Acknowledged { .. })) => "acknowledged",
+        Ok(Ok(SendOutcome::Deferred(directive))) => match directive {
+            RetryDirective::Retry { .. } => "deferred_retry",
+            RetryDirective::DiscardInvalid => "deferred_discard_invalid",
+            RetryDirective::RenewAuthorizedEnrollment => "deferred_renew_authorized_enrollment",
+            RetryDirective::StopConflict => "deferred_stop_conflict",
+            RetryDirective::RequireSplit => "deferred_require_split",
+            RetryDirective::StopRejected(_) => "deferred_stop_rejected",
+            RetryDirective::StopConfiguration => "deferred_stop_configuration",
+            RetryDirective::Expired => "deferred_expired",
+        },
+    }
+}
 fn main() {
     if let Err(e) = run() {
         eprintln!("origin sensor fixture: {e}");
@@ -82,6 +108,11 @@ fn main() {
 fn run() -> Result<(), &'static str> {
     let mut args = env::args().skip(1);
     let path = args.next().ok_or("config missing")?;
+    let diagnostic_enabled = match args.next().as_deref() {
+        None => false,
+        Some("--replacement-diagnostic") => true,
+        _ => return Err("unexpected argument"),
+    };
     if args.next().is_some() {
         return Err("unexpected argument");
     }
@@ -181,7 +212,8 @@ fn run() -> Result<(), &'static str> {
                 let _ = serving.await;
                 return Ok(());
             }
-            if line != "DRAIN" || serving.is_finished() {
+            let diagnostic = line == "DRAIN_DIAGNOSTIC" && diagnostic_enabled;
+            if (line != "DRAIN" && !diagnostic) || serving.is_finished() {
                 return Err("command or serving failed");
             }
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -189,7 +221,11 @@ fn run() -> Result<(), &'static str> {
             for slot in 0..4 {
                 loop {
                     if Instant::now() >= deadline {
-                        println!("DRAIN 1 {} {acknowledgements}", pool.losses());
+                        if diagnostic {
+                            println!("DIAG deadline {} {acknowledgements}", pool.losses());
+                        } else {
+                            println!("DRAIN 1 {} {acknowledgements}", pool.losses());
+                        }
                         return Err("drain deadline");
                     }
                     let frozen = match pool.try_freeze(slot, &id()?, 100, 1_048_576) {
@@ -202,24 +238,73 @@ fn run() -> Result<(), &'static str> {
                     if !frozen {
                         break;
                     }
-                    match timeout_at(deadline, pool.send(slot)).await {
-                        Ok(Ok(SendOutcome::Acknowledged { .. })) => acknowledgements += 1,
-                        _ => {
-                            println!("DRAIN 2 {} {acknowledgements}", pool.losses());
+                    let outcome = timeout_at(deadline, pool.send(slot)).await;
+                    if diagnostic {
+                        let category = diagnostic_outcome(outcome);
+                        if category == "acknowledged" {
+                            acknowledgements += 1;
+                        } else {
+                            println!("DIAG {category} {} {acknowledgements}", pool.losses());
                             return Err("drain delivery failed");
+                        }
+                    } else {
+                        match outcome {
+                            Ok(Ok(SendOutcome::Acknowledged { .. })) => acknowledgements += 1,
+                            _ => {
+                                println!("DRAIN 2 {} {acknowledgements}", pool.losses());
+                                return Err("drain delivery failed");
+                            }
                         }
                     }
                 }
             }
             let losses = pool.losses();
-            println!(
-                "DRAIN {} {losses} {acknowledgements}",
-                u8::from(losses != 0)
-            );
+            if diagnostic {
+                let category = if losses == 0 { "ok" } else { "loss" };
+                println!("DIAG {category} {losses} {acknowledgements}");
+            } else {
+                println!(
+                    "DRAIN {} {losses} {acknowledgements}",
+                    u8::from(losses != 0)
+                );
+            }
             if losses != 0 {
                 return Err("drain loss");
             }
         }
         Err("command input closed")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_classifies_outcomes_without_values() {
+        for (directive, expected) in [
+            (RetryDirective::DiscardInvalid, "deferred_discard_invalid"),
+            (
+                RetryDirective::RenewAuthorizedEnrollment,
+                "deferred_renew_authorized_enrollment",
+            ),
+            (RetryDirective::StopRejected(418), "deferred_stop_rejected"),
+            (
+                RetryDirective::Retry {
+                    after: Duration::from_secs(17),
+                },
+                "deferred_retry",
+            ),
+        ] {
+            assert_eq!(
+                diagnostic_outcome(Ok(Ok(SendOutcome::Deferred(directive)))),
+                expected
+            );
+        }
+        assert_eq!(
+            diagnostic_outcome(Ok(Err(OwnerError::Paused))),
+            "owner_paused"
+        );
+        assert_eq!(diagnostic_outcome(Ok(Ok(SendOutcome::Empty))), "empty");
+    }
 }
