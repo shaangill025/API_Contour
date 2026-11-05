@@ -86,6 +86,16 @@ class Fixture(unittest.TestCase):
         with self.assertRaises(AssertionError): fixture.assert_replacement_history([altered,peer,new],{'one':old}, {'one','two','three'},'old')
         with self.assertRaises(AssertionError): fixture.assert_replacement_history([peer,new],{'one':old}, {'one','two','three'},'old')
 
+    def test_history_record_id_filter_freezes_the_original_set(self):
+        a='00000000-0000-4000-8000-000000000001'
+        b='00000000-0000-4000-8000-000000000002'
+        later='00000000-0000-4000-8000-000000000003'
+        frozen=fixture.history_record_ids_sql([b,a])
+        self.assertEqual(frozen,"'%s'::uuid,'%s'::uuid" % (a,b))
+        self.assertNotIn(later,frozen)
+        for invalid in ([],[a,a],["not-a-uuid"]):
+            with self.assertRaises(ValueError): fixture.history_record_ids_sql(invalid)
+
     def test_cleanup_reconciles_late_creation_and_fails_if_absence_uncertain(self):
         name = 'owned'; label = 'label'; ident = 'a' * 64
         info = {'Id':ident,'Name':'/'+name,'Config':{'Labels':{'org.apicontour.origin-replacement':label}}}

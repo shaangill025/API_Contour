@@ -253,6 +253,14 @@ def read_pg_diagnostic(container, environment, marker):
             process.stdout.close()
 
 
+def history_record_ids_sql(record_ids):
+    # The IDs come from verified persisted fixture rows, never request input.
+    # Validate and freeze the exact original set before constructing SQL.
+    ids=sorted({str(uuid.UUID(value)) for value in record_ids})
+    if not ids or len(ids)!=len(record_ids): raise ValueError('invalid historical record IDs')
+    return ','.join("'%s'::uuid" % value for value in ids)
+
+
 def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
     if any(row[0]==old_leaf for row in rows if row[13] not in before_old_attempt):
         raise AssertionError('closed lifecycle received new proof')
@@ -508,15 +516,18 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
             namespace=inspected(container)
             addresses={name:network['IPAddress'] for name,network in namespace['NetworkSettings']['Networks'].items()}
             if len(addresses)!=1 or not all(addresses.values()): raise AssertionError('missing shared network address')
+            oldrows={row[13]:row for row in final_rows if row[0] in (cert_hash('a'),cert_hash('b'))}
+            original_ids=history_record_ids_sql(oldrows)
             def durable_history():
                 return json.loads(execute("""SELECT coalesce(json_agg(json_build_array(p.record_id,to_jsonb(p),to_jsonb(b),encode(d.checked_batch,'hex'),to_jsonb(m)) ORDER BY p.record_id),'[]'::json)
 FROM contour.origin_proofs p JOIN contour.ingestion_batches b USING (tenant_id,collector_id,batch_id)
 JOIN contour.ingestion_payloads d USING (tenant_id,collector_id,batch_id)
 JOIN contour.ingestion_v2_metadata m USING (tenant_id,collector_id,batch_id,record_id)
-WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s','hex'),decode('%s','hex'));""" % (tenant,collector,cert_hash('a'),cert_hash('b'))))
-            oldrows={row[13]:row for row in final_rows if row[0] in (cert_hash('a'),cert_hash('b'))}
+WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s','hex'),decode('%s','hex')) AND p.record_id IN (%s);""" % (tenant,collector,cert_hash('a'),cert_hash('b'),original_ids)))
             durable_before=durable_history()
-            if not durable_before or not {cert_hash('a'),cert_hash('b')} <= {row[0] for row in oldrows.values()}: raise AssertionError('missing original proofs')
+            if ({row[0] for row in durable_before} != set(oldrows) or len(durable_before)!=len(oldrows)
+                or not {cert_hash('a'),cert_hash('b')} <= {row[0] for row in oldrows.values()}):
+                raise AssertionError('missing original proofs')
             if admission:
                 def control(body, name):
                     controlfile=write(name+'.json',json.dumps(body,separators=(',',':')))
