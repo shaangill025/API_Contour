@@ -82,6 +82,8 @@ jobs:
       - name: Fetch pinned TLS database fixture
         if: runner.os == 'Linux'
         run: docker pull postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+      - name: Test fresh-session PostgreSQL fixture transport
+        run: python3 -B -m unittest discover -s tests/fixtures/psql-transport -p test_transport.py
       - name: Test PostgreSQL TLS, transport failures and authority validation
         if: runner.os == 'Linux'
         env:
