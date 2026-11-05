@@ -149,6 +149,23 @@ def cleanup_fixture_containers(resources, label, inspect, remove, remains, attem
     if errors: raise RuntimeError('fixture container cleanup uncertain or failed') from errors[0]
 
 
+def parse_admission_diagnostic(value):
+    fields = value.split()
+    categories = {'deferred_discard_invalid','deferred_retry','deferred_renew_authorized_enrollment',
+        'deferred_stop_conflict','deferred_require_split','deferred_stop_rejected',
+        'deferred_stop_configuration','deferred_expired','acknowledged','empty',
+        'deadline','owner_paused','owner_history_limit','owner_queue','owner_transport','owner_retry'}
+    if (len(fields)!=6 or fields[0]!='ADMISSION' or fields[1] not in categories
+        or any(not re.fullmatch(r'[0-9]{1,20}',x) or int(x)>2**64-1 for x in fields[2:])):
+        raise ValueError('invalid admission diagnostic')
+    return (fields[1],*(int(x) for x in fields[2:]))
+
+
+def require_terminal_admission(diagnostic):
+    if diagnostic != ('deferred_discard_invalid',0,2,0,0):
+        raise RuntimeError('admission drain diagnostic reported failure')
+
+
 def parse_drain_diagnostic(value):
     categories = {'ok', 'loss', 'deadline', 'empty', 'owner_paused', 'owner_history_limit',
         'owner_queue', 'owner_transport', 'owner_retry', 'deferred_retry',
@@ -572,15 +589,21 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             before={row[13] for row in snapshot()}
             marker='fixture_marker_'+secrets.token_hex(8)
             execute("DO $$ BEGIN RAISE LOG '%s'; END $$;" % marker)
+            if admission and command(gateway,'ADMISSION_BASELINE',10) != 'BASELINE 0':
+                raise RuntimeError('admission baseline unavailable')
             trigger(oldprobe,'normal',1882)
             try:
                 try:
-                    category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
+                    if admission:
+                        category, losses, purged, acknowledged, pending = parse_admission_diagnostic(command(gateway,'ADMISSION_DRAIN',15))
+                        print(f'Admission drain diagnostic: {category} capture_losses={losses} purged={purged} acknowledged_records={acknowledged} pending={pending}',flush=True)
+                        require_terminal_admission((category,losses,purged,acknowledged,pending))
+                    else:
+                        category, losses, acknowledgements = parse_drain_diagnostic(command(gateway,'DRAIN_DIAGNOSTIC',15))
+                        print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
+                        if (category,losses,acknowledgements) != ('ok',0,0): raise RuntimeError('replacement drain diagnostic reported failure')
                 except ValueError:
                     raise RuntimeError('invalid replacement drain diagnostic') from None
-                print(f'Replacement drain diagnostic: {category} losses={losses} acknowledgements={acknowledgements}',flush=True)
-                expected_diagnostic = ('deferred_discard_invalid',2,0) if admission else ('ok',0,0)
-                if (category,losses,acknowledgements) != expected_diagnostic: raise RuntimeError('replacement drain diagnostic reported failure')
             except Exception:
                 try:
                     records=read_pg_diagnostic(container, environment, marker)

@@ -114,6 +114,21 @@ class Fixture(unittest.TestCase):
                 lambda _: info, removed.append, lambda _: False, attempts=1)
         self.assertEqual(removed, [ident])
 
+    def test_admission_diagnostic_requires_exact_bounded_shape(self):
+        self.assertEqual(fixture.parse_admission_diagnostic('ADMISSION deferred_discard_invalid 0 2 0 0'),
+                         ('deferred_discard_invalid',0,2,0,0))
+        self.assertEqual(fixture.parse_admission_diagnostic('ADMISSION deferred_retry 0 0 0 2'),
+                         ('deferred_retry',0,0,0,2))
+        fixture.require_terminal_admission(('deferred_discard_invalid',0,2,0,0))
+        for wrong in (('deferred_retry',0,2,0,0), ('deferred_discard_invalid',1,2,0,0),
+                      ('deferred_discard_invalid',0,1,0,0), ('deferred_discard_invalid',0,2,1,0),
+                      ('deferred_discard_invalid',0,2,0,1)):
+            with self.assertRaises(RuntimeError): fixture.require_terminal_admission(wrong)
+        for bad in ('ADMISSION unknown 0 2 0 0', 'ADMISSION deferred_retry -1 0 0 2',
+                    'ADMISSION deferred_retry 0 0 0 2 secret', 'DIAG deferred_retry 0 0',
+                    'ADMISSION deferred_retry 18446744073709551616 0 0 2'):
+            with self.assertRaises(ValueError): fixture.parse_admission_diagnostic(bad)
+
     def test_diagnostic_protocol_is_strict_and_safe(self):
         self.assertEqual(fixture.parse_drain_diagnostic('DIAG deferred_discard_invalid 0 1'), ('deferred_discard_invalid', 0, 1))
         self.assertEqual(fixture.parse_drain_diagnostic('DIAG ok 0 2'), ('ok', 0, 2))

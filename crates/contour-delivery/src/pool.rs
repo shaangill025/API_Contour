@@ -1,6 +1,6 @@
 //! Fixed-owner pool. It never transfers authority or waits in capture callbacks.
 use super::{CaptureId, CollectorOwner, OwnerError, SendOutcome};
-use contour_core::{AdmissionInputs, CaptureScope, OriginWitness, RecordMetadata};
+use contour_core::{AdmissionInputs, CaptureScope, OriginWitness, QueueStats, RecordMetadata};
 use std::{
     future::{Future, poll_fn},
     pin::pin,
@@ -124,6 +124,15 @@ impl CollectorPool {
     }
     pub fn losses(&self) -> u64 {
         self.losses.load(Ordering::Relaxed)
+    }
+    /// Copy one owner's counters without waiting or changing owner state.
+    /// Returns None when the slot does not exist or its owner is busy.
+    pub fn try_queue_stats(&self, slot: usize) -> Option<QueueStats> {
+        self.slots
+            .get(slot)?
+            .try_lock()
+            .ok()
+            .map(|owner| owner.stats())
     }
     /// Reclaim raw streams after an idle lease expires. A runtime must call
     /// this periodically in addition to the checks on capture operations.
@@ -1045,6 +1054,26 @@ mod tests {
         assert!(a.try_fragment(foreign, br#"{"id":1}"#).is_ok());
         a.try_cancel(foreign);
     }
+    #[test]
+    fn queue_stats_snapshot_is_nonblocking_and_read_only() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        let expected = pool.slots[0].try_lock().unwrap().stats();
+        let losses = pool.losses();
+        assert_eq!(pool.try_queue_stats(0), Some(expected));
+        assert_eq!(pool.try_queue_stats(0), Some(expected));
+        assert!(pool.try_queue_stats(2).is_none());
+        let guard = pool.slots[0].try_lock().unwrap();
+        assert!(pool.try_queue_stats(0).is_none());
+        assert_eq!(
+            pool.try_queue_stats(1),
+            Some(pool.slots[1].try_lock().unwrap().stats())
+        );
+        assert_eq!(guard.stats(), expected);
+        drop(guard);
+        assert_eq!(pool.try_queue_stats(0), Some(expected));
+        assert_eq!(pool.losses(), losses);
+    }
+
     #[test]
     fn active_capture_is_not_displaced_by_send_or_another_stream() {
         let pool = CollectorPool::new(vec![make_owner()]).unwrap();

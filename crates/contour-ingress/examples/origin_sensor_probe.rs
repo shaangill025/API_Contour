@@ -99,6 +99,72 @@ fn diagnostic_outcome(
         },
     }
 }
+#[derive(Clone, Copy)]
+struct AdmissionStats {
+    losses: u64,
+    purged: u64,
+    acknowledged: u64,
+    records: usize,
+}
+async fn admission_stats(
+    pool: &CollectorPool,
+    deadline: Instant,
+) -> Result<AdmissionStats, &'static str> {
+    loop {
+        let mut stats = AdmissionStats {
+            losses: pool.losses(),
+            purged: 0,
+            acknowledged: 0,
+            records: 0,
+        };
+        let mut complete = true;
+        for slot in 0..4 {
+            let Some(current) = pool.try_queue_stats(slot) else {
+                complete = false;
+                break;
+            };
+            stats.purged = stats
+                .purged
+                .checked_add(current.purged)
+                .ok_or("purge counter overflow")?;
+            stats.acknowledged = stats
+                .acknowledged
+                .checked_add(current.acknowledged)
+                .ok_or("ack counter overflow")?;
+            stats.records = stats
+                .records
+                .checked_add(current.records)
+                .ok_or("record counter overflow")?;
+        }
+        if complete {
+            return Ok(stats);
+        }
+        if Instant::now() >= deadline {
+            return Err("stats deadline");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+fn admission_delta(
+    before: AdmissionStats,
+    after: AdmissionStats,
+) -> Result<(u64, u64, u64, usize), &'static str> {
+    Ok((
+        after
+            .losses
+            .checked_sub(before.losses)
+            .ok_or("loss counter regressed")?,
+        after
+            .purged
+            .checked_sub(before.purged)
+            .ok_or("purge counter regressed")?,
+        after
+            .acknowledged
+            .checked_sub(before.acknowledged)
+            .ok_or("ack counter regressed")?,
+        after.records,
+    ))
+}
 fn main() {
     if let Err(e) = run() {
         eprintln!("origin sensor fixture: {e}");
@@ -206,7 +272,7 @@ fn run() -> Result<(), &'static str> {
             }
         });
         println!("READY {port}");
-        let mut accounted_losses = 0u64;
+        let mut admission_baseline: Option<AdmissionStats> = None;
         while let Some(line) = receiver.recv().await {
             let line = line.map_err(|_| "command input failed")?;
             if line == "STOP" {
@@ -214,13 +280,27 @@ fn run() -> Result<(), &'static str> {
                 let _ = serving.await;
                 return Ok(());
             }
+            if terminal_expected && line == "ADMISSION_BASELINE" && !serving.is_finished() {
+                let stats = admission_stats(&pool, Instant::now() + Duration::from_secs(5)).await?;
+                if stats.records != 0 {
+                    return Err("admission baseline not empty");
+                }
+                admission_baseline = Some(stats);
+                println!("BASELINE 0");
+                continue;
+            }
+            let admission = terminal_expected && line == "ADMISSION_DRAIN";
             let diagnostic = line == "DRAIN_DIAGNOSTIC" && diagnostic_enabled;
-            if (line != "DRAIN" && !diagnostic) || serving.is_finished() {
+            if (line != "DRAIN" && !diagnostic && !admission) || serving.is_finished() {
                 return Err("command or serving failed");
             }
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut acknowledgements = 0u64;
             let mut discarded = false;
+            let mut admission_failure = None;
+            if admission && admission_baseline.is_none() {
+                return Err("admission baseline missing");
+            }
             for slot in 0..4 {
                 loop {
                     if Instant::now() >= deadline {
@@ -242,12 +322,18 @@ fn run() -> Result<(), &'static str> {
                         break;
                     }
                     let outcome = timeout_at(deadline, pool.send(slot)).await;
-                    if diagnostic {
+                    if admission {
+                        let category = diagnostic_outcome(outcome);
+                        if category == "deferred_discard_invalid" {
+                            discarded = true;
+                        } else {
+                            admission_failure = Some(category);
+                            break;
+                        }
+                    } else if diagnostic {
                         let category = diagnostic_outcome(outcome);
                         if category == "acknowledged" {
                             acknowledgements += 1;
-                        } else if terminal_expected && category == "deferred_discard_invalid" {
-                            discarded = true;
                         } else {
                             println!("DIAG {category} {} {acknowledgements}", pool.losses());
                             return Err("drain delivery failed");
@@ -262,17 +348,34 @@ fn run() -> Result<(), &'static str> {
                         }
                     }
                 }
+                if admission_failure.is_some() {
+                    break;
+                }
             }
-            let losses = pool.losses().saturating_sub(accounted_losses);
+            if admission {
+                let after = admission_stats(&pool, deadline).await?;
+                let (losses, purged, acknowledged, records) = admission_delta(
+                    admission_baseline
+                        .take()
+                        .ok_or("admission baseline missing")?,
+                    after,
+                )?;
+                let category = admission_failure.unwrap_or(if discarded {
+                    "deferred_discard_invalid"
+                } else {
+                    "empty"
+                });
+                println!("ADMISSION {category} {losses} {purged} {acknowledged} {records}");
+                if category != "deferred_discard_invalid"
+                    || (losses, purged, acknowledged, records) != (0, 2, 0, 0)
+                {
+                    return Err("admission drain failed");
+                }
+                continue;
+            }
+            let losses = pool.losses();
             if diagnostic {
-                let category =
-                    if terminal_expected && discarded && losses == 2 && acknowledgements == 0 {
-                        "deferred_discard_invalid"
-                    } else if losses == 0 {
-                        "ok"
-                    } else {
-                        "loss"
-                    };
+                let category = if losses == 0 { "ok" } else { "loss" };
                 println!("DIAG {category} {losses} {acknowledgements}");
             } else {
                 println!(
@@ -280,13 +383,7 @@ fn run() -> Result<(), &'static str> {
                     u8::from(losses != 0)
                 );
             }
-            if terminal_expected && diagnostic && discarded && losses == 2 && acknowledgements == 0
-            {
-                accounted_losses = pool.losses();
-            }
-            if losses != 0
-                && !(terminal_expected && discarded && losses == 2 && acknowledgements == 0)
-            {
+            if losses != 0 {
                 return Err("drain loss");
             }
         }
@@ -297,6 +394,45 @@ fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_delta_counts_records_and_rejects_regressions() {
+        let before = AdmissionStats {
+            losses: 4,
+            purged: 5,
+            acknowledged: 6,
+            records: 0,
+        };
+        let after = AdmissionStats {
+            losses: 4,
+            purged: 7,
+            acknowledged: 6,
+            records: 0,
+        };
+        assert_eq!(admission_delta(before, after), Ok((0, 2, 0, 0)));
+        assert_eq!(
+            admission_delta(
+                before,
+                AdmissionStats {
+                    records: 2,
+                    ..after
+                }
+            ),
+            Ok((0, 2, 0, 2))
+        );
+        assert!(admission_delta(before, AdmissionStats { purged: 4, ..after }).is_err());
+        assert!(admission_delta(before, AdmissionStats { losses: 3, ..after }).is_err());
+        assert!(
+            admission_delta(
+                before,
+                AdmissionStats {
+                    acknowledged: 5,
+                    ..after
+                }
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn diagnostic_classifies_outcomes_without_values() {
