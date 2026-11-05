@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import runpy
 import subprocess
@@ -90,6 +91,76 @@ class SessionDriverTests(unittest.TestCase):
                 target.write_bytes(b'original')
                 tests_dir=root/'db/tests'; moved=root/'moved'; tests_dir.rename(moved); tests_dir.symlink_to(moved,target_is_directory=True)
                 with self.assertRaisesRegex(ValueError,'symlink'): MODULE['source_snapshot']()
+
+    def test_reviewed_migration_20_is_hashed_but_not_an_applied_migration(self):
+        name='db/opt-in-migrations/0020_causal_inbox.sql'
+        source=Path(__file__).resolve().parents[3]/name
+        snapshot=MODULE['source_snapshot']()
+        self.assertEqual(snapshot[name],hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(len(MODULE['OPT_INS']),5)
+        self.assertEqual(MODULE['OPT_INS'][-1],'0019_causal_sessions')
+        self.assertNotIn('0020_causal_inbox',MODULE['OPT_INS'])
+
+    def test_reviewed_20_guard_refuses_missing_unknown_symlink_and_mutation(self):
+        with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
+            root=Path(temp)/'repo';root.mkdir()
+            for name in MODULE['SOURCE_PATHS']:
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+            target=root/'db/opt-in-migrations/0020_causal_inbox.sql'
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'original-20')
+            with mock.patch.dict(G,{'ROOT':root}):
+                before=MODULE['source_snapshot']()
+                self.assertIn('db/opt-in-migrations/0020_causal_inbox.sql',before)
+                target.write_bytes(b'mutated-20')
+                self.assertNotEqual(before,MODULE['source_snapshot']())
+                target.unlink()
+                with self.assertRaisesRegex(ValueError,'source list changed'):MODULE['source_snapshot']()
+                target.write_bytes(b'original-20')
+                extra=target.parent/'0021_unexpected.sql';extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'):MODULE['source_snapshot']()
+                extra.unlink();target.unlink();target.symlink_to(root/'elsewhere')
+                with self.assertRaisesRegex(ValueError,'symlink'):MODULE['source_snapshot']()
+
+    def test_migration_20_mutation_during_run_fails_after_cleanup(self):
+        with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
+            root=Path(temp)/'repo';root.mkdir()
+            for name in MODULE['SOURCE_PATHS']:
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+            target=root/'db/opt-in-migrations/0020_causal_inbox.sql';cid='a'*64;cleaned=[]
+            def command(args,**_):
+                if args[1]=='create':return cid
+                if args[1]=='start':target.write_bytes(b'changed');raise RuntimeError('start failed')
+                return ''
+            registry={'verify_qualified_profile':lambda:None,'IMAGE':'pinned',
+                      'cleanup_owned':lambda _run,c,*_:cleaned.append(c),
+                      'recover_owned_container':lambda *_:self.fail('unexpected recovery')}
+            with mock.patch.dict(G,{'ROOT':root,'registry_helpers':lambda:registry,'_run':command}),mock.patch('sys.argv',['driver']):
+                with self.assertRaisesRegex(RuntimeError,'source changed'):MODULE['main']()
+            self.assertEqual(cleaned,[cid])
+
+    def test_seed_executes_15_through_19_and_never_20(self):
+        cid='a'*64; executed=[];cleaned=[]
+        class SeedFinished(Exception):pass
+        def command(args,**kwargs):
+            if args[1]=='create':return cid
+            if args[1]=='exec':
+                statement=kwargs.get('input','');executed.append(statement)
+                if statement.startswith('SELECT current_database()'):
+                    return 'contour_local|{'+','.join(str(x) for x in range(1,20))+'}|0'
+            return ''
+        registry={'verify_qualified_profile':lambda:None,'IMAGE':'pinned',
+                  'cleanup_owned':lambda _run,c,*_:cleaned.append(c),
+                  'recover_owned_container':lambda *_:self.fail('unexpected recovery')}
+        def ready(args,**_):return subprocess.CompletedProcess(args,0,b'',b'')
+        def finish(*_):raise SeedFinished()
+        with mock.patch.dict(G,{'source_snapshot':lambda:{},'registry_helpers':lambda:registry,'_run':command,
+             'checked_source':lambda name:name.encode(),'qualify_cases':finish}), \
+             mock.patch.object(G['subprocess'],'run',side_effect=ready),mock.patch('sys.argv',['driver']):
+            with self.assertRaises(SeedFinished):MODULE['main']()
+        for number in range(15,20):
+            self.assertTrue(any('/%04d_'%number in statement for statement in executed))
+        self.assertFalse(any('/0020_' in statement for statement in executed))
+        self.assertEqual(cleaned,[cid])
 
     def test_temporary_ready_server_cannot_start_bootstrap(self):
         cid='a'*64; stage={'pid':'entrypoint','ready':True,'probes':0,'bootstrap':None}; cleaned=[]

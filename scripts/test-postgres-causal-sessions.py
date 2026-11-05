@@ -236,12 +236,14 @@ MIGRATIONS = ('0001_identity','0002_policy','0003_ingestion','0004_catalog','000
               '0011_import_selectors','0012_public_comparisons','0013_instance_registry','0014_observation_evidence')
 OPT_INS = ('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs',
            '0018_causal_runtime_registry','0019_causal_sessions')
+# Reviewed sources that this 1..19 session qualification hashes, but never applies.
+EXTRA_SOURCE_MIGRATIONS = ('0020_causal_inbox',)
 TERMINALS = ('runtime_closed','export_revoked','credential_revoked','lifecycle_closed')
 SCENARIOS = (('issue_issue','rollback') + TERMINALS + tuple('issue_then_'+x for x in TERMINALS)
              + ('issue_cas','issue_disable','issue_revoke','cas_issue','disable_issue','revoke_issue'))
 SOURCE_PATHS = (('db/bootstrap.sql',) + tuple('db/provision_'+x+'.sql' for x in PROVISIONS)
                 + tuple('db/migrations/'+x+'.sql' for x in MIGRATIONS)
-                + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS)
+                + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS + EXTRA_SOURCE_MIGRATIONS)
                 + ('db/tests/causal_runtime_registry_pre.sql','db/tests/causal_runtime_registry_post.sql',
                    'db/tests/causal_session_setup.sql','db/tests/causal_session_basic.sql',
                    'db/tests/causal_session_clock.sql','scripts/test-postgres-causal-registry.py',
@@ -269,7 +271,7 @@ def source_snapshot():
     for pattern, expected in (
         ('db/provision_*.sql', {'db/provision_'+x+'.sql' for x in PROVISIONS}),
         ('db/migrations/*.sql', {'db/migrations/'+x+'.sql' for x in MIGRATIONS}),
-        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS}),
+        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS + EXTRA_SOURCE_MIGRATIONS}),
     ):
         actual={str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)}
         if actual != expected:

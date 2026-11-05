@@ -6,6 +6,7 @@ use tokio_postgres::{Config, config::SslMode};
 mod authority;
 mod catalog;
 mod catalog_reader;
+mod causal;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
@@ -33,6 +34,10 @@ mod transaction;
 mod transport;
 pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
+pub use causal::{
+    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalReceipt,
+    CausalSession,
+};
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
 pub use submit::{DurableReceipt, OriginIngress, ReceiptStatus, SubmitError, V2Ingress};
 pub use transport::{ConnectedDatabase, TlsVersion, TransportError, TrustedCa};

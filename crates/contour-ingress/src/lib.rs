@@ -1,8 +1,10 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
 mod authority;
+mod causal_service;
 pub mod gateway;
 mod pool;
 mod service;
+pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
 use rustls::{
     RootCertStore, ServerConfig,
