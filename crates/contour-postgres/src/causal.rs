@@ -1,6 +1,6 @@
 //! Internal causal SQL bridge. Callers authenticate the peer and own the
 //! configured binding; neither a leaf pin nor this module attests a producer.
-//! Session authority is in-memory only; durable restart recovery is not provided.
+//! Session authority is in-memory only; request recovery requires a separate owner.
 //! The UUID501 profile and b0bc manifest are the existing fixed intent-only
 //! enrollment, not qualification or attestation of any changed producer.
 //! Database current-time observations have microsecond resolution. Canceling
@@ -128,6 +128,81 @@ pub struct CausalIssue {
     policy: Vec<u8>,
 }
 impl CausalIssue {
+    /// Canonical versioned encoding of inputs for the fixed intent-only v1 profile. Contains credentials;
+    /// callers must protect it and must not treat it as session authority.
+    pub fn original_bytes(&self) -> Vec<u8> {
+        let mut out = b"CCI1".to_vec();
+        for id in &self.binding.ids {
+            out.extend_from_slice(id.as_bytes());
+        }
+        out.extend_from_slice(&self.binding.peer);
+        out.extend_from_slice(self.nonce.as_bytes());
+        out.extend_from_slice(&self.ttl_micros.to_be_bytes());
+        for envelope in [&self.grant, &self.policy] {
+            out.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+            out.extend_from_slice(envelope);
+        }
+        out
+    }
+    /// Parse only original request inputs, with no verification or session creation.
+    pub fn from_original_bytes(bytes: &[u8]) -> Result<Self, CausalError> {
+        const FIXED: usize = 4 + 10 * 36 + 32 + 36 + 8 + 8;
+        if bytes.len() < FIXED || bytes.len() > FIXED + 2 * 1_048_576 || &bytes[..4] != b"CCI1" {
+            return Err(CausalError::Corrupt);
+        }
+        let mut at = 4;
+        fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8], CausalError> {
+            let end = at.checked_add(n).ok_or(CausalError::Corrupt)?;
+            let result = bytes.get(*at..end).ok_or(CausalError::Corrupt)?;
+            *at = end;
+            Ok(result)
+        }
+        let mut ids = Vec::with_capacity(10);
+        for _ in 0..10 {
+            ids.push(
+                std::str::from_utf8(take(bytes, &mut at, 36)?).map_err(|_| CausalError::Corrupt)?,
+            );
+        }
+        let peer: [u8; 32] = take(bytes, &mut at, 32)?
+            .try_into()
+            .map_err(|_| CausalError::Corrupt)?;
+        let nonce =
+            std::str::from_utf8(take(bytes, &mut at, 36)?).map_err(|_| CausalError::Corrupt)?;
+        let ttl = i64::from_be_bytes(
+            take(bytes, &mut at, 8)?
+                .try_into()
+                .map_err(|_| CausalError::Corrupt)?,
+        );
+        let mut envelopes = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let n = u32::from_be_bytes(
+                take(bytes, &mut at, 4)?
+                    .try_into()
+                    .map_err(|_| CausalError::Corrupt)?,
+            ) as usize;
+            if n == 0 || n > 1_048_576 {
+                return Err(CausalError::Corrupt);
+            }
+            envelopes.push(take(bytes, &mut at, n)?);
+        }
+        if at != bytes.len() || ttl <= 0 {
+            return Err(CausalError::Corrupt);
+        }
+        let binding = CausalBinding::new(ids.try_into().map_err(|_| CausalError::Corrupt)?, peer)
+            .map_err(|_| CausalError::Corrupt)?;
+        let issue = Self::new(
+            binding,
+            nonce,
+            Duration::from_micros(ttl as u64),
+            envelopes[0],
+            envelopes[1],
+        )
+        .map_err(|_| CausalError::Corrupt)?;
+        if issue.original_bytes() != bytes {
+            return Err(CausalError::Corrupt);
+        }
+        Ok(issue)
+    }
     pub fn new(
         binding: CausalBinding,
         nonce: &str,
@@ -164,7 +239,7 @@ impl fmt::Debug for CausalIssue {
     }
 }
 /// Created only after confirmed SQL commit. It retains the exact authenticated
-/// envelopes and original input in memory; no durable journal is implemented.
+/// envelopes and original input in memory; it cannot be deserialized from a journal.
 pub struct CausalSession {
     issue: CausalIssue,
     epoch: u64,
@@ -757,6 +832,36 @@ mod tests {
             expires: now() + time::Duration::minutes(1),
             digest: [9; 32],
         }
+    }
+    #[test]
+    fn original_codec_is_bounded_and_canonical() {
+        let v = fixture();
+        let issue = request(&v, "grant", "policy");
+        let original = issue.original_bytes();
+        assert_eq!(
+            CausalIssue::from_original_bytes(&original)
+                .unwrap()
+                .original_bytes(),
+            original
+        );
+        for bytes in [
+            vec![],
+            original[..original.len() - 1].to_vec(),
+            [original.as_slice(), b"x"].concat(),
+            [original.as_slice(), original.as_slice()].concat(),
+            vec![0; 2_100_000],
+        ] {
+            assert!(CausalIssue::from_original_bytes(&bytes).is_err());
+        }
+        let mut bad = original.clone();
+        bad[0] ^= 1;
+        assert!(CausalIssue::from_original_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[4] = b'A';
+        assert!(CausalIssue::from_original_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[440..444].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(CausalIssue::from_original_bytes(&bad).is_err());
     }
     #[test]
     fn signed_grant_policy_and_fixed_point_positive_control() {

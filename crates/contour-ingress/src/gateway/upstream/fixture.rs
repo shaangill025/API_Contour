@@ -40,6 +40,10 @@ impl Fixture {
         fixture
     }
     fn command(&self, args: &[&str]) {
+        // This test-only fixture spawns a process. Avoid inheriting another
+        // concurrently running test's live advisory-lock descriptor before exec.
+        #[cfg(unix)]
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
         let mut child = Command::new("openssl")
             .args(args)
             .current_dir(&self.0)

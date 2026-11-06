@@ -101,7 +101,7 @@ def snapshot():
 
 def resolve_cargo_artifact(lines, target_dir, package="contour-postgres", example="causal_bridge_probe"):
     """Select only this checkout's example from Cargo JSON, within fresh target."""
-    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe')):
+    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe'),('contour-ingress','causal_journal_probe')):
         raise ValueError('unsupported cargo fixture')
     found=[]
     expected=ROOT/'crates'/package/'examples'/(example+'.rs')
@@ -200,7 +200,7 @@ def bounded_process_output(args, *, cwd, env, timeout=300, limit=16_777_216):
 
 
 def build_probe(target_dir, package='contour-postgres', example='causal_bridge_probe'):
-    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe')):
+    if (package,example) not in (('contour-postgres','causal_bridge_probe'),('contour-ingress','causal_https_probe'),('contour-ingress','causal_journal_probe')):
         raise ValueError('unsupported cargo fixture')
     env=os.environ.copy(); env['CARGO_TARGET_DIR']=str(target_dir)
     output=bounded_process_output(['cargo','build','-p',package,'--example',example,
