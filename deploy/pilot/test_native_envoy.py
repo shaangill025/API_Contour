@@ -12,6 +12,23 @@ class NativeEnvoyTests(unittest.TestCase):
             'append_action': 'OVERWRITE_IF_EXISTS_OR_ADD', 'keep_empty_value': True}])
         with self.assertRaises(ValueError): config(origin_v2='v2')
 
+    def test_http1_trailers_enabled_without_other_codec_relaxations(self):
+        for profile in (False, True):
+            result = config(origin_v2=profile)
+            chain = result['static_resources']['listeners'][0]['filter_chains'][0]
+            manager = chain['filters'][0]['typed_config']
+            self.assertEqual(manager['codec_type'], 'HTTP1')
+            self.assertEqual(manager['http_protocol_options'], {'enable_trailers': True})
+            cluster = result['static_resources']['clusters'][0]
+            self.assertEqual(cluster['typed_extension_protocol_options'], {
+                'envoy.extensions.upstreams.http.v3.HttpProtocolOptions': {
+                    '@type': 'type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions',
+                    'explicit_http_config': {'http_protocol_options': {'enable_trailers': True}}}})
+            self.assertEqual(cluster['transport_socket']['typed_config']['common_tls_context']['alpn_protocols'], ['http/1.1'])
+            self.assertEqual(manager['stream_idle_timeout'], '10s')
+            self.assertEqual(manager['request_headers_timeout'], '5s')
+            self.assertEqual(cluster['connect_timeout'], '3s')
+
     def test_roles_are_mutually_authenticated_and_fixed(self):
         result = config()
         chain = result['static_resources']['listeners'][0]['filter_chains'][0]

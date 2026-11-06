@@ -28,11 +28,17 @@ def config(*, origin_v2=False):
     manager = chain['filters'][0]['typed_config']
     manager['route_config']['virtual_hosts'][0]['domains'] = ['*']
     manager['forward_client_cert_details'] = 'SANITIZE'
+    manager['http_protocol_options'] = {'enable_trailers': True}
     if origin_v2:
         manager['route_config']['request_headers_to_add'] = [{
             'header': {'key': 'x-contour-origin-witness', 'value': '%DOWNSTREAM_PEER_FINGERPRINT_256%'},
             'append_action': 'OVERWRITE_IF_EXISTS_OR_ADD', 'keep_empty_value': True}]
     cluster = result['static_resources']['clusters'][0]
+    cluster['typed_extension_protocol_options'] = {
+        'envoy.extensions.upstreams.http.v3.HttpProtocolOptions': {
+            '@type': 'type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions',
+            'explicit_http_config': {'http_protocol_options': {'enable_trailers': True}},
+        }}
     upstream = cluster['transport_socket']['typed_config']['common_tls_context']
     upstream['tls_certificates'] = [{'certificate_chain': {'filename': '/run/forwarder/forwarder.pem'},
                                       'private_key': {'filename': '/run/forwarder/forwarder.key'}}]
