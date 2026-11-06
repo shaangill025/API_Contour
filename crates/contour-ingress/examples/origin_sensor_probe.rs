@@ -165,6 +165,21 @@ fn admission_delta(
         after.records,
     ))
 }
+fn fixture_mode(arg: Option<&str>) -> Result<(bool, bool, bool), &'static str> {
+    match arg {
+        None => Ok((false, false, false)),
+        Some("--replacement-diagnostic") => Ok((true, false, false)),
+        Some("--admission-diagnostic") => Ok((true, true, false)),
+        Some("--discovery-matrix") => Ok((false, false, true)),
+        _ => Err("unexpected argument"),
+    }
+}
+fn matrix_command(enabled: bool, command: &str) -> bool {
+    enabled && command == "MATRIX_DRAIN"
+}
+fn reject_loss(matrix: bool, losses: u64) -> bool {
+    !matrix && losses != 0
+}
 fn main() {
     if let Err(e) = run() {
         eprintln!("origin sensor fixture: {e}");
@@ -174,12 +189,8 @@ fn main() {
 fn run() -> Result<(), &'static str> {
     let mut args = env::args().skip(1);
     let path = args.next().ok_or("config missing")?;
-    let (diagnostic_enabled, terminal_expected) = match args.next().as_deref() {
-        None => (false, false),
-        Some("--replacement-diagnostic") => (true, false),
-        Some("--admission-diagnostic") => (true, true),
-        _ => return Err("unexpected argument"),
-    };
+    let (diagnostic_enabled, terminal_expected, matrix_enabled) =
+        fixture_mode(args.next().as_deref())?;
     if args.next().is_some() {
         return Err("unexpected argument");
     }
@@ -291,7 +302,8 @@ fn run() -> Result<(), &'static str> {
             }
             let admission = terminal_expected && line == "ADMISSION_DRAIN";
             let diagnostic = line == "DRAIN_DIAGNOSTIC" && diagnostic_enabled;
-            if (line != "DRAIN" && !diagnostic && !admission) || serving.is_finished() {
+            let matrix = matrix_command(matrix_enabled, &line);
+            if (line != "DRAIN" && !diagnostic && !admission && !matrix) || serving.is_finished() {
                 return Err("command or serving failed");
             }
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -377,13 +389,15 @@ fn run() -> Result<(), &'static str> {
             if diagnostic {
                 let category = if losses == 0 { "ok" } else { "loss" };
                 println!("DIAG {category} {losses} {acknowledgements}");
+            } else if matrix {
+                println!("MATRIX {losses} {acknowledgements}");
             } else {
                 println!(
                     "DRAIN {} {losses} {acknowledgements}",
                     u8::from(losses != 0)
                 );
             }
-            if losses != 0 {
+            if reject_loss(matrix, losses) {
                 return Err("drain loss");
             }
         }
@@ -395,6 +409,21 @@ fn run() -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn matrix_command_is_opt_in_and_legacy_loss_remains_fatal() {
+        assert_eq!(fixture_mode(None), Ok((false, false, false)));
+        assert_eq!(
+            fixture_mode(Some("--discovery-matrix")),
+            Ok((false, false, true))
+        );
+        assert!(fixture_mode(Some("--other")).is_err());
+        assert!(!matrix_command(false, "MATRIX_DRAIN"));
+        assert!(!matrix_command(true, "DRAIN"));
+        assert!(matrix_command(true, "MATRIX_DRAIN"));
+        assert!(reject_loss(false, 1));
+        assert!(!reject_loss(false, 0));
+        assert!(!reject_loss(true, 1));
+    }
     #[test]
     fn admission_delta_counts_records_and_rejects_regressions() {
         let before = AdmissionStats {

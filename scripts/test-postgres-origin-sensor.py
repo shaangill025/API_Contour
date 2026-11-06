@@ -147,6 +147,15 @@ def run_discovery_cases(run_case):
     for case, directions in DISCOVERY_CASES:
         run_case(case, directions)
 
+def parse_matrix_drain(line, previous, expected_loss, record_count):
+    parts=line.split()
+    if len(parts)!=3 or parts[0]!='MATRIX' or not all(x.isascii() and x.isdigit() for x in parts[1:]):
+        raise AssertionError('invalid matrix drain')
+    losses,acks=map(int,parts[1:])
+    if losses != previous + expected_loss or (acks != 0 if record_count == 0 else not 1 <= acks <= record_count):
+        raise AssertionError('matrix loss or acknowledgement mismatch')
+    return losses
+
 def assert_discovery_catalog(catalog, rows, tenant):
     expected = {}
     for r in rows:
@@ -466,7 +475,7 @@ def run_cases(container, execute, setup, directory, environment):
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
-        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
+        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--discovery-matrix'] if matrix else ['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
         edge=prefix+'-edge'
@@ -511,6 +520,7 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
                     time.sleep(.1)
         if matrix:
             projected=set()
+            matrix_losses=0
             def project_and_check(rows):
                 batches=json.loads(execute("SELECT coalesce(json_agg(DISTINCT batch_id),'[]'::json) FROM contour.ingestion_v2_metadata WHERE tenant_id='%s' AND collector_id='%s';" % (tenant,collector)))
                 for batch in batches:
@@ -528,10 +538,12 @@ JOIN contour.operations o USING(tenant_id,operation_id)
 WHERE w.tenant_id='%s' AND w.collector_id='%s';""" % (tenant,collector)
                 assert_discovery_catalog(json.loads(execute(sql)),rows,tenant)
             def run_matrix_case(case, directions):
+                nonlocal matrix_losses
                 before={row[13] for row in snapshot()}
                 result=docker('exec',nodes[0][0],'node','/fixture/discovery-matrix.js','client',case,seconds=15)
                 if result != 'OK': raise AssertionError('matrix forwarding mismatch: '+case)
-                drain()
+                expected_loss = int(case in ('request-malformed','response-malformed','request-oversized','response-oversized'))
+                matrix_losses=parse_matrix_drain(command(gateway,'MATRIX_DRAIN',15),matrix_losses,expected_loss,len(directions))
                 rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source,('200','409'))
                 assert_discovery_case(rows,before,cert_hash('a'),directions,409 if case=='response-409' else 200)
                 project_and_check(rows)

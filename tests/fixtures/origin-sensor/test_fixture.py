@@ -65,6 +65,14 @@ class Fixture(unittest.TestCase):
         self.assertEqual(fixture.DISCOVERY_CASES[0],fixture.DISCOVERY_CASES[-1])
         self.assertEqual(len(fixture.DISCOVERY_CASES),13)
 
+    def test_matrix_loss_deltas_and_acknowledgements_are_exact(self):
+        total=fixture.parse_matrix_drain('MATRIX 0 2',0,0,2)
+        total=fixture.parse_matrix_drain('MATRIX 1 1',total,1,1)
+        total=fixture.parse_matrix_drain('MATRIX 1 0',total,0,0)
+        self.assertEqual(fixture.parse_matrix_drain('MATRIX 1 2',total,0,2),1)
+        for line,previous,loss,records in [('MATRIX 2 1',1,0,1),('MATRIX 0 1',1,0,1),('MATRIX 1 0',0,1,1),('MATRIX 1 1',1,0,0),('DRAIN 0 0',0,0,0),('MATRIX -1 0',0,0,0)]:
+            with self.assertRaises(AssertionError): fixture.parse_matrix_drain(line,previous,loss,records)
+
     def test_discovery_driver_aborts_on_case_failure(self):
         seen=[]
         def run(case, directions):
