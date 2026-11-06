@@ -21,6 +21,11 @@ use std::{
 };
 
 const MAX_RECORD: usize = 4 + 64 + 4 + 4 + 10 * 36 + 32 + 36 + 8 + 8 + 2 * 1_048_576;
+// Tests that spawn processes share this lock with lock-lifetime fixtures so
+// fork/exec cannot transiently duplicate another test's journal descriptor.
+#[cfg(test)]
+pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const LOCK: &CStr = c"lock";
 const RECORD: &CStr = c"issue";
 
@@ -244,7 +249,7 @@ mod tests {
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
         sync::{
-            Mutex, MutexGuard,
+            MutexGuard,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -254,14 +259,13 @@ mod tests {
     // An exec test can briefly inherit other threads' CLOEXEC descriptors before
     // exec closes them. Isolate these process-global lock tests from that window;
     // production owners deliberately do not promise fork-safe handoff.
-    static TEST_SERIAL: Mutex<()> = Mutex::new(());
     struct Temp {
         path: std::path::PathBuf,
         _serial: MutexGuard<'static, ()>,
     }
     impl Temp {
         fn new() -> Self {
-            let serial = TEST_SERIAL.lock().unwrap();
+            let serial = PROCESS_TEST_LOCK.lock().unwrap();
             let path = std::fs::canonicalize(std::env::temp_dir())
                 .unwrap()
                 .join(format!(
