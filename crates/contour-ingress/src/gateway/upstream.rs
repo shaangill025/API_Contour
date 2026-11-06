@@ -396,7 +396,7 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for GuardBody<B> 
     ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
         let result = Pin::new(&mut self.inner).poll_frame(cx);
         if matches!(&result, Poll::Ready(None))
-            || matches!(&result, Poll::Ready(Some(Ok(_))) if self.inner.is_end_stream())
+            || matches!(&result, Poll::Ready(Some(Ok(frame))) if frame.is_trailers() || self.inner.is_end_stream())
         {
             self.done = true;
             self.pair.finish(self.request);
@@ -516,6 +516,50 @@ mod tests {
         );
         assert!(Pin::new(&mut body).poll_frame(&mut cx).is_ready());
         assert!(p.response.load(Ordering::Acquire));
+    }
+    #[test]
+    fn terminal_trailers_complete_even_when_inner_end_stream_is_false() {
+        struct IncomingLike(Option<Frame<Bytes>>);
+        impl Body for IncomingLike {
+            type Data = Bytes;
+            type Error = hyper::Error;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+                Poll::Ready(self.0.take().map(Ok))
+            }
+            fn is_end_stream(&self) -> bool {
+                false
+            }
+        }
+        for request in [true, false] {
+            let p = pair();
+            if !request {
+                p.request.store(true, Ordering::Release);
+            }
+            let mut trailers = hyper::HeaderMap::new();
+            trailers.insert("x-end", hyper::header::HeaderValue::from_static("yes"));
+            let mut body = GuardBody::new(
+                IncomingLike(Some(Frame::trailers(trailers))),
+                p.clone(),
+                request,
+            );
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(Some(Ok(frame))) if frame.is_trailers())
+            );
+            assert!(
+                body.done,
+                "terminal trailers must complete before Hyper drops the body"
+            );
+            assert!(if request {
+                p.request.load(Ordering::Acquire)
+            } else {
+                p.response.load(Ordering::Acquire)
+            });
+            drop(body);
+        }
     }
     struct CountWake(AtomicUsize);
     impl Wake for CountWake {
