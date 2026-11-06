@@ -73,6 +73,14 @@ class Fixture(unittest.TestCase):
         for line,previous,loss,records in [('MATRIX 2 1',1,0,1),('MATRIX 0 1',1,0,1),('MATRIX 1 0',0,1,1),('MATRIX 1 1',1,0,0),('DRAIN 0 0',0,0,0),('MATRIX -1 0',0,0,0)]:
             with self.assertRaises(AssertionError): fixture.parse_matrix_drain(line,previous,loss,records)
 
+    def test_matrix_diagnostics_are_fixed_and_sanitized(self):
+        labels=fixture.matrix_diagnostics(b'OK\nDIAG server_request_trailers\nDIAG transport\n',b'DIAG secret-value\ncredential: private\n')
+        self.assertEqual(labels,('server_request_trailers','transport'))
+        self.assertEqual(fixture.matrix_diagnostics(b'DIAG server_request_trailers extra\n', b'DIAG \xff\n'),())
+        self.assertEqual(fixture.matrix_diagnostics(b'x'*16385+b'\nDIAG transport\n'),())
+        for label in fixture.MATRIX_DIAGNOSTICS:
+            self.assertEqual(fixture.matrix_diagnostics(('DIAG '+label+'\n').encode()),(label,))
+
     def test_discovery_driver_aborts_on_case_failure(self):
         seen=[]
         def run(case, directions):

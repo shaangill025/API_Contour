@@ -156,6 +156,21 @@ def parse_matrix_drain(line, previous, expected_loss, record_count):
         raise AssertionError('matrix loss or acknowledgement mismatch')
     return losses
 
+MATRIX_DIAGNOSTICS = frozenset({'server_tls','server_request_metadata','server_request_bytes','server_request_trailers',
+    'client_setup','client_tls','client_status','client_response_metadata','client_response_bytes','client_response_trailers','transport'})
+
+def matrix_diagnostics(*outputs):
+    # Never expose unexpected output, exception messages, traffic or credentials.
+    labels=set()
+    for output in outputs:
+        if len(output)>16384: continue
+        for line in output.splitlines():
+            if line.startswith(b'DIAG '):
+                try: label=line[5:].decode('ascii')
+                except UnicodeDecodeError: continue
+                if label in MATRIX_DIAGNOSTICS: labels.add(label)
+    return tuple(sorted(labels))
+
 def assert_discovery_catalog(catalog, rows, tenant):
     expected = {}
     for r in rows:
@@ -471,7 +486,7 @@ def run_cases(container, execute, setup, directory, environment):
         destination_script = 'discovery-matrix.js' if matrix else 'destination.js'
         destination_mounts=files('destination.crt','destination.key','ca.crt')+mount(ROOT/('tests/fixtures/origin-sensor/'+destination_script),'/fixture/destination.js')
         environment=dict(environment,EXPECTED_CLIENT_SHA256=cert_hash('upstream'))
-        destination,_=child('destination',destination_mounts,NODE,['/fixture/destination.js',*(['server'] if matrix else [])],['EXPECTED_CLIENT_SHA256'],'node')
+        destination,destination_name=child('destination',destination_mounts,NODE,['/fixture/destination.js',*(['server'] if matrix else [])],['EXPECTED_CLIENT_SHA256'],'node')
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
@@ -540,8 +555,15 @@ WHERE w.tenant_id='%s' AND w.collector_id='%s';""" % (tenant,collector)
             def run_matrix_case(case, directions):
                 nonlocal matrix_losses
                 before={row[13] for row in snapshot()}
-                result=docker('exec',nodes[0][0],'node','/fixture/discovery-matrix.js','client',case,seconds=15)
-                if result != 'OK': raise AssertionError('matrix forwarding mismatch: '+case)
+                result=subprocess.run(['docker','exec',nodes[0][0],'node','/fixture/discovery-matrix.js','client',case],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15,env=environment,cwd=ROOT)
+                if result.returncode or result.stdout != b'OK\n' or result.stderr:
+                    try:
+                        logs=subprocess.run(['docker','logs','--tail','50',destination_name],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10,env=environment,cwd=ROOT)
+                        outputs=(result.stdout,result.stderr,logs.stdout,logs.stderr) if logs.returncode==0 else (result.stdout,result.stderr)
+                    except (OSError,subprocess.TimeoutExpired): outputs=(result.stdout,result.stderr)
+                    labels=matrix_diagnostics(*outputs)
+                    print('Matrix diagnostic: '+(','.join(labels) if labels else 'unavailable'),flush=True)
+                    raise AssertionError('matrix forwarding mismatch: '+case)
                 expected_loss = int(case in ('request-malformed','response-malformed','request-oversized','response-oversized'))
                 matrix_losses=parse_matrix_drain(command(gateway,'MATRIX_DRAIN',15),matrix_losses,expected_loss,len(directions))
                 rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source,('200','409'))
