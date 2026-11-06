@@ -27,18 +27,78 @@ class Fixture(unittest.TestCase):
                 os.chdir(previous)
     def test_inherited_image_cannot_activate_the_sensor_mode(self):
         environment = runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
-        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1', 'CONTOUR_ORIGIN_ADMISSION_FIXTURE':'1'}):
+        with mock.patch.dict(os.environ, {'CONTOUR_ORIGIN_SENSOR_IMAGE':'contour-origin-sensor-fixture:stale', 'CONTOUR_HUMAN_ORIGIN_FIXTURE':'1', 'CONTOUR_ORIGIN_REPLACEMENT_FIXTURE':'1', 'CONTOUR_ORIGIN_ADMISSION_FIXTURE':'1', 'CONTOUR_TLS_DISCOVERY_MATRIX':'1'}):
             ordinary = environment('inert', '/tmp/unused-target')
             self.assertNotIn('CONTOUR_ORIGIN_SENSOR_IMAGE', ordinary)
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', ordinary)
             self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', ordinary)
             self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', ordinary)
+            self.assertNotIn('CONTOUR_TLS_DISCOVERY_MATRIX', ordinary)
             selected = environment('inert', '/tmp/unused-target', 'contour-origin-sensor-fixture:selected')
             self.assertEqual(selected['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:selected')
             self.assertNotIn('CONTOUR_HUMAN_ORIGIN_FIXTURE', selected)
             self.assertNotIn('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', selected)
             self.assertNotIn('CONTOUR_ORIGIN_ADMISSION_FIXTURE', selected)
+            self.assertNotIn('CONTOUR_TLS_DISCOVERY_MATRIX', selected)
             self.assertEqual(os.environ['CONTOUR_ORIGIN_SENSOR_IMAGE'], 'contour-origin-sensor-fixture:stale')
+    def test_discovery_matrix_requires_exact_directions_and_shapes(self):
+        shapes={'request':{'kind':'object','fields':{'probe':{'kind':'boolean'}},'additional':None},
+                'response':{'kind':'object','fields':{'id':{'kind':'integer'}},'additional':None}}
+        def row(record,direction):
+            r=[None]*22; r[0]='a'; r[13]=record; r[14]=direction; r[16]='200' if direction=='response' else None; r[21]=shapes[direction]; return r
+        request=row('request','request'); response=row('response','response')
+        fixture.assert_discovery_case([request,response],set(),'a',('request','response'))
+        fixture.assert_discovery_case([request],set(),'a',('request',))
+        conflict=row('conflict','response'); conflict[16]='409'
+        fixture.assert_discovery_case([conflict],set(),'a',('response',),409)
+        with self.assertRaises(AssertionError): fixture.assert_discovery_case([conflict],set(),'a',('response',))
+        wrong_request=row('bad-request','request'); wrong_request[16]='200'
+        with self.assertRaises(AssertionError): fixture.assert_discovery_case([wrong_request],set(),'a',('request',))
+        fixture.assert_discovery_case([],set(),'a',())
+        with self.assertRaises(AssertionError): fixture.assert_discovery_case([],{'missing'},'a',())
+        for rows, directions in [([request],('request','response')),([request,response],('request',)),([request,request],('request','response'))]:
+            with self.assertRaises(AssertionError): fixture.assert_discovery_case(rows,set(),'a',directions)
+        wrong=row('bad','request'); wrong[21]={'kind':'unknown'}
+        with self.assertRaises(AssertionError): fixture.assert_discovery_case([wrong],set(),'a',('request',))
+        wrong=row('bad','request'); wrong[0]='b'
+        with self.assertRaises(AssertionError): fixture.assert_discovery_case([wrong],set(),'a',('request',))
+        self.assertEqual(fixture.DISCOVERY_CASES[0],fixture.DISCOVERY_CASES[-1])
+        self.assertEqual(len(fixture.DISCOVERY_CASES),13)
+
+    def test_discovery_driver_aborts_on_case_failure(self):
+        seen=[]
+        def run(case, directions):
+            seen.append(case)
+            if case == 'response-malformed': raise RuntimeError('controlled failure')
+        with self.assertRaisesRegex(RuntimeError,'controlled failure'):
+            fixture.run_discovery_cases(run)
+        self.assertEqual(seen,['normal','request-malformed','response-malformed'])
+        self.assertNotIn('request-compressed',seen)
+
+    def test_discovery_catalog_requires_full_provenance(self):
+        row=[None]*27; row[22:27]=['batch','first','last','queued','expires']; row[5:9]=['p','s','e','d']; row[13:20]=['id','response','POST','200','source','http_json_v1',2]; row[21]={'kind':'boolean'}
+        item=['id','complete','structure',200,{'kind':'boolean'},'source','p','s','e','d','http_json_v1',2,False,[],['tenant','p','s','e','http','response','POST','/pilot'],'batch',1,1,1,'first','last','queued','expires']
+        fixture.assert_discovery_catalog([item],[row],'tenant')
+        for index in range(1,len(item)):
+            bad=item.copy(); bad[index]=None
+            with self.assertRaises(AssertionError): fixture.assert_discovery_catalog([bad],[row],'tenant')
+        with self.assertRaises(AssertionError): fixture.assert_discovery_catalog([], [row], 'tenant')
+        with self.assertRaises(AssertionError): fixture.assert_discovery_catalog([item,item], [row], 'tenant')
+
+    def test_shared_orderly_shutdown_rejects_errors_and_leaks(self):
+        def processes():
+            gateway=mock.Mock(returncode=0); origin=mock.Mock(returncode=0); origin.stderr.read.return_value=''; return gateway,origin
+        gateway,origin=processes()
+        fixture.orderly_shutdown(gateway,origin,lambda *_:'STOPPED',lambda _:'0')
+        gateway.stdin.write.assert_called_once_with('STOP\n'); origin.stdin.close.assert_called_once()
+        for kind in ('gateway','marker','origin','stderr','leak'):
+            gateway,origin=processes()
+            if kind=='gateway': gateway.returncode=1
+            if kind=='origin': origin.returncode=1
+            if kind=='stderr': origin.stderr.read.return_value='failure'
+            with self.assertRaises(AssertionError):
+                fixture.orderly_shutdown(gateway,origin,lambda *_:'bad' if kind=='marker' else 'STOPPED',lambda _:'1' if kind=='leak' else '0',clock=iter([0,11]).__next__,pause=lambda _:None)
+
     def test_generated_production_envoy_keeps_exact_overwrite(self):
         cfg = fixture.generated_edge(12345)
         listener = cfg['static_resources']['listeners'][0]['filter_chains'][0]
