@@ -387,7 +387,7 @@ def main():
             held('request',owner.renew); held('response',owner.rollback); held('response',owner.renew); held('request',owner.rollback)
             # Candidate validation must reject a real CA-signed wrong-name pair.
             wrong='v-'+uuid.uuid4().hex; wrongdir=folder/'published'/wrong; wrongdir.mkdir(mode=0o700)
-            for n in ('cert','key'): shutil.copyfile(folder/('wrong.'+n),wrongdir/(n+'.pem')); (wrongdir/(n+'.pem')).chmod(0o600)
+            for n,source in (('cert','wrong.crt'),('key','wrong.key')): shutil.copyfile(folder/source,wrongdir/(n+'.pem')); (wrongdir/(n+'.pem')).chmod(0o600)
             before_state=owner._load()
             try: owner.certs.validate_native_edge(wrong)
             except ValueError: pass
