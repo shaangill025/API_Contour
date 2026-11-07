@@ -3,6 +3,8 @@
 Single writer only. The CA and its private key must be outside the publication tree.
 """
 import os
+import hashlib
+import ssl
 import json
 from pathlib import Path
 import re
@@ -164,6 +166,81 @@ class Certificates:
                 'certificate_chain': {'filename': '/certs/' + current + '/cert.pem'},
                 'private_key': {'filename': '/certs/' + current + '/key.pem'},
             }}]}, separators=(',', ':')).encode('ascii')
+
+    def validate_native_edge(self, version, *, allow_expired=False):
+        """Validate one immutable native edge version without changing current."""
+        if not re.fullmatch(r'v-[0-9a-f]{32}', version):
+            raise ValueError('invalid certificate version')
+        root = self.directory / version
+        if root.is_symlink() or not root.is_dir(): raise ValueError('invalid certificate version')
+        info=root.stat()
+        if info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700: raise ValueError('unsafe certificate version')
+        cert, key = root/'cert.pem', root/'key.pem'
+        for path in (cert,key):
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                info=os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>65536: raise ValueError('unsafe certificate version')
+            finally: os.close(fd)
+        self._read(cert); self._read(key)
+        self._validate(cert, key, allow_expired=allow_expired)
+        sans = _run('x509','-in',cert,'-noout','-ext','subjectAltName').decode('ascii').splitlines()
+        if len(sans)!=2 or set(sans[1].strip().split(', ')) != {'DNS:pilot-gateway','DNS:pilot-destination'} or len(sans[1].strip().split(', ')) != 2:
+            raise ValueError('native edge SAN mismatch')
+        eku = _run('x509','-in',cert,'-noout','-ext','extendedKeyUsage').decode('ascii').splitlines()
+        if len(eku)!=2 or eku[1].strip()!='TLS Web Server Authentication':
+            raise ValueError('native edge purpose mismatch')
+        return cert, key
+
+    def native_edge_commitment(self, version, *, allow_expired=False):
+        """Public leaf DER and key SPKI identities; no private bytes returned."""
+        cert,key=self.validate_native_edge(version,allow_expired=allow_expired)
+        try: der=ssl.PEM_cert_to_DER_cert(self._read(cert).decode('ascii'))
+        except (ValueError,UnicodeError) as exc: raise ValueError('invalid certificate') from exc
+        public=_run('pkey','-in',key,'-pubout','-outform','DER')
+        if not public or len(public)>16384: raise ValueError('invalid public key')
+        return {'cert_sha256':hashlib.sha256(der).hexdigest(),'key_spki_sha256':hashlib.sha256(public).hexdigest()}
+
+    def sync_native_edge(self, version):
+        """Revalidate and durably sync a candidate and both parent directories."""
+        cert,key=self.validate_native_edge(version)
+        for path in (cert,key):
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                info=os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>65536: raise ValueError('unsafe certificate version')
+                os.fsync(fd)
+            finally: os.close(fd)
+        for directory in (self.directory/version,self.directory):
+            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:
+                info=os.fstat(fd)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700: raise ValueError('unsafe certificate version')
+                os.fsync(fd)
+            finally: os.close(fd)
+
+    def stage_native_edge(self, version, days=1):
+        """Issue a durable immutable candidate without publishing or pruning."""
+        if not re.fullmatch(r'v-[0-9a-f]{32}', version) or type(days) is not int or not 1 <= days <= 365:
+            raise ValueError('invalid native edge candidate')
+        with tempfile.TemporaryDirectory(prefix='issue-', dir=self.directory.parent) as temp:
+            p=Path(temp); key,csr,cert,ext=(p/n for n in ('key','csr','cert','ext'))
+            ext.write_text('basicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\nsubjectAltName=DNS:pilot-gateway,DNS:pilot-destination\nextendedKeyUsage=serverAuth\n')
+            _run('req','-newkey','rsa:2048','-nodes','-keyout',key,'-out',csr,'-subj','/CN=pilot-destination')
+            _run('x509','-req','-in',csr,'-CA',self.ca,'-CAkey',self.ca_key,'-set_serial',str(int.from_bytes(os.urandom(20),'big')),'-out',cert,'-days',str(days),'-extfile',ext)
+            self._validate(cert,key)
+            cert_data=_run('x509','-in',cert); key_data=_run('pkey','-in',key)
+        target=self.directory/version
+        target.mkdir(mode=0o700)
+        # A partial directory remains a refusal until the recorded intent is reconciled.
+        for name,data in (('cert.pem',cert_data),('key.pem',key_data)):
+            with os.fdopen(os.open(target/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'wb') as out:
+                out.write(data); out.flush(); os.fsync(out.fileno())
+        self.validate_native_edge(version)
+        for directory in (target,self.directory):
+            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+            try: os.fsync(fd)
+            finally: os.close(fd)
 
     def renewal_due(self, seconds):
         if type(seconds) is not int or seconds < 0:

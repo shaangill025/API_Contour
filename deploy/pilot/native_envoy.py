@@ -13,16 +13,17 @@ if str(ROOT) not in sys.path:
 from deploy.gateway.config import IMAGE, config as base_config
 
 
-def config(*, origin_v2=False):
-    if type(origin_v2) is not bool:
+def config(*, origin_v2=False, managed_edge=False):
+    if type(origin_v2) is not bool or type(managed_edge) is not bool:
         raise ValueError("invalid origin profile")
     result = base_config('native-gateway', 9443, 'native-gateway.test',
-                         ca='/run/forwarder/observer-ca.pem', listen_port=9443)
+                         ca='/run/forwarder/observer-ca.pem', listen_port=9443, sds=managed_edge)
     chain = result['static_resources']['listeners'][0]['filter_chains'][0]
     tls = chain['transport_socket']['typed_config']
     common = tls['common_tls_context']
-    common['tls_certificates'] = [{'certificate_chain': {'filename': '/run/forwarder/edge.pem'},
-                                   'private_key': {'filename': '/run/forwarder/edge.key'}}]
+    if not managed_edge:
+        common['tls_certificates'] = [{'certificate_chain': {'filename': '/run/forwarder/edge.pem'},
+                                       'private_key': {'filename': '/run/forwarder/edge.key'}}]
     common['validation_context'] = {'trusted_ca': {'filename': '/run/forwarder/pilot-ca.pem'}}
     tls['require_client_certificate'] = True
     manager = chain['filters'][0]['typed_config']
