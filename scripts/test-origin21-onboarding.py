@@ -721,6 +721,17 @@ def foreign_predicate(foreign,role):
             " AND application_name='origin21_"+foreign['nonce']+"' AND usename='"+role+"' AND datname='contour_local' AND backend_type='client backend' AND client_addr IN ('127.0.0.1'::inet,'::1'::inet)")
 
 
+def postgres_ready(run,cid):
+    sql="SELECT current_database()='contour_local' AND current_setting('listen_addresses')='*' AND current_setting('ssl')='on';"
+    command=('test "$(cat /proc/1/comm)" = docker-init && p=$(head -n 1 /var/lib/postgresql/data/postmaster.pid) && '
+             'case "$p" in *[!0-9]*|\'\') exit 1;; esac && test "$p" -gt 1 && test "$(cat /proc/$p/comm)" = postgres && '
+             'pg_isready -U postgres -d contour_local >/dev/null && '
+             'exec psql -XqAt -v ON_ERROR_STOP=1 -U postgres -d contour_local -c "'+sql+'"')
+    try: result=run(['docker','exec',cid,'sh','-c',command],timeout=5)
+    except (RuntimeError,TimeoutError): return False
+    return result.returncode==0 and result.stdout==b't\n' and result.stderr==b''
+
+
 def main(argv):
     full=bool(len(argv)==3 and argv[0]=='--full-capture')
     if not full and argv!=['--transport-only']: raise ValueError('expected a closed qualification mode')
@@ -800,8 +811,7 @@ def main(argv):
         call(['docker','start',cid])
         deadline=time.monotonic()+60
         while True:
-            result=run(['docker','exec',cid,'sh','-c','test "$(cat /proc/1/comm)" = docker-init && p=$(head -n 1 /var/lib/postgresql/data/postmaster.pid) && case "$p" in *[!0-9]*|\'\') exit 1;; esac && test "$p" -gt 1 && test "$(cat /proc/$p/comm)" = postgres && pg_isready -U postgres -d contour_local'],timeout=5)
-            if result.returncode==0: break
+            if postgres_ready(run,cid): break
             if time.monotonic()>=deadline: raise TimeoutError('postgres startup deadline')
             time.sleep(.2)
         if validate_postgres(inspect(['docker','inspect',cid]),token,cid,image_id,network_id)!='running': raise RuntimeError('fixture not running')
