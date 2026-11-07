@@ -23,6 +23,43 @@ ROOT=Path(__file__).resolve().parents[1]
 RELAY_DEADLINE_SECONDS=35
 
 
+def verify_build_evidence(path,digest,head,inspect):
+    from deploy.local import capture_renew
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts or any(part.is_symlink() for part in (path,*path.parents)) or not re.fullmatch('[0-9a-f]{64}',digest): raise ValueError('invalid build evidence path')
+    raw=capture_renew.read_file(path,4096)
+    if hashlib.sha256(raw).hexdigest()!=digest: raise ValueError('build evidence digest mismatch')
+    value=capture_renew.exact_json(raw)
+    if (type(value) is not dict or set(value)!={'version','head','image_id','status','owner_token','tag'} or type(value['version']) is not int or value['version']!=1 or
+        value['head']!=head or not re.fullmatch('[0-9a-f]{40}',head) or value['status']!='passed' or
+        not isinstance(value['image_id'],str) or not re.fullmatch('sha256:[0-9a-f]{64}',value['image_id']) or
+        not isinstance(value['owner_token'],str) or not re.fullmatch('[0-9a-f]{32}',value['owner_token']) or
+        value['tag']!='apicontour-origin21-build:'+value['owner_token'] or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw): raise ValueError('invalid build evidence')
+    image=inspect(['docker','image','inspect',value['tag']]); config=image.get('Config') or {}; labels=config.get('Labels') or {}
+    if image.get('Id')!=value['image_id'] or value['tag'] not in (image.get('RepoTags') or []) or labels.get('org.apicontour.build-owner')!=value['owner_token'] or labels.get('org.apicontour.build-head')!=head: raise ValueError('build image identity mismatch')
+    return value
+
+
+def clean_head(call):
+    head=call(['git','rev-parse','HEAD']).decode('ascii')
+    if not re.fullmatch('[0-9a-f]{40}',head) or call(['git','status','--porcelain','--untracked-files=all']): raise ValueError('clean reviewed source required')
+    return head
+
+
+def tracked_snapshot(call):
+    paths=call(['git','ls-files','-z']).split(b'\0'); result={}
+    for raw in paths:
+        if not raw: continue
+        name=raw.decode('utf-8'); path=ROOT/name
+        if name in result or not name or name.startswith('/') or '..' in Path(name).parts or any(part.is_symlink() for part in (path,*list(path.parents)[:len(Path(name).parts)-1])) or not path.is_file(): raise ValueError('invalid tracked source')
+        digest=hashlib.sha256()
+        with path.open('rb') as source:
+            for chunk in iter(lambda:source.read(1024*1024),b''): digest.update(chunk)
+        result[name]=digest.hexdigest()
+    if not result: raise ValueError('empty tracked source')
+    return result
+
+
 def failure_location(error):
     """Only fixed source locations; never exception text, locals or SQL."""
     frames=[]; current=error.__traceback__
@@ -91,6 +128,224 @@ def cleanup_owned(call,inspect,token,network_id,cid,image_id,network_attempted,c
         validate_network(inspect(['docker','network','inspect',network_id]),token,network_id,[])
         call(['docker','network','rm',network_id])
         if call(['docker','network','ls','-q','--no-trunc','--filter','label='+LABEL+'='+token]): raise RuntimeError('fixture network cleanup incomplete')
+
+
+def runtime_receipt(folder,build,deployment):
+    value={'version':1,'head':build['head'],'image_id':build['image_id'],'status':build['status'],'network':deployment}
+    raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+    path=Path(folder)/'runtime-receipt.json'
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as out:
+        out.write(raw); out.flush(); os.fsync(out.fileno())
+    fd=os.open(folder,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    return path,hashlib.sha256(raw).hexdigest()
+
+
+def preflight_artifact_roots(profile_root,products_root):
+    if os.path.lexists(profile_root) or os.path.lexists(products_root): raise ValueError('origin21 artifact root already exists')
+
+
+def record_owned_root(folder,kind,root):
+    """Publish this invocation's exact directory identity outside the bundle."""
+    from deploy.local import capture_renew
+    if kind not in ('profile','products'): raise ValueError('invalid owned root kind')
+    folder=Path(folder); root=Path(root); capture_renew.safe_dir(folder)
+    if not re.fullmatch('contour-origin21-qual-[0-9a-f]{32}',folder.name) or folder.parent!=root.parent: raise ValueError('invalid owned root scope')
+    info=os.lstat(root)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700: raise ValueError('unsafe owned root')
+    value={'version':1,'kind':kind,'name':root.name,'device':info.st_dev,'inode':info.st_ino,'owner':folder.name[-32:]}
+    raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+    fd=os.open(folder/(kind+'-owned.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as out:
+        out.write(raw); out.flush(); os.fsync(out.fileno())
+    fd=os.open(folder,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+
+
+def verify_owned_root(folder,kind,root):
+    from deploy.local import capture_renew
+    folder=Path(folder); root=Path(root); marker=folder/(kind+'-owned.json')
+    if kind not in ('profile','products') or not re.fullmatch('contour-origin21-qual-[0-9a-f]{32}',folder.name) or folder.parent!=root.parent: raise ValueError('invalid owned root scope')
+    if not os.path.lexists(root):
+        if os.path.lexists(marker): raise ValueError('owned root disappeared')
+        return None
+    if not os.path.lexists(marker): raise ValueError('artifact root lacks ownership evidence')
+    capture_renew.safe_dir(folder)
+    raw=capture_renew.read_file(marker,4096); value=capture_renew.exact_json(raw)
+    info=os.lstat(root)
+    expected={'version':1,'kind':kind,'name':root.name,'device':info.st_dev,'inode':info.st_ino,'owner':folder.name[-32:]}
+    if (type(value) is not dict or type(value.get('version')) is not int or type(value.get('device')) is not int or type(value.get('inode')) is not int or
+        not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700 or value!=expected or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw): raise ValueError('artifact ownership drift')
+    return info.st_dev,info.st_ino
+
+
+def create_profile_owned(folder,root):
+    """Create the profile exclusively; a racing directory is never adopted."""
+    os.mkdir(root,0o700)
+    fd=os.open(Path(root).parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    record_owned_root(folder,'profile',root)
+
+
+def fact_snapshot(psql,tenant):
+    if not re.fullmatch('[0-9a-f-]{36}',tenant): raise ValueError('invalid synthetic tenant')
+    tables=('origin_lifecycles','origin_credentials','origin_observer_grants','origin_terminal_events','collector_authorization','policy_revisions','collectors','sources','workload_assignments','source_instance_bindings','workload_instances','deployments','source_authorization','service_import_defaults')
+    arrays=["(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text),'[]'::jsonb) FROM contour."+table+" x WHERE tenant_id='"+tenant+"')" for table in tables]
+    value=psql("SELECT jsonb_build_array((SELECT jsonb_agg(version ORDER BY version) FROM contour.schema_migrations),"+','.join(arrays)+")::text;")
+    if not isinstance(value,str) or len(value)>8*1024*1024: raise RuntimeError('invalid fact snapshot')
+    json.loads(value)
+    return value
+
+
+def full_capture(folder,deployment,runner,build):
+    from deploy.local import origin21_products, origin21_ready, origin21_setup, origin21_transport, origin21_evidence, provision, capture_renew
+    def admin(sql): return runner.run((origin21_transport.GUARD+sql).encode(),'sql','postgres')
+    def sensitive(sql): return runner.run((origin21_transport.GUARD+sql).encode(),'sql','postgres')
+    def authenticate(role,password): return runner.run(password.encode('ascii'),'auth',role)==role
+    receipt,digest=runtime_receipt(folder,build,deployment)
+    args={'app_image_id':build['image_id'],'build_head':build['head'],'build_receipt':str(receipt),'build_receipt_sha256':digest}
+    create_profile_owned(folder,origin21_products.origin21_profile.PROFILE.state)
+    origin21_setup.prepare_identities()
+    commitments=origin21_products.start_products(**args)
+    if type(commitments) is not tuple or len(commitments)!=2 or any(type(x) is not bytes or len(x)!=32 for x in commitments): raise RuntimeError('invalid product commitments')
+    if tuple(origin21_evidence.digest(origin21_products.inspect_slot(i)) for i in (1,2))!=commitments: raise RuntimeError('product commitments changed before ownership')
+    record_owned_root(folder,'products',origin21_products.OWNER)
+    common={'psql':admin,'sensitive_execute':sensitive,'authenticate':authenticate}
+    origin21_setup.prepare(**common,inspect_slot=origin21_products.inspect_slot,expected_evidence=commitments)
+    origin21_products.start_companions(**args,**common)
+    root=origin21_products.origin21_profile.PROFILE.state
+    before_journal=capture_renew.read_file(root/'setup.json',4096)
+    before_evidence=capture_renew.read_file(root/'operator-evidence.json',8192)
+    before_facts=fact_snapshot(admin,provision.IDS[0]); before_slots=[origin21_products.inspect_slot(i) for i in (1,2)]
+    origin21_setup.prepare(**common,inspect_slot=origin21_products.inspect_slot,expected_evidence=commitments)
+    origin21_setup.prepare(**common,inspect_slot=origin21_products.inspect_slot,expected_evidence=commitments,check_only=True)
+    if (before_journal!=capture_renew.read_file(root/'setup.json',4096) or before_evidence!=capture_renew.read_file(root/'operator-evidence.json',8192) or
+        before_facts!=fact_snapshot(admin,provision.IDS[0]) or before_slots!=[origin21_products.inspect_slot(i) for i in (1,2)]): raise RuntimeError('enrollment replay drift')
+    result=origin21_ready.check(commitments,**common)
+    if result!={'product_tls_and_catalog_verified':True,'ui_verified':False}: raise RuntimeError('capture qualification incomplete')
+
+
+def cleanup_topology(call,inspect,deployment,folder):
+    """Remove only a completely recorded, reverified seven-container topology."""
+    from deploy.local import origin21_products as p, origin21_evidence
+    owned=verify_owned_root(folder,'products',p.OWNER)
+    if owned is None:
+        if call(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+p.PROJECT]) or call(['docker','network','ls','-q','--no-trunc','--filter','name=^'+p.NETWORK+'$']): raise RuntimeError('unowned product topology exists')
+        return
+    intent=p._read_record('intent.json'); record=p._read_record('products.json')
+    if intent.get('deployment')!=deployment: raise RuntimeError('product deployment drift')
+    product_ids=p._recorded_products(intent,record)
+    if p._read_record('commitments.json')!={'version':1,'sha256':[origin21_evidence.digest(slot).hex() for slot in record['slots']]}: raise RuntimeError('product commitments drift')
+    has_intent=os.path.lexists(p.OWNER/'companions-intent.json')
+    if has_intent:
+        net=p._companion_record(intent,product_ids)
+        pending=p._read_record('companions-intent.json'); companion=p._read_record('companions.json')['services']
+        all_ids=product_ids+[companion[name]['id'] for name in p.COMPANIONS]
+        capture_members=[deployment['postgres_id']]+[companion[name]['id'] for name in ('origin21-capture-ingress','origin21-capture-worker','native-gateway')]
+    else:
+        raise RuntimeError('complete companion records required for cleanup')
+    if len(set(all_ids))!=len(all_ids): raise RuntimeError('duplicate topology identity')
+    project=call(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+p.PROJECT]).decode('ascii').split()
+    if len(project)!=len(all_ids) or set(project)!=set(all_ids): raise RuntimeError('project membership drift')
+    validate_network(inspect(['docker','network','inspect',deployment['id']]),deployment['owner_token'],deployment['id'],capture_members)
+    default_members=list(product_ids)+([companion[name]['id'] for name in ('destination','native-gateway','native-envoy')] if has_intent else [])
+    order=list(reversed(p.COMPANIONS)) if has_intent else []
+    for service in order:
+        if verify_owned_root(folder,'products',p.OWNER)!=owned: raise ValueError('product ownership changed')
+        entry=companion[service]; cid=entry['id']
+        state=p._validate_companion(inspect(['docker','inspect',cid]),service,cid,pending['images'][service],intent['token'],net,deployment['id'],deployment['name'],running=True)
+        if state['StartedAt']!=entry['started_at']: raise RuntimeError('companion generation changed')
+        call(['docker','rm','-f',cid]); all_ids.remove(cid)
+        if cid in default_members: default_members.remove(cid)
+        if cid in capture_members: capture_members.remove(cid)
+        if p._network(default_members,intent['token'])!=net: raise RuntimeError('product network identity changed')
+        validate_network(inspect(['docker','network','inspect',deployment['id']]),deployment['owner_token'],deployment['id'],capture_members)
+        current=call(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+p.PROJECT]).decode('ascii').split()
+        if len(current)!=len(all_ids) or set(current)!=set(all_ids): raise RuntimeError('project membership drift')
+    for index,cid in enumerate(product_ids,1):
+        if verify_owned_root(folder,'products',p.OWNER)!=owned: raise ValueError('product ownership changed')
+        state=p.validate(inspect(['docker','inspect',cid]),index,cid,intent['image_id'],intent['image_env'],intent['image_cmd'],intent['image_workdir'],intent['token'],running=True)
+        if state['StartedAt']!=record['slots'][index-1]['started_at']: raise RuntimeError('product generation changed')
+        call(['docker','rm','-f',cid]); all_ids.remove(cid); default_members.remove(cid)
+        if p._network(default_members,intent['token'])!=net: raise RuntimeError('product network identity changed')
+        current=call(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+p.PROJECT]).decode('ascii').split()
+        if len(current)!=len(all_ids) or set(current)!=set(all_ids): raise RuntimeError('project membership drift')
+    call(['docker','network','rm',net])
+    if call(['docker','network','ls','-q','--no-trunc','--filter','name=^'+p.NETWORK+'$']): raise RuntimeError('product network cleanup incomplete')
+
+
+def remove_owned_tree(root,expected,*,dry_run=False,required_identity=None):
+    """Remove a complete private tree only when every path is expected and unchanged."""
+    root=Path(root); initial=os.lstat(root)
+    if not stat.S_ISDIR(initial.st_mode) or initial.st_uid!=os.getuid() or stat.S_IMODE(initial.st_mode)!=0o700: raise ValueError('unsafe owned artifact tree')
+    if required_identity is not None and (initial.st_dev,initial.st_ino)!=required_identity: raise ValueError('artifact root ownership changed')
+    observed={}
+    def inspect_dir(fd,prefix):
+        for name in os.listdir(fd):
+            relative=prefix+name; info=os.stat(name,dir_fd=fd,follow_symlinks=False)
+            if info.st_uid!=os.getuid(): raise ValueError('artifact ownership drift')
+            if stat.S_ISDIR(info.st_mode):
+                if stat.S_IMODE(info.st_mode)!=0o700: raise ValueError('unsafe artifact directory')
+                observed[relative+'/']=(info.st_dev,info.st_ino)
+                child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                try: inspect_dir(child,relative+'/')
+                finally: os.close(child)
+            elif stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1:
+                observed[relative]=(info.st_dev,info.st_ino)
+            else: raise ValueError('unsafe artifact file')
+    rootfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        if (os.fstat(rootfd).st_dev,os.fstat(rootfd).st_ino)!=(initial.st_dev,initial.st_ino): raise ValueError('artifact root changed')
+        inspect_dir(rootfd,'')
+        if set(observed)!=set(expected): raise ValueError('artifact inventory drift')
+        if dry_run: return
+        def remove_dir(fd,prefix):
+            for name in os.listdir(fd):
+                relative=prefix+name; info=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                directory=stat.S_ISDIR(info.st_mode); key=relative+'/' if directory else relative
+                if key not in observed or (info.st_dev,info.st_ino)!=observed[key]: raise ValueError('artifact identity changed')
+                if directory:
+                    child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                    try: remove_dir(child,relative+'/')
+                    finally: os.close(child)
+                    os.rmdir(name,dir_fd=fd)
+                else: os.unlink(name,dir_fd=fd)
+            os.fsync(fd)
+        remove_dir(rootfd,'')
+    finally: os.close(rootfd)
+    info=os.lstat(root)
+    if (info.st_dev,info.st_ino)!=(initial.st_dev,initial.st_ino): raise ValueError('artifact root changed')
+    os.rmdir(root)
+    fd=os.open(root.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+
+
+def cleanup_full_artifacts(folder,*,dry_run=False):
+    from deploy.local import origin21_products, origin21_profile, origin21_configs
+    from deploy.pilot import origin_credentials
+    owner=origin21_products.OWNER
+    owner_identity=verify_owned_root(folder,'products',owner)
+    profile_identity=verify_owned_root(folder,'profile',origin21_profile.PROFILE.state)
+    if owner_identity is not None:
+        expected={'intent.json','products.json','commitments.json','companions-intent.json','companions.json'}
+        remove_owned_tree(owner,expected,dry_run=dry_run,required_identity=owner_identity)
+    root=origin21_profile.PROFILE.state
+    if profile_identity is not None:
+        expected=origin_credentials._expected() | set(origin21_configs.expected()) | {'setup.lock','setup.json','operator-evidence.json','capture/private/observer-policy.json'}
+        remove_owned_tree(root,expected,dry_run=dry_run,required_identity=profile_identity)
+
+
+def qualifier_artifacts():
+    return {'intent.json','request.cnf','extensions','ca.crt','ca.key','ca.srl','server.key','server.csr','server.crt','initial-secret',
+            'network/','network/intent.json','postgres/','postgres/intent.json','transport/','transport/lock',
+            'crash-case/','crash-case/intent.json','crash-case/transport/','crash-case/transport/lock',
+            'ack-case/','ack-case/intent.json','ack-case/transport/','ack-case/transport/lock',
+            'ack-case/relay/','ack-case/relay/intent.json','ack-case/ack/','ack-case/ack/intent.json','runtime-receipt.json','profile-owned.json','products-owned.json'}
 
 
 CRASH_LOG=re.compile(rb'(?i)(?:server process .*?(?:terminated by signal|exited with exit code|terminated by exception)|abnormal termination of server process|terminating any other active server processes|terminating connection because of crash of another server process|all server processes terminated; reinitializing|received immediate shutdown request|PANIC:|database system (?:was interrupted|was not properly shut down|is in recovery mode|is starting up|is not yet accepting connections)|consistent recovery state has not been yet reached)')
@@ -465,11 +720,14 @@ def foreign_predicate(foreign,role):
 
 
 def main(argv):
-    if argv!=['--transport-only']: raise ValueError('expected --transport-only')
+    full=bool(len(argv)==3 and argv[0]=='--full-capture')
+    if not full and argv!=['--transport-only']: raise ValueError('expected a closed qualification mode')
+    sys.dont_write_bytecode=True
     os.umask(0o077)
     if not (ROOT/'.git').is_file() or (ROOT/'.git').is_symlink(): raise ValueError('isolated git worktree required')
     if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
-    from deploy.local import capture_renew, origin21_schema, origin21_sql_runner, origin21_state, origin21_transport, provision
+    from deploy.local import capture_renew, origin21_schema, origin21_sql_runner, origin21_state, origin21_transport, origin21_profile, origin21_products, provision
+    if full: preflight_artifact_roots(origin21_profile.PROFILE.state,origin21_products.OWNER)
     state=ROOT/'.local-mvp'
     try: os.mkdir(state,0o700)
     except FileExistsError: pass
@@ -490,6 +748,11 @@ def main(argv):
         value=json.loads(call(args))
         if not isinstance(value,list) or len(value)!=1 or not isinstance(value[0],dict): raise RuntimeError('fixture inspection failed')
         return value[0]
+    build=None; full_before=None
+    if full:
+        head=clean_head(call); full_before=tracked_snapshot(call)
+        build=verify_build_evidence(argv[1],argv[2],head,inspect)
+        if clean_head(call)!=head or tracked_snapshot(call)!=full_before: raise RuntimeError('build source changed')
     token=secrets.token_hex(16); name='contour-origin21-qual-'+token
     folder=state/name; os.mkdir(folder,0o700)
     dfd=os.open(state,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -498,7 +761,7 @@ def main(argv):
     durable_intent(folder,{'version':1,'owner':token,'network':name,'image':IMAGE,'scope':'transport-smoke'})
     print('Private fixture state: '+str(folder),flush=True)
     network_id=cid=image_id=None; network_attempted=container_attempted=False; ca_owned=None
-    failure=None; phase='fixture-setup'; guard=None
+    failure=None; phase='fixture-setup'; guard=None; full_attempted=False; key_owned=None
     previous_handler=signal.signal(signal.SIGALRM,lambda *_:(_ for _ in ()).throw(TimeoutError('fixture absolute deadline')))
     signal.setitimer(signal.ITIMER_REAL,120)
     try:
@@ -517,7 +780,7 @@ def main(argv):
         try: os.fsync(fd)
         finally: os.close(fd)
         call(['openssl','req','-new','-newkey','rsa:2048','-nodes','-sha256','-subj','/CN=localhost','-keyout',str(key),'-out',str(folder/'server.csr')],timeout=30)
-        call(['openssl','x509','-req','-in',str(folder/'server.csr'),'-CA',str(ca),'-CAkey',str(cakey),'-CAcreateserial','-days','1','-extfile',str(extensions),'-out',str(cert)],timeout=30)
+        call(['openssl','x509','-req','-in',str(folder/'server.csr'),'-CA',str(ca),'-CAkey',str(cakey),'-CAserial',str(folder/'ca.srl'),'-CAcreateserial','-days','1','-extfile',str(extensions),'-out',str(cert)],timeout=30)
         password=folder/'initial-secret'; password.write_text(secrets.token_hex(32)); os.chmod(password,0o600)
         network_attempted=True
         network_id=call(['docker','network','create','--internal','--label',LABEL+'='+token,name]).decode('ascii')
@@ -582,6 +845,20 @@ def main(argv):
         guard.close(); guard=None
         execute('DROP TABLE public.origin21_qual_rows; DROP SEQUENCE public.origin21_qual_seq;')
         origin21_schema.require_ready(list(range(1,15)),execute,stage=14,phase='pre')
+        if full:
+            signal.setitimer(signal.ITIMER_REAL,600)
+            phase='full-capture'
+            key_bytes=capture_renew.read_file(cakey,16384); key_path=state/'ca.key'
+            fd=os.open(key_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'wb') as out:
+                key_owned=(os.fstat(out.fileno()).st_ino,hashlib.sha256(key_bytes).hexdigest())
+                out.write(key_bytes); out.flush(); os.fsync(out.fileno())
+            fd=os.open(state,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+            full_attempted=True
+            full_capture(folder,deployment,runner,build)
+            if clean_head(call)!=head or tracked_snapshot(call)!=full_before or verify_build_evidence(argv[1],argv[2],head,inspect)!=build: raise RuntimeError('full capture source or build changed')
         if snapshot()!=before: raise RuntimeError('fixture source changed')
     except BaseException as error:
         failure=error
@@ -593,10 +870,22 @@ def main(argv):
         try: guard.close()
         except BaseException as error: cleanup_failures.append(error)
     try:
+        if key_owned is not None and (os.lstat(state/'ca.key').st_ino,hashlib.sha256(capture_renew.read_file(state/'ca.key',16384)).hexdigest())!=key_owned: raise RuntimeError('fixture CA key identity changed')
+        if ca_owned is not None and (os.lstat(state/'ca.crt').st_ino,hashlib.sha256(capture_renew.read_file(state/'ca.crt',65536)).hexdigest())!=ca_owned: raise RuntimeError('fixture CA identity changed')
+        if full_attempted:
+            cleanup_full_artifacts(folder,dry_run=True)
+            remove_owned_tree(folder,qualifier_artifacts(),dry_run=True)
+            cleanup_topology(call,inspect,deployment,folder)
+            cleanup_full_artifacts(folder)
         cleanup_owned(call,inspect,token,network_id,cid,image_id,network_attempted,container_attempted)
+        if key_owned is not None:
+            if (os.lstat(state/'ca.key').st_ino,hashlib.sha256(capture_renew.read_file(state/'ca.key',16384)).hexdigest())!=key_owned: raise RuntimeError('fixture CA key identity changed')
+            capture_renew.remove_durable(state/'ca.key')
         if ca_owned is not None:
-            if (os.lstat(state/'ca.crt').st_ino,hashlib.sha256((state/'ca.crt').read_bytes()).hexdigest())!=ca_owned: raise RuntimeError('fixture CA identity changed')
+            if (os.lstat(state/'ca.crt').st_ino,hashlib.sha256(capture_renew.read_file(state/'ca.crt',65536)).hexdigest())!=ca_owned: raise RuntimeError('fixture CA identity changed')
             capture_renew.remove_durable(state/'ca.crt')
+        if full_attempted:
+            remove_owned_tree(folder,qualifier_artifacts())
     except BaseException as cleanup:
         cleanup_failures.append(cleanup)
     if guard is not None and guard.child is not None:
@@ -611,7 +900,10 @@ def main(argv):
         print('fixture failure phase=owned-cleanup type=CleanupFailure',file=sys.stderr,flush=True)
         raise BaseExceptionGroup('fixture and cleanup failure',([failure] if failure is not None else [])+cleanup_failures) from None
     if failure is not None: raise RuntimeError('fixture transport smoke failed') from None
-    print('PASS: synthetic transport SELECT 1, timeout rollback, local-death, lost-ACK and foreign-session controls; onboarding not verified')
+    if full:
+        if clean_head(call)!=head or tracked_snapshot(call)!=full_before or verify_build_evidence(argv[1],argv[2],head,inspect)!=build: raise RuntimeError('full capture source or build changed during cleanup')
+        print('PASS: synthetic two-origin capture and replay; UI not verified')
+    else: print('PASS: synthetic transport SELECT 1, timeout rollback, local-death, lost-ACK and foreign-session controls; onboarding not verified')
 
 
 def durable_id(folder,kind,value):

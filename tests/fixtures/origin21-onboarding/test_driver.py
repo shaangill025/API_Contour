@@ -1,6 +1,7 @@
 """Offline checks for the origin21 qualification driver and deployment factory."""
 import tempfile
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -17,6 +18,207 @@ driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 
 class FactoryTests(unittest.TestCase):
+    def test_full_preflight_refuses_existing_complete_artifact_roots_without_mutation(self):
+        from deploy.local import origin21_profile,origin21_configs
+        from deploy.pilot import origin_credentials
+        for kind in ('profile','products'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory).resolve(); (root/'.git').write_text('gitdir: synthetic\n'); state=root/'.local-mvp'; state.mkdir(mode=0o700)
+                profile=state/'origin21-pilot'; products=state/'origin21-products'
+                if kind=='profile':
+                    profile.mkdir(mode=0o700)
+                    names=origin_credentials._expected() | set(origin21_configs.expected()) | {'setup.lock','setup.json','operator-evidence.json','capture/private/observer-policy.json'}
+                    for name in sorted(names,key=len):
+                        path=profile/name
+                        if name.endswith('/'): path.mkdir(parents=True,exist_ok=True,mode=0o700)
+                        else:
+                            path.parent.mkdir(parents=True,exist_ok=True,mode=0o700); path.write_bytes(b'synthetic'); path.chmod(0o600)
+                    before={str(path.relative_to(profile)):(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in profile.rglob('*') if path.is_file()}
+                else:
+                    products.mkdir(mode=0o700)
+                    for name in ('intent.json','products.json','commitments.json','companions-intent.json','companions.json'):
+                        path=products/name; path.write_bytes(b'synthetic'); path.chmod(0o600)
+                    before={path.name:(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in products.iterdir()}
+                selected=origin21_profile.PROFILE._replace(state=profile)
+                with mock.patch.object(driver,'ROOT',root), mock.patch.object(origin21_profile,'PROFILE',selected), mock.patch.object(origin21_products,'OWNER',products), mock.patch.object(driver.runpy,'run_path') as helper, mock.patch.object(origin21_products,'start_products') as start:
+                    with self.assertRaisesRegex(ValueError,'artifact root already exists'): driver.main(['--full-capture','/unused','0'*64])
+                    helper.assert_not_called(); start.assert_not_called()
+                after={str(path.relative_to(profile)):(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in profile.rglob('*') if path.is_file()} if kind=='profile' else {path.name:(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in products.iterdir()}
+                self.assertEqual(before,after); self.assertFalse((state/'ca.crt').exists()); self.assertFalse((state/'ca.key').exists())
+
+    def test_racing_profile_root_is_never_adopted_or_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory).resolve(); folder=parent/('contour-origin21-qual-'+'a'*32); folder.mkdir(mode=0o700); profile=parent/'origin21-pilot'; products=parent/'origin21-products'
+            driver.preflight_artifact_roots(profile,products)
+            profile.mkdir(mode=0o700); sentinel=profile/'setup.json'; sentinel.write_bytes(b'foreign'); sentinel.chmod(0o600)
+            with self.assertRaises(FileExistsError): driver.create_profile_owned(folder,profile)
+            self.assertFalse((folder/'profile-owned.json').exists())
+            with self.assertRaisesRegex(ValueError,'lacks ownership evidence'): driver.verify_owned_root(folder,'profile',profile)
+            self.assertEqual(sentinel.read_bytes(),b'foreign')
+
+    def test_racing_products_root_after_preflight_cannot_gain_cleanup_authority(self):
+        from deploy.local import origin21_setup
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory).resolve(); folder=parent/('contour-origin21-qual-'+'a'*32); folder.mkdir(mode=0o700); profile=parent/'origin21-pilot'; products=parent/'origin21-products'
+            driver.preflight_artifact_roots(profile,products)
+            def raced(**_):
+                products.mkdir(mode=0o700); path=products/'intent.json'; path.write_bytes(b'foreign'); path.chmod(0o600)
+                raise ValueError('already exists')
+            build={'head':'a'*40,'image_id':'sha256:'+'b'*64,'status':'passed'}
+            with mock.patch.object(origin21_products,'origin21_profile',SimpleNamespace(PROFILE=SimpleNamespace(state=profile))), mock.patch.object(origin21_products,'OWNER',products), mock.patch.object(origin21_setup,'prepare_identities'), mock.patch.object(origin21_products,'start_products',side_effect=raced):
+                with self.assertRaisesRegex(ValueError,'already exists'): driver.full_capture(folder,{},mock.Mock(),build)
+            self.assertTrue((folder/'profile-owned.json').exists()); self.assertFalse((folder/'products-owned.json').exists())
+            with self.assertRaisesRegex(ValueError,'lacks ownership evidence'): driver.verify_owned_root(folder,'products',products)
+            self.assertEqual((products/'intent.json').read_bytes(),b'foreign')
+
+    def test_changed_returned_product_identity_never_gets_ownership_marker(self):
+        from deploy.local import origin21_setup,origin21_evidence
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory).resolve(); folder=parent/('contour-origin21-qual-'+'a'*32); folder.mkdir(mode=0o700); profile=parent/'origin21-pilot'; products=parent/'origin21-products'
+            build={'head':'a'*40,'image_id':'sha256:'+'b'*64,'status':'passed'}
+            with mock.patch.object(origin21_products,'origin21_profile',SimpleNamespace(PROFILE=SimpleNamespace(state=profile))), mock.patch.object(origin21_products,'OWNER',products), mock.patch.object(origin21_setup,'prepare_identities'), mock.patch.object(origin21_products,'start_products',return_value=(b'a'*32,b'b'*32)), mock.patch.object(origin21_products,'inspect_slot',return_value={'slot':1}), mock.patch.object(origin21_evidence,'digest',return_value=b'x'*32):
+                with self.assertRaisesRegex(RuntimeError,'commitments changed'): driver.full_capture(folder,{},mock.Mock(),build)
+            self.assertFalse((folder/'products-owned.json').exists())
+
+    def test_owned_root_replacement_is_never_adopted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory).resolve(); folder=parent/('contour-origin21-qual-'+'a'*32); folder.mkdir(mode=0o700); profile=parent/'origin21-pilot'
+            driver.create_profile_owned(folder,profile)
+            original=driver.verify_owned_root(folder,'profile',profile)
+            profile.rename(parent/'original'); profile.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError,'ownership drift'): driver.verify_owned_root(folder,'profile',profile)
+            self.assertNotEqual(original,(os.lstat(profile).st_dev,os.lstat(profile).st_ino))
+
+    def test_cleanup_refuses_unowned_profile_before_any_tree_removal(self):
+        from deploy.local import origin21_profile
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory).resolve(); folder=parent/('contour-origin21-qual-'+'a'*32); folder.mkdir(mode=0o700); profile=parent/'origin21-pilot'; profile.mkdir(mode=0o700); products=parent/'origin21-products'
+            sentinel=profile/'setup.json'; sentinel.write_bytes(b'foreign'); sentinel.chmod(0o600)
+            with mock.patch.object(origin21_profile,'PROFILE',origin21_profile.PROFILE._replace(state=profile)), mock.patch.object(origin21_products,'OWNER',products), mock.patch.object(driver,'remove_owned_tree') as remove:
+                with self.assertRaisesRegex(ValueError,'lacks ownership evidence'): driver.cleanup_full_artifacts(folder)
+                remove.assert_not_called()
+            self.assertEqual(sentinel.read_bytes(),b'foreign')
+    def test_build_evidence_requires_canonical_bytes_digest_and_exact_image_labels(self):
+        head='a'*40; token='b'*32; image='sha256:'+'c'*64; tag='apicontour-origin21-build:'+token
+        value={'version':1,'head':head,'image_id':image,'status':'passed','owner_token':token,'tag':tag}
+        raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+        obj={'Id':image,'RepoTags':[tag],'Config':{'Labels':{'org.apicontour.build-owner':token,'org.apicontour.build-head':head}}}
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory).resolve()/'receipt'; path.write_bytes(raw); path.chmod(0o600)
+            digest=hashlib.sha256(raw).hexdigest(); inspect=mock.Mock(return_value=obj)
+            self.assertEqual(driver.verify_build_evidence(path,digest,head,inspect),value)
+            with self.assertRaises(ValueError): driver.verify_build_evidence(path,'0'*64,head,inspect)
+            with self.assertRaises(ValueError): driver.verify_build_evidence(path,digest,'d'*40,inspect)
+            with self.assertRaises(ValueError): driver.verify_build_evidence(path,digest,head,lambda _:dict(obj,Id='sha256:'+'d'*64))
+            with self.assertRaises(ValueError): driver.verify_build_evidence(path,digest,head,lambda _:dict(obj,Config={'Labels':{}}))
+
+    def test_exact_owned_artifact_tree_refuses_extra_before_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve()/'state'; root.mkdir(mode=0o700); (root/'nested').mkdir(mode=0o700)
+            (root/'nested'/'known').write_bytes(b'synthetic'); os.chmod(root/'nested'/'known',0o600)
+            (root/'unexpected').write_bytes(b'x'); os.chmod(root/'unexpected',0o600)
+            with self.assertRaisesRegex(ValueError,'inventory drift'): driver.remove_owned_tree(root,{'nested/','nested/known'})
+            self.assertTrue((root/'nested'/'known').exists()); (root/'unexpected').unlink()
+            driver.remove_owned_tree(root,{'nested/','nested/known'}); self.assertFalse(root.exists())
+
+    def test_missing_topology_record_prevents_any_deletion(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(driver,'verify_owned_root',return_value=(1,2)), mock.patch.object(origin21_products,'OWNER',Path(directory)), mock.patch.object(origin21_products,'_read_record',side_effect=FileNotFoundError), mock.patch.object(origin21_products,'_recorded_products'):
+            call=mock.Mock()
+            with self.assertRaises(FileNotFoundError): driver.cleanup_topology(call,mock.Mock(),{},directory)
+            call.assert_not_called()
+
+    def test_topology_cleanup_refuses_foreign_capture_member_before_deletion(self):
+        from deploy.local import origin21_evidence
+        token='a'*32; pg='b'*64; net='c'*64; prod=['d'*64,'e'*64]; default='f'*64
+        deployment={'name':'contour-origin21-qual-'+token,'id':net,'owner_token':token,'postgres_id':pg}
+        services={name:{'id':str(i)*64,'started_at':'fixed'} for i,name in enumerate(origin21_products.COMPANIONS,1)}
+        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':''}
+        record={'slots':[{'started_at':'fixed'},{'started_at':'fixed'}]}
+        commitments={'version':1,'sha256':['1'*64,'1'*64]}
+        pending={'images':{name:{} for name in services}}
+        records={'intent.json':intent,'products.json':record,'commitments.json':commitments,'companions-intent.json':pending,'companions.json':{'services':services}}
+        ids=prod+[item['id'] for item in services.values()]
+        call=mock.Mock(return_value=('\n'.join(ids)).encode())
+        network={'Name':deployment['name'],'Id':net,'Internal':True,'Labels':{driver.LABEL:token},'Containers':{**{x:{} for x in [pg,services['origin21-capture-ingress']['id'],services['origin21-capture-worker']['id'],services['native-gateway']['id']]},'9'*64:{}}}
+        with tempfile.TemporaryDirectory() as directory:
+            owner=Path(directory); (owner/'companions-intent.json').touch()
+            with mock.patch.object(driver,'verify_owned_root',return_value=(1,2)), mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_read_record',side_effect=lambda name:records[name]), mock.patch.object(origin21_products,'_recorded_products',return_value=prod), mock.patch.object(origin21_products,'_companion_record',return_value=default), mock.patch.object(origin21_evidence,'digest',return_value=bytes.fromhex('1'*64)):
+                with self.assertRaisesRegex(RuntimeError,'network identity drift'): driver.cleanup_topology(call,lambda _:network,deployment,directory)
+        self.assertFalse(any(args.args[0][:2]==['docker','rm'] for args in call.call_args_list))
+
+    def test_topology_cleanup_removes_only_recorded_containers_in_order(self):
+        from deploy.local import origin21_evidence
+        token='a'*32; pg='b'*64; net='c'*64; prod=['d'*64,'e'*64]; default='f'*64
+        deployment={'name':'contour-origin21-qual-'+token,'id':net,'owner_token':token,'postgres_id':pg}
+        services={name:{'id':str(i)*64,'started_at':'fixed'} for i,name in enumerate(origin21_products.COMPANIONS,1)}
+        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':''}
+        record={'slots':[{'started_at':'fixed'},{'started_at':'fixed'}]}; pending={'images':{name:{} for name in services}}
+        records={'intent.json':intent,'products.json':record,'commitments.json':{'version':1,'sha256':['1'*64,'1'*64]},'companions-intent.json':pending,'companions.json':{'services':services}}
+        remaining=set(prod+[item['id'] for item in services.values()]); captured={pg,*[services[n]['id'] for n in ('origin21-capture-ingress','origin21-capture-worker','native-gateway')]}; removed=[]
+        def call(args):
+            if args[:3]==['docker','rm','-f']:
+                cid=args[3]; removed.append(cid); remaining.remove(cid); captured.discard(cid); return b''
+            if args[:3]==['docker','ps','-aq']: return ('\n'.join(sorted(remaining))).encode()
+            return b''
+        def inspect(args):
+            if args[:3]==['docker','network','inspect']: return {'Name':deployment['name'],'Id':net,'Internal':True,'Labels':{driver.LABEL:token},'Containers':{cid:{} for cid in captured}}
+            return {'Id':args[-1]}
+        with tempfile.TemporaryDirectory() as directory:
+            owner=Path(directory); (owner/'companions-intent.json').touch()
+            with mock.patch.object(driver,'verify_owned_root',return_value=(1,2)), mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_read_record',side_effect=lambda name:records[name]), mock.patch.object(origin21_products,'_recorded_products',return_value=prod), mock.patch.object(origin21_products,'_companion_record',return_value=default), mock.patch.object(origin21_products,'_network',return_value=default), mock.patch.object(origin21_products,'_validate_companion',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_products,'validate',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_evidence,'digest',return_value=bytes.fromhex('1'*64)):
+                driver.cleanup_topology(call,inspect,deployment,directory)
+        self.assertEqual(removed,[services[n]['id'] for n in reversed(origin21_products.COMPANIONS)]+prod)
+        self.assertEqual(captured,{pg}); self.assertFalse(remaining)
+
+    def test_dirty_source_is_refused(self):
+        call=mock.Mock(side_effect=[b'a'*40,b'?? unexpected'])
+        with self.assertRaises(ValueError): driver.clean_head(call)
+
+    def test_full_capture_rechecks_journal_facts_and_requires_capture_only_result(self):
+        from deploy.local import origin21_setup,origin21_ready,origin21_evidence
+        from types import SimpleNamespace
+        commitments=(b'a'*32,b'b'*32); build={'head':'a'*40,'image_id':'sha256:'+'b'*64,'status':'passed'}
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory).resolve(); state=folder/'state'; state.mkdir()
+            for name in ('setup.json','operator-evidence.json'):
+                path=state/name; path.write_bytes(b'private-synthetic'); path.chmod(0o600)
+            runner=mock.Mock(); runner.run.return_value='1'
+            with mock.patch.object(driver,'create_profile_owned'), mock.patch.object(driver,'record_owned_root'), mock.patch.object(origin21_evidence,'digest',side_effect=lambda v:commitments[v['slot']-1]), mock.patch.object(origin21_products,'origin21_profile',SimpleNamespace(PROFILE=SimpleNamespace(state=state))), mock.patch.object(origin21_setup,'prepare_identities') as identities, mock.patch.object(origin21_products,'start_products',return_value=commitments), mock.patch.object(origin21_setup,'prepare') as prepare, mock.patch.object(origin21_products,'start_companions') as companions, mock.patch.object(origin21_products,'inspect_slot',side_effect=lambda i:{'slot':i}), mock.patch.object(driver,'fact_snapshot',return_value='[]'), mock.patch.object(origin21_ready,'check',return_value={'product_tls_and_catalog_verified':True,'ui_verified':False}):
+                driver.full_capture(folder,{'fixture':'only'},runner,build)
+                identities.assert_called_once(); companions.assert_called_once()
+                self.assertEqual(prepare.call_count,3)
+                self.assertTrue(prepare.call_args_list[-1].kwargs['check_only'])
+                self.assertIsNot(prepare.call_args.kwargs['psql'],prepare.call_args.kwargs['sensitive_execute'])
+                prepare.call_args.kwargs['psql']('SELECT 1;')
+                self.assertEqual(runner.run.call_args.args[1:],('sql','postgres'))
+                prepare.call_args.kwargs['authenticate']('contour_local_origin21_ingress','synthetic')
+                self.assertEqual(runner.run.call_args.args[1:],('auth','contour_local_origin21_ingress'))
+
+    def test_replay_fact_drift_fails_before_capture_claim(self):
+        from deploy.local import origin21_setup,origin21_ready,origin21_evidence
+        from types import SimpleNamespace
+        commitments=(b'a'*32,b'b'*32); build={'head':'a'*40,'image_id':'sha256:'+'b'*64,'status':'passed'}
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory).resolve(); state=folder/'state'; state.mkdir()
+            for name in ('setup.json','operator-evidence.json'):
+                path=state/name; path.write_bytes(b'fixture'); path.chmod(0o600)
+            with mock.patch.object(driver,'create_profile_owned'), mock.patch.object(driver,'record_owned_root'), mock.patch.object(origin21_evidence,'digest',side_effect=lambda v:commitments[v['slot']-1]), mock.patch.object(origin21_products,'origin21_profile',SimpleNamespace(PROFILE=SimpleNamespace(state=state))), mock.patch.object(origin21_setup,'prepare_identities'), mock.patch.object(origin21_products,'start_products',return_value=commitments), mock.patch.object(origin21_setup,'prepare'), mock.patch.object(origin21_products,'start_companions'), mock.patch.object(origin21_products,'inspect_slot',side_effect=lambda i:{'slot':i}), mock.patch.object(driver,'fact_snapshot',side_effect=['before','after']), mock.patch.object(origin21_ready,'check') as check:
+                with self.assertRaisesRegex(RuntimeError,'replay drift'): driver.full_capture(folder,{},mock.Mock(),build)
+                check.assert_not_called()
+
+    def test_full_capture_refuses_any_result_that_claims_ui_verification(self):
+        from deploy.local import origin21_setup,origin21_ready,origin21_evidence
+        from types import SimpleNamespace
+        commitments=(b'a'*32,b'b'*32); build={'head':'a'*40,'image_id':'sha256:'+'b'*64,'status':'passed'}
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory).resolve(); state=folder/'state'; state.mkdir()
+            for name in ('setup.json','operator-evidence.json'):
+                path=state/name; path.write_bytes(b'fixture'); path.chmod(0o600)
+            with mock.patch.object(driver,'create_profile_owned'), mock.patch.object(driver,'record_owned_root'), mock.patch.object(origin21_evidence,'digest',side_effect=lambda v:commitments[v['slot']-1]), mock.patch.object(origin21_products,'origin21_profile',SimpleNamespace(PROFILE=SimpleNamespace(state=state))), mock.patch.object(origin21_setup,'prepare_identities'), mock.patch.object(origin21_products,'start_products',return_value=commitments), mock.patch.object(origin21_setup,'prepare'), mock.patch.object(origin21_products,'start_companions'), mock.patch.object(origin21_products,'inspect_slot',side_effect=lambda i:{'slot':i}), mock.patch.object(driver,'fact_snapshot',return_value='same'), mock.patch.object(origin21_ready,'check',return_value={'product_tls_and_catalog_verified':True,'ui_verified':True}):
+                with self.assertRaisesRegex(RuntimeError,'capture qualification incomplete'): driver.full_capture(folder,{},mock.Mock(),build)
+
     def test_guard_rejects_backend_loss_postmaster_restart_and_crash_logs(self):
         child=mock.Mock(); child.poll.return_value=None
         def make():
