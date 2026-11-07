@@ -334,6 +334,30 @@ class DriverTests(unittest.TestCase):
                 moved=root/'db/moved';parent=target.parent;parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
                 with self.assertRaisesRegex(ValueError,'symlink'): MODULE['snapshot']()
 
+    def test_migration_22_is_hashed_without_being_applied(self):
+        path=MODULE['ROOT']/'db/opt-in-migrations/0022_causal_generation.sql'
+        self.assertEqual(MODULE['snapshot']()[str(path)],MODULE['digest_file'](path))
+        self.assertNotIn('0022_causal_generation',MODULE['OPT'])
+
+    def test_source_guard_22_missing_mutated_and_symlink(self):
+        with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
+            root=Path(temp)/'repo';root.mkdir()
+            for crate in ('contour-postgres','contour-core','contour-auth'): (root/'crates'/crate/'src').mkdir(parents=True)
+            with mock.patch.dict(G,{'ROOT':root}):
+                for path in MODULE['source_paths']():
+                    path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+                before=MODULE['snapshot']()
+                target=root/'db/opt-in-migrations/0022_causal_generation.sql';target.write_bytes(b'mutated')
+                self.assertNotEqual(before,MODULE['snapshot']())
+                target.unlink()
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
+                target.write_bytes(b'original')
+                extra=target.parent/'0099_unknown.sql'; extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
+                extra.unlink()
+                moved=root/'db/moved';parent=target.parent;parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
+                with self.assertRaisesRegex(ValueError,'symlink'): MODULE['snapshot']()
+
     def test_source_guard_rejects_symlinked_source_directory(self):
         with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
             root=Path(temp)/'repo';source=root/'crates/contour-core/src'
