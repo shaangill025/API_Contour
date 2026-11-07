@@ -17,6 +17,58 @@ CID = 'a'*64
 OWNER = 'b'*32
 SQL = ['docker','exec','-i',CID,'psql','-XAtq','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture']
 
+submit_spec = importlib.util.spec_from_file_location('submit_fixture', ROOT/'scripts/test-postgres-submit.py')
+submit = importlib.util.module_from_spec(submit_spec); submit_spec.loader.exec_module(submit)
+
+class ExpiryOverlap(unittest.TestCase):
+    def run_cases(self, fail_initial=None, wrong_receipt=False):
+        events=[]; clock=[100]; expiries=[]
+        def future():
+            clock[0]+=1
+            value=clock[0]+15; expiries.append(value); events.append(('expiry',value))
+            return value
+        def setup(name, change=None):
+            body={'scope':name,'records':[{}]}
+            policy={}
+            if change: change(policy); body['policy_expiry']=policy['expires_at']
+            events.append(('setup',name))
+            return body,None,None
+        def check(body, wanted='Accepted', status=None):
+            scope=body['scope']; events.append(('check',scope,wanted,status,clock[0]))
+            if fail_initial==scope and wanted=='Accepted' and status is None:
+                raise RuntimeError('initial failed')
+            expiry=body['records'][0].get('expires_at',body.get('policy_expiry'))
+            if wanted=='Accepted' and status is None: self.assertLess(clock[0],expiry)
+            if status=='duplicate' or wanted=='Policy': self.assertGreaterEqual(clock[0],expiry)
+            if status=='duplicate': return 'wrong' if wrong_receipt else 'receipt'
+            return 'receipt'
+        def wait(value):
+            events.append(('wait',value)); clock[0]=max(clock[0],value)
+        def pairs(body,count): events.append(('pairs',body['scope'],count))
+        def run(): submit.check_expiry_retries(setup,check,pairs,future,wait)
+        return run,events,expiries
+
+    def test_independent_expiry_windows_overlap_and_assert(self):
+        run,events,expiries=self.run_cases(); run()
+        self.assertEqual(len(expiries),2); self.assertNotEqual(*expiries)
+        checks=[e for e in events if e[0]=='check']; waits=[e for e in events if e[0]=='wait']
+        self.assertEqual([e[1] for e in checks[:2]],['submit_expired_retry','submit_lease_retry'])
+        self.assertLess(events.index(checks[1]),events.index(waits[0]))
+        self.assertEqual(waits,[('wait',expiries[0]),('wait',expiries[1])])
+        self.assertEqual([(e[1],e[2],e[3]) for e in checks[2:]], [('submit_expired_retry','Accepted','duplicate'),('submit_lease_retry','Policy',None)])
+        self.assertIn(('pairs','submit_lease_retry',1),events)
+
+    def test_initial_failure_aborts_before_wait(self):
+        for scope in ('submit_expired_retry','submit_lease_retry'):
+            run,events,_=self.run_cases(fail_initial=scope)
+            with self.assertRaisesRegex(RuntimeError,'initial failed'): run()
+            self.assertFalse(any(e[0]=='wait' for e in events))
+
+    def test_changed_duplicate_receipt_fails(self):
+        run,events,_=self.run_cases(wrong_receipt=True)
+        with self.assertRaisesRegex(AssertionError,'committed retry'): run()
+        self.assertEqual(len([e for e in events if e[0]=='wait']),1)
+
 class Transport(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); folder = Path(self.temp.name)

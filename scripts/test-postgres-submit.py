@@ -14,6 +14,26 @@ ROOT = Path(__file__).resolve().parents[1]
 OTHER = 'bbbbbbbb-0000-0000-0000-000000000000'
 
 
+def check_expiry_retries(setup, check, pairs, future_expiry, wait_expired):
+    # Separate collectors and database-clock expiries; both submissions must
+    # succeed before waiting for either expiration.
+    record, _, _ = setup('submit_expired_retry')
+    record['records'][0]['expires_at'] = future_expiry()
+    receipt = check(record)
+    expiry = []
+    def lease(value):
+        expiry.append(future_expiry())
+        value.update(expires_at=expiry[0])
+    policy, _, _ = setup('submit_lease_retry', lease)
+    check(policy)
+    wait_expired(record['records'][0]['expires_at'])
+    if check(record, status='duplicate') != receipt:
+        raise AssertionError('committed retry re-admitted expired record')
+    wait_expired(expiry[0])
+    check(policy, 'Policy')
+    pairs(policy, 1)
+
+
 def run_cases(container, execute, setup, probe, port, directory, environment, catalog_reader_only=False):
     execute((ROOT / 'db/migrations/0003_ingestion.sql').read_text())
     sequence = itertools.count()
@@ -167,27 +187,13 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
         execute('BEGIN; ALTER TABLE contour.ingestion_payloads DISABLE TRIGGER immutable_inbox; ' + mutation + ' ALTER TABLE contour.ingestion_payloads ENABLE TRIGGER immutable_inbox; COMMIT;')
         check(candidate, 'Corrupt')
 
-    candidate, _, _ = setup('submit_expired_retry')
-    candidate['records'][0]['expires_at'] = future_expiry()
-    receipt = check(candidate)
-    wait_expired(candidate['records'][0]['expires_at'])
-    if check(candidate, status='duplicate') != receipt:
-        raise AssertionError('committed retry re-admitted expired record')
+    check_expiry_retries(setup, check, pairs, future_expiry, wait_expired)
     for update, wanted in [('enabled=false', 'Disabled'), ('enabled=false,revoked_at=clock_timestamp()', 'Revoked')]:
         candidate, _, _ = setup('submit_' + wanted)
         check(candidate)
         change_authority(candidate, update)
         check(candidate, wanted)
         pairs(candidate, 1)
-    expiry = []
-    def lease(value):
-        expiry.append(future_expiry())
-        value.update(expires_at=expiry[0])
-    candidate, _, _ = setup('submit_lease_retry',lease)
-    check(candidate)
-    wait_expired(expiry[0])
-    check(candidate, 'Policy')
-    pairs(candidate, 1)
 
     candidate, _, _ = setup('submit_last_record')
     last = copy.deepcopy(candidate['records'][0])
