@@ -30,6 +30,7 @@ from deploy.pilot.managed_edge_controller import ManagedEdgeController,LABEL
 
 NODE='docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963'
 ENVOY='envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4'
+REMOTE_CLIENT_SHELL='/usr/local/bin/node -e "$1" fixture-client "$2" <&0 & p=$!; printf "PID %s\\n" "$p"; wait "$p"'
 ID='00000000-0000-4000-8000-000000000001'
 FIXTURE=ROOT/'tests/fixtures/managed-native-edge'
 
@@ -233,6 +234,27 @@ def replica_definition(name,network,token,mounts):
         'networks':{'default':{'external':True,'name':network}}}
 
 
+def combine_failures(primary, cleanup):
+    groups=[]
+    if primary is not None: groups.append(BaseExceptionGroup('primary', [primary]))
+    if cleanup: groups.append(BaseExceptionGroup('cleanup', list(cleanup)))
+    return BaseExceptionGroup('qualification', groups) if groups else None
+
+
+def failure_lines(error, phase='driver'):
+    if isinstance(error, BaseExceptionGroup):
+        phase=error.message if error.message in ('primary', 'cleanup') else phase
+        return [line for child in error.exceptions for line in failure_lines(child, phase)]
+    kind=type(error).__name__
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}',kind): kind='Exception'
+    locations=[]; tb=error.__traceback__
+    while tb is not None:
+        name=Path(tb.tb_frame.f_code.co_filename).name
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',name): name='unknown'
+        locations.append(f'{name}:{tb.tb_lineno}'); tb=tb.tb_next
+    return [f"FAIL {phase} {kind} {location}" for location in (locations or ['unknown:0'])]
+
+
 def main():
     if len(sys.argv)!=1: raise ValueError('no arguments accepted')
     if os.getuid()==0: raise RuntimeError('nonroot required')
@@ -301,10 +323,9 @@ def main():
                     time.sleep(.2)
             monitors[1].wait(b'AUTHORITY_SENT',timeout=30); monitors[1].wait(b'BATCH_ATTEMPT',timeout=30)
             src=(FIXTURE/'held_client.js').read_text()
-            shell='/usr/local/bin/node -e "$1" "$2" <&0 & p=$!; printf "PID %s\\n" "$p"; wait "$p"'
             def held(mode,operation):
                 d=monitors[0]; req_before=d.lines().count(b'REQUEST_PREFIX'); resp_before=d.lines().count(b'RESPONSE_WRITTEN')
-                args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',shell,'fixture',src,mode]
+                args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',REMOTE_CLIENT_SHELL,'fixture',src,mode]
                 m=Monitor(args); monitors.append(m); deadline=time.monotonic()+15; pid=None
                 while time.monotonic()<deadline:
                     lines=m.lines()
@@ -345,7 +366,12 @@ def main():
                     except RuntimeError: pass
                     else: raise AssertionError('pending publication did not block')
             finally:
-                run(['docker','unpause',envoy],timeout=15); paused=None
+                pending_error=sys.exception()
+                try: run(['docker','unpause',envoy],timeout=15)
+                except BaseException as unpause_error:
+                    if pending_error is not None: raise combine_failures(pending_error,[unpause_error]) from None
+                    raise
+                paused=None
             owner.reconcile()
         if source_snapshot(run)!=(head,before): raise RuntimeError('source changed')
         clean=True
@@ -391,12 +417,16 @@ def main():
         try:
             if source_snapshot(run)!=(head,before): raise RuntimeError('source changed')
         except Exception as exc: errors.append(exc)
-        if not errors: shutil.rmtree(folder)
-        if errors: clean=False; failure=RuntimeError('owned cleanup or source verification failed')
+        if not errors:
+            try: shutil.rmtree(folder)
+            except Exception as exc: errors.append(exc)
+        if errors: clean=False; failure=combine_failures(failure,errors)
     if failure is not None: raise failure
     if not clean: raise RuntimeError('qualification incomplete')
     print('PASS: owned native-edge mTLS rotation, rollback and held streams; capture delivery rejected')
 
 if __name__=='__main__':
     try: main()
-    except BaseException as exc: print('FAIL:',type(exc).__name__,file=sys.stderr); raise SystemExit(1) from None
+    except BaseException as exc:
+        for line in failure_lines(exc): print(line,file=sys.stderr)
+        raise SystemExit(1) from None

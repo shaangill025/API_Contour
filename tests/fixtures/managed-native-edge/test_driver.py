@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -92,6 +93,35 @@ class DriverTests(unittest.TestCase):
         m = driver.Monitor([sys.executable, '-c', 'raise SystemExit(42)'], service_id='fixture')
         m.proc.wait(timeout=5)
         self.assertTrue(driver.cleanup_monitors([m], {'fixture'}))
+
+    def test_actual_node_eval_receives_mode_in_argv_two(self):
+        node = shutil.which('node')
+        self.assertIsNotNone(node, 'host Node is required for argv regression')
+        shell = driver.REMOTE_CLIENT_SHELL.replace('/usr/local/bin/node', node, 1)
+        script = "if(process.argv[2]!=='request'){console.error('WRONG_ARGV');process.exit(19)};console.log('PASS')"
+        result = subprocess.run(['/bin/sh', '-c', shell, 'fixture', script, 'request'], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(sum(bool(__import__('re').fullmatch(rb'PID [1-9][0-9]*', line)) for line in lines), 1)
+        self.assertIn(b'PASS', lines)
+
+    def test_primary_and_all_cleanup_failures_have_sanitized_locations(self):
+        def capture(message):
+            try: raise ValueError(message)
+            except ValueError as exc: return exc
+        primary = capture('secret primary payload')
+        cleanup = [capture('secret cleanup one'), capture('secret cleanup two')]
+        group = driver.combine_failures(primary, cleanup)
+        self.assertIs(group.exceptions[0].exceptions[0], primary)
+        self.assertEqual(group.exceptions[1].exceptions, tuple(cleanup))
+        lines = driver.failure_lines(group)
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith('FAIL primary ValueError '))
+        self.assertTrue(all(line.startswith('FAIL cleanup ValueError ') for line in lines[1:]))
+        self.assertTrue(all('test_driver.py:' in line for line in lines))
+        self.assertNotIn('secret', ' '.join(lines))
+        self.assertIsNone(driver.combine_failures(None, []))
 
     def test_bootstrap_orders_prepare_start_bind_reconcile(self):
         from deploy.pilot import managed_edge_controller as controller
