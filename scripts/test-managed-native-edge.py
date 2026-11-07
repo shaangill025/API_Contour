@@ -64,6 +64,18 @@ def command(runner,args,*,data=None,timeout=30,limit=1048576,allow_absent=False)
     return result.stdout
 
 
+class HeldStatusError(RuntimeError): pass
+class HeldBodyLimitError(RuntimeError): pass
+class HeldPrefixError(RuntimeError): pass
+class HeldResponseError(RuntimeError): pass
+class HeldResponseAborted(RuntimeError): pass
+class HeldBodyMismatch(RuntimeError): pass
+class HeldRequestError(RuntimeError): pass
+class HeldTimeout(RuntimeError): pass
+class HeldControlError(RuntimeError): pass
+_HELD_ERRORS={b'DIAG STATUS\n':HeldStatusError,b'DIAG BODY_LIMIT\n':HeldBodyLimitError,b'DIAG PREFIX\n':HeldPrefixError,b'DIAG RESPONSE_ERROR\n':HeldResponseError,b'DIAG RESPONSE_ABORTED\n':HeldResponseAborted,b'DIAG BODY_MISMATCH\n':HeldBodyMismatch,b'DIAG REQUEST_ERROR\n':HeldRequestError,b'DIAG TIMEOUT\n':HeldTimeout,b'DIAG CONTROL\n':HeldControlError}
+
+
 class Monitor:
     """Bounded private output; all child groups are owned and explicitly reaped."""
     def __init__(self,args,service_id=None):
@@ -84,7 +96,11 @@ class Monitor:
             with self.lock: self.read_error=True
     def lines(self):
         with self.lock:
-            if self.overflow or self.err or self.read_error: raise RuntimeError('fixture output invalid')
+            if self.overflow or self.read_error: raise RuntimeError('fixture output invalid')
+            if self.err:
+                category=_HELD_ERRORS.get(bytes(self.err))
+                if category is not None: raise category()
+                raise RuntimeError('fixture output invalid')
             raw=bytes(self.out)
         if len(raw)>65536 or any(len(x)>128 for x in raw.splitlines()): raise RuntimeError('fixture output bound')
         return raw.splitlines()
@@ -349,10 +365,15 @@ def main():
                 if pid is None: raise TimeoutError('remote pid deadline')
                 if mode=='request': m.wait(b'CLIENT_WRITTEN'); d.wait(b'REQUEST_PREFIX',req_before+1)
                 else: d.wait(b'RESPONSE_WRITTEN',resp_before+1); m.wait(b'RESPONSE_PREFIX')
-                old=owner._load()['current_commitment']['cert_sha256']; operation(); new=owner._load()['current_commitment']['cert_sha256']
+                held_since=time.monotonic()
+                try:
+                    old=owner._load()['current_commitment']['cert_sha256']; operation(); new=owner._load()['current_commitment']['cert_sha256']
+                finally:
+                    print('HOLD '+mode+' OPERATION_MS '+str(int((time.monotonic()-held_since)*1000)),flush=True)
                 if old==new: raise AssertionError('served edge fingerprint unchanged')
                 if mode=='request': m.send('RELEASE_REQUEST')
                 else: d.send('RELEASE_RESPONSE')
+                print('HOLD '+mode+' RELEASE_MS '+str(int((time.monotonic()-held_since)*1000)),flush=True)
                 m.wait(b'PASS'); expected=[b'PID '+pid,b'CLIENT_WRITTEN' if mode=='request' else b'RESPONSE_PREFIX',b'PASS']; m.finish(expected)
                 remote_absent(run,replica,pid); remote.remove((replica,pid))
             held('request',owner.renew); held('response',owner.rollback); held('response',owner.renew); held('request',owner.rollback)

@@ -123,6 +123,32 @@ class DriverTests(unittest.TestCase):
         self.assertNotIn('secret', ' '.join(lines))
         self.assertIsNone(driver.combine_failures(None, []))
 
+    def test_closed_error_categories_propagate_without_payload(self):
+        for text,cls in driver._HELD_ERRORS.items():
+            monitor=object.__new__(driver.Monitor)
+            import threading
+            monitor.lock=threading.Lock(); monitor.err=bytearray(text); monitor.out=bytearray(); monitor.overflow=False; monitor.read_error=False
+            with self.assertRaises(cls) as caught: monitor.lines()
+            self.assertNotIn('payload',str(caught.exception))
+            self.assertTrue(all('payload' not in line for line in driver.failure_lines(caught.exception)))
+        monitor.err=bytearray(b'DIAG STATUS secret payload\n')
+        with self.assertRaises(RuntimeError) as caught: monitor.lines()
+        self.assertIs(type(caught.exception),RuntimeError)
+
+    def test_client_reports_closed_failure_categories_without_network(self):
+        node=shutil.which('node'); self.assertIsNotNone(node)
+        client=(ROOT/'tests/fixtures/managed-native-edge/held_client.js').read_text()
+        harness=r"""const vm=require('node:vm'),{EventEmitter}=require('node:events');
+const which=process.argv[1], src=process.argv[2]; let req=new EventEmitter();
+req.destroy=()=>{};req.write=()=>{};req.end=()=>{};req.setTimeout=(_,fn)=>{req.timeout=fn};
+const fs={readFileSync:()=>Buffer.from('x')};
+const https={request:(_,cb)=>{setImmediate(()=>{if(which==='REQUEST_ERROR')req.emit('error');else if(which==='TIMEOUT')req.timeout();else {let res=new EventEmitter();res.statusCode=which==='STATUS'?502:200;cb(res);if(which==='RESPONSE_ERROR')res.emit('error');if(which==='RESPONSE_ABORTED')res.emit('aborted');}});return req;}};
+const readline={createInterface:()=>new EventEmitter()};
+vm.runInNewContext(src,{require:(x)=>x==='node:fs'?fs:x==='node:https'?https:readline,process:{argv:['node','fixture','request'],stdout:process.stdout,stderr:process.stderr,exitCode:0},Buffer});"""
+        for category in ('STATUS','REQUEST_ERROR','TIMEOUT','RESPONSE_ERROR','RESPONSE_ABORTED'):
+            result=subprocess.run([node,'-e',harness,category,client],capture_output=True,timeout=5)
+            self.assertEqual(result.stderr,('DIAG '+category+'\n').encode())
+
     def test_bootstrap_orders_prepare_start_bind_reconcile(self):
         from deploy.pilot import managed_edge_controller as controller
         obj = object.__new__(controller.ManagedEdgeController)
