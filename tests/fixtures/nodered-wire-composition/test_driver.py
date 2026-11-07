@@ -37,6 +37,30 @@ class DriverTests(unittest.TestCase):
         altered=dict(snap); altered['collectors/nodered/error-integration/wire-v2-profile.js']='0'*64
         with self.assertRaises(RuntimeError): q.verify_profile(altered)
 
+    def test_platform_and_both_manifest_pins_are_closed(self):
+        snap=q.snapshot(); q.verify_profile(snap)
+        for arch in ('amd64','arm64'):
+            q.validate_image_platform({'Architecture':arch,'Os':'linux'},snap)
+        for obj in ({'Architecture':'x64','Os':'linux'}, {'Architecture':'s390x','Os':'linux'},
+                    {'Architecture':'amd64','Os':'windows'}, {'Os':'linux'}):
+            with self.assertRaises(RuntimeError): q.validate_image_platform(obj,snap)
+        for name in ('wire-v2-image-manifest.json','wire-v2-image-manifest-x64.json'):
+            rel='collectors/nodered/error-integration/'+name
+            for replacement in (None,'0'*64):
+                bad=dict(snap)
+                if replacement is None: del bad[rel]
+                else: bad[rel]=replacement
+                with self.assertRaises(RuntimeError): q.verify_profile(bad)
+                arch='arm64' if name.endswith('manifest.json') else 'amd64'
+                with self.assertRaises(RuntimeError): q.validate_image_platform({'Architecture':arch,'Os':'linux'},bad)
+        swapped=dict(snap)
+        a='collectors/nodered/error-integration/wire-v2-image-manifest.json'
+        b='collectors/nodered/error-integration/wire-v2-image-manifest-x64.json'
+        swapped[a],swapped[b]=swapped[b],swapped[a]
+        with self.assertRaises(RuntimeError): q.verify_profile(swapped)
+        for arch in ('amd64','arm64'):
+            with self.assertRaises(RuntimeError): q.validate_image_platform({'Architecture':arch,'Os':'linux'},swapped)
+
     def test_durable_intent_is_private_and_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp); q.durable_intent(folder,{'mode':'wire-positive'})
@@ -130,9 +154,9 @@ class DriverTests(unittest.TestCase):
              mock.patch.object(q.os,'getuid',return_value=1000), mock.patch.object(q.os,'umask'), \
              mock.patch.object(q.tempfile,'gettempdir',return_value=tmp), \
              mock.patch.object(q,'head_and_clean',return_value='a'*40), mock.patch.object(q,'snapshot',return_value={}), \
-             mock.patch.object(q,'verify_profile'), mock.patch.object(q,'make_certificates'), \
+             mock.patch.object(q,'verify_profile'), mock.patch.object(q,'validate_image_platform'), mock.patch.object(q,'make_certificates'), \
              mock.patch.object(q,'run_mode'), mock.patch.object(q,'sync_directory') as sync, \
-             mock.patch.object(q,'checked',return_value=b'[{"Id":"sha256:' + b'b'*64 + b'"}]'), \
+             mock.patch.object(q,'checked',return_value=b'[{"Id":"sha256:' + b'b'*64 + b'","Architecture":"amd64","Os":"linux"}]'), \
              mock.patch('builtins.print'):
             q.main()
         self.assertEqual(sync.call_count,8)

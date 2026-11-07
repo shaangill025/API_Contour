@@ -4,7 +4,11 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const ID='apicontour/nodered-causal-wire-v2-inactive-0502';
 const IMAGE='docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963';
-const MANIFEST='/adapter/error-integration/wire-v2-image-manifest.json',MANIFEST_SHA='63560c3dbe43d22c9391d0ac2e46dbad1d428f5b8ea8418b2a9038322da2ad0b';
+const MANIFESTS=Object.freeze({
+ arm64:Object.freeze({path:'/adapter/error-integration/wire-v2-image-manifest.json',sha:'63560c3dbe43d22c9391d0ac2e46dbad1d428f5b8ea8418b2a9038322da2ad0b',count:8520,bytes:94313030,links:27}),
+ x64:Object.freeze({path:'/adapter/error-integration/wire-v2-image-manifest-x64.json',sha:'5f1c14c5e6a6cdbe9d841b5ee749058b05183fc9bee02e27f50ab0bd9a432e96',count:8520,bytes:94371739,links:27})
+});
+function selectManifest(arch){return Object.hasOwn(MANIFESTS,arch)?MANIFESTS[arch]:null;}
 const FILES=Object.freeze({
 '/adapter/error-integration/wire-v2-bootstrap.js':'07a3f32e0c5fda49c301ca0f35e792da2fb4d3bbb61dbb792ae7d067ff0a1178',
 '/adapter/error-integration/wire-v2-loader.js':'d8bb00e3e603d5b01cbe846eb55abb92b7cc6ad9fde2ffcf3ab5685b47f6e7ba',
@@ -51,10 +55,15 @@ function verifyTree(root,manifest){
   return foundFiles.size===manifest.file_count&&foundLinks.size===Object.keys(manifest.symlinks).length&&total===manifest.total_bytes;
  }catch(_){return false;}
 }
+function validateManifest(bytes,arch){try{
+ const pin=selectManifest(arch);if(!pin||!Buffer.isBuffer(bytes)||hash(bytes)!==pin.sha)return null;
+ const m=JSON.parse(bytes);if(m.root!=='/usr/src/node-red/node_modules'||m.node!=='24.22.1'||m.file_count!==pin.count||m.total_bytes!==pin.bytes||Object.keys(m.files).length!==pin.count||Object.keys(m.symlinks).length!==pin.links)return null;
+ return m;
+}catch(_){return null;}}
 function verifySources(){try{
- const bytes=readRegular(MANIFEST,8*1024*1024);if(hash(bytes)!==MANIFEST_SHA)return false;const m=JSON.parse(bytes);
- if(m.root!=='/usr/src/node-red/node_modules'||m.file_count!==8520||m.total_bytes!==94313030||Object.keys(m.symlinks).length!==27)return false;
+ const pin=selectManifest(process.arch);if(!pin)return false;
+ const m=validateManifest(readRegular(pin.path,8*1024*1024),process.arch);if(!m)return false;
  for(const [file,digest] of Object.entries(FILES))if(hash(readRegular(file,4*1024*1024))!==digest)return false;
  return verifyTree(m.root,m);
 }catch(_){return false;}}
-module.exports=Object.freeze({ID,IMAGE,FILES,INGRESS_POINT,validateLaunch,verifySources,verifyTree});
+module.exports=Object.freeze({ID,IMAGE,FILES,INGRESS_POINT,validateLaunch,verifySources,verifyTree,selectManifest,validateManifest});

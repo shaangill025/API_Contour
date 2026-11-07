@@ -17,7 +17,12 @@ try{
   const rel=dst.startsWith('/adapter/')?'collectors/nodered/'+dst.slice('/adapter/'.length):'tests/fixtures/nodered-causal/'+path.basename(dst);
   assert.equal(sha(fs.readFileSync(path.join(repo,rel))),want,dst);
  }
- assert.equal(sha(fs.readFileSync(path.join(repo,'collectors/nodered/error-integration/wire-v2-image-manifest.json'))),'63560c3dbe43d22c9391d0ac2e46dbad1d428f5b8ea8418b2a9038322da2ad0b');
+ const manifests=['wire-v2-image-manifest.json','wire-v2-image-manifest-x64.json'].map(name=>fs.readFileSync(path.join(repo,'collectors/nodered/error-integration',name)));
+ assert(profile.validateManifest(manifests[0],'arm64'));assert(profile.validateManifest(manifests[1],'x64'));
+ assert.equal(profile.validateManifest(manifests[0],'x64'),null);assert.equal(profile.validateManifest(manifests[1],'arm64'),null);
+ assert.equal(profile.validateManifest(manifests[0],'ia32'),null);assert.equal(profile.selectManifest('toString'),null);
+ assert.equal(profile.validateManifest(null,'x64'),null);assert.equal(profile.validateManifest(Buffer.concat([manifests[1],Buffer.from(' ')]),'x64'),null);
+ assert.equal(profile.selectManifest('arm64').bytes,94313030);assert.equal(profile.selectManifest('x64').bytes,94371739);
  assert.notEqual(profile.ID,'apicontour/nodered-causal-v1');
 }finally{fs.rmSync(base,{recursive:true,force:true});}
 process.stdout.write('PASS: synthetic launch, tree, symlink and source guards only\n');

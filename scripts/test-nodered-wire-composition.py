@@ -103,8 +103,9 @@ def snapshot():
 
 def verify_profile(snapshot_values):
     fixed = {
-        'collectors/nodered/error-integration/wire-v2-profile.js': 'dea4caff5cde9f25151d967f130623d27ceceb218e29e88865cd4b794ac23653',
+        'collectors/nodered/error-integration/wire-v2-profile.js': '50a4a714c4eba89b4597631ad100cfc033b3faf0dc4cd1340094f38f6f5675a0',
         'collectors/nodered/error-integration/wire-v2-image-manifest.json': '63560c3dbe43d22c9391d0ac2e46dbad1d428f5b8ea8418b2a9038322da2ad0b',
+        'collectors/nodered/error-integration/wire-v2-image-manifest-x64.json': '5f1c14c5e6a6cdbe9d841b5ee749058b05183fc9bee02e27f50ab0bd9a432e96',
         'tests/fixtures/nodered-causal/image-private-causal-exporter.js': '1d8da5afc5dac8586e4bc668f71c4be430355a30a0da7805a18013bac74511c8',
     }
     if any(snapshot_values.get(path) != digest for path,digest in fixed.items()): raise RuntimeError('fixed source mismatch')
@@ -116,6 +117,26 @@ def verify_profile(snapshot_values):
         rel = ('collectors/nodered/'+path[len('/adapter/'):] if path.startswith('/adapter/')
                else 'tests/fixtures/nodered-causal/'+path[len('/fixture/'):])
         if snapshot_values.get(rel) != digest: raise RuntimeError('profile source mismatch')
+
+
+def validate_image_platform(image, snapshot_values):
+    # Docker uses amd64; Node's process.arch for the same image is x64.
+    pins = {
+        'arm64': ('wire-v2-image-manifest.json', '63560c3dbe43d22c9391d0ac2e46dbad1d428f5b8ea8418b2a9038322da2ad0b', 94313030),
+        'amd64': ('wire-v2-image-manifest-x64.json', '5f1c14c5e6a6cdbe9d841b5ee749058b05183fc9bee02e27f50ab0bd9a432e96', 94371739),
+    }
+    pin = pins.get(image.get('Architecture'))
+    if image.get('Os') != 'linux' or pin is None: raise RuntimeError('image platform unsupported')
+    name, digest, total = pin
+    rel = 'collectors/nodered/error-integration/'+name
+    if snapshot_values.get(rel) != digest: raise RuntimeError('image platform manifest mismatch')
+    data = (ROOT/rel).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest: raise RuntimeError('image platform manifest mismatch')
+    m = json.loads(data)
+    if (m.get('root') != '/usr/src/node-red/node_modules' or m.get('node') != '24.22.1'
+            or m.get('file_count') != 8520 or m.get('total_bytes') != total
+            or len(m.get('files', {})) != 8520 or len(m.get('symlinks', {})) != 27):
+        raise RuntimeError('image platform manifest mismatch')
 
 
 WIRE_WARNING = (b'(node:1) ExperimentalWarning: vm.USE_MAIN_CONTEXT_DEFAULT_LOADER is an experimental feature and might change at any time\n'
@@ -240,6 +261,7 @@ def main():
     head=head_and_clean(); before=snapshot(); verify_profile(before)
     image=json.loads(checked(['docker','image','inspect',IMAGE],20,262144))
     if not isinstance(image,list) or len(image)!=1: raise RuntimeError('image inspection invalid')
+    validate_image_platform(image[0], before)
     image_id=image[0].get('Id','')
     if not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id): raise RuntimeError('image identity invalid')
     # Resolve platform temp aliases (e.g. /var -> /private/var) before mounting.
