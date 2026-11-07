@@ -130,6 +130,23 @@ class ManagedEdgeTests(unittest.TestCase):
         with self.native_owner(peer) as owner:
             self.assertIsNotNone(owner._load()['pending'])
 
+    def test_live_observation_distinguishes_deadline_and_changed_fields(self):
+        import json
+        peer=self.native_peer(); started='2026-11-07T01:02:03Z'
+        replica=[b'null']*13; replica[5]=json.dumps(started).encode()
+        envoy=[b'null']*11; envoy[4]=json.dumps(started).encode()
+        for which in ('replica','envoy','membership','deadline'):
+            second=replica.copy(); again=envoy.copy(); members=('a',)
+            if which=='replica': second[7]=b'changed mounts'
+            if which=='envoy': again[9]=b'changed mounts'
+            if which=='membership': members=('b',)
+            with self.subTest(which=which), mock.patch.object(edge,'_probe_hash'), mock.patch.object(peer,'_inspect',side_effect=[replica,second]), mock.patch.object(peer,'_envoy_and_topology',side_effect=[(envoy,('a',)),(again,members)]), mock.patch.object(edge.time,'monotonic',side_effect=[0,31 if which=='deadline' else 1]):
+                if which=='deadline':
+                    with self.assertRaises(edge.NativeObservationDeadline): peer.observe_live()
+                else:
+                    with self.assertRaises(edge.NativeObservationChanged) as raised: peer.observe_live()
+                    self.assertEqual(raised.exception.code,{'replica':'r0080-e0000-m0','envoy':'r0000-e0200-m0','membership':'r0000-e0000-m1'}[which])
+
     def test_native_requires_bound_publisher(self):
         r=self.root
         with self.assertRaises(ValueError): edge.ManagedEdge(r/'state',r/'published',r/'watched',r/'ca',r/'ca-key',self.native_peer())

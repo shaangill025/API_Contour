@@ -24,7 +24,7 @@ import uuid
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from deploy.gateway.managed_edge import ManagedEdge,NativeReplicaPeer,NativeDirectoryPublisher,_PUBLISH_CLEAR,_PUBLISH_WARM
+from deploy.gateway.managed_edge import ManagedEdge,NativeReplicaPeer,NativeDirectoryPublisher,NativeObservationChanged,_PUBLISH_CLEAR,_PUBLISH_WARM
 from deploy.pilot import native_envoy,native_gateway_config
 from deploy.pilot.managed_edge_controller import ManagedEdgeController,LABEL
 
@@ -269,7 +269,9 @@ def failure_lines(error, phase='driver'):
         name=Path(tb.tb_frame.f_code.co_filename).name
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',name): name='unknown'
         locations.append(f'{name}:{tb.tb_lineno}'); tb=tb.tb_next
-    return [f"FAIL {phase} {kind} {location}" for location in (locations or ['unknown:0'])]
+    code=''
+    if type(error) is NativeObservationChanged and re.fullmatch(r'r[0-1][0-9a-f]{3}-e[0-1][0-9a-f]{3}-m[01]',error.code): code=' '+error.code
+    return [f"FAIL {phase} {kind} {location}{code}" for location in (locations or ['unknown:0'])]
 
 
 def main():

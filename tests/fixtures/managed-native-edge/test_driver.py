@@ -18,6 +18,14 @@ spec.loader.exec_module(driver)
 
 
 class DriverTests(unittest.TestCase):
+    def test_observation_diagnostic_has_only_bounded_field_codes(self):
+        error=driver.NativeObservationChanged(1 << 7,1 << 9,True)
+        self.assertEqual(driver.failure_lines(error),['FAIL driver NativeObservationChanged unknown:0 r0080-e0200-m1'])
+        error.code='secret-path-and-value'
+        self.assertEqual(driver.failure_lines(error),['FAIL driver NativeObservationChanged unknown:0'])
+        for values in ((True,0,False),(8192,0,False),(0,-1,False),(0,0,1)):
+            with self.assertRaises(ValueError): driver.NativeObservationChanged(*values)
+
     def test_only_exact_missing_object_is_absence(self):
         def result(stderr):
             return lambda *a, **k: subprocess.CompletedProcess(a, 1, b'', stderr)
