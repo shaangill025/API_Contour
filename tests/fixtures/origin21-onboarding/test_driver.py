@@ -17,6 +17,32 @@ spec=importlib.util.spec_from_file_location('origin21_qualification',Path(__file
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 
+class ReadinessTests(unittest.TestCase):
+    def test_temporary_acceptance_does_not_count_as_final(self):
+        from types import SimpleNamespace
+        def run(args,**kwargs):
+            text=' '.join(args)
+            # A temporary Unix-socket postmaster answers pg_isready but reports
+            # listen_addresses empty to the final-server identity query.
+            return SimpleNamespace(returncode=0,stdout=b'f\n' if 'current_setting' in text else b'accepting connections\n',stderr=b'')
+        self.assertFalse(driver.postgres_ready(run,'a'*64))
+
+    def test_final_server_requires_exact_success_and_bounded_process(self):
+        from types import SimpleNamespace
+        seen=[]
+        def run(args,**kwargs):
+            seen.append((args,kwargs)); return SimpleNamespace(returncode=0,stdout=b't\n',stderr=b'')
+        self.assertTrue(driver.postgres_ready(run,'a'*64))
+        text=seen[0][0][-1]
+        for part in ('docker-init','postmaster.pid','pg_isready','current_database()',"current_setting('listen_addresses')","current_setting('ssl')"):
+            self.assertIn(part,text)
+        self.assertEqual(seen[0][1]['timeout'],5)
+        for response in (SimpleNamespace(returncode=1,stdout=b't\n',stderr=b''),SimpleNamespace(returncode=0,stdout=b't',stderr=b''),SimpleNamespace(returncode=0,stdout=b't\nextra\n',stderr=b''),SimpleNamespace(returncode=0,stdout=b't\n',stderr=b'warning')):
+            self.assertFalse(driver.postgres_ready(lambda *a,**k:response,'a'*64))
+        for error in (TimeoutError('timeout'),RuntimeError('failure')):
+            self.assertFalse(driver.postgres_ready(mock.Mock(side_effect=error),'a'*64))
+
+
 class FactoryTests(unittest.TestCase):
     def test_full_preflight_refuses_existing_complete_artifact_roots_without_mutation(self):
         from deploy.local import origin21_profile,origin21_configs
