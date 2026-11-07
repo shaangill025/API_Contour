@@ -1,6 +1,11 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
 mod authority;
 #[cfg(unix)]
+mod causal_launch_files;
+mod causal_launch_material;
+mod causal_launch_metadata;
+mod causal_launch_protocol;
+#[cfg(unix)]
 mod causal_owner;
 #[cfg(unix)]
 mod causal_permit;
@@ -9,7 +14,12 @@ pub mod gateway;
 mod pool;
 mod service;
 #[cfg(unix)]
-pub use causal_owner::{CausalIssueOwner, CausalJournalError};
+pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
+pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
+pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
+pub use causal_launch_protocol::{ProtocolError, RelayCodec, RelayEvent};
+#[cfg(unix)]
+pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
 #[cfg(unix)]
 pub use causal_permit::CausalPermitOwner;
 pub use causal_service::{CausalRegistry, CausalServer};

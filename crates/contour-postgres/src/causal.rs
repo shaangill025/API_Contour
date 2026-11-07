@@ -652,6 +652,35 @@ impl CausalMarkerBinder {
         policy_keys: &PolicyKeys,
     ) -> Result<CausalMarkerBinding, CausalError> {
         let deadline = Instant::now() + self.connection.deadline;
+        self.bind_until(
+            session,
+            generation,
+            product_credential_id,
+            product_leaf,
+            public_key,
+            peer,
+            grant_keys,
+            policy_keys,
+            deadline,
+        )
+        .await
+    }
+    /// Bind within an absolute deadline. Commit ambiguity remains terminal;
+    /// dropping this future invalidates the borrowed session.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_until(
+        &mut self,
+        session: &mut CausalSession,
+        generation: &[u8; 32],
+        product_credential_id: &str,
+        product_leaf: &[u8; 32],
+        public_key: &[u8; 32],
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<CausalMarkerBinding, CausalError> {
+        let deadline = deadline.min(Instant::now() + self.connection.deadline);
         let mut session_guard = MarkerSessionGuard {
             session,
             succeeded: false,

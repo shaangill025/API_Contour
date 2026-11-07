@@ -6,12 +6,12 @@ const {types}=require('node:util');
 const bootstrap=require('./private-bootstrap'),profile=require('./live-profile'),credentials=require('./credential-check'),lifecycle=require('./lifecycle');
 const closer=lifecycle.create();
 module.exports=Object.freeze({});
-let permit,handoff,adapter,loader,dispatcher,exporter,requestNode,server,RED,rejectStartup,fd3=true,fd4=true,ended=false,businessStarted=false,timer,poller,sender,ready=false,installed,control,live=()=>false;
+let permit,handoff,adapter,loader,dispatcher,exporter,requestNode,server,RED,rejectStartup,fd3=true,fd4=true,fd5=true,statusStream,ended=false,businessStarted=false,timer,poller,sender,ready=false,installed,control,live=()=>false;
 closer.add(()=>{clearTimeout(timer);clearInterval(poller);clearInterval(sender);});
 closer.add(()=>dispatcher?.closeNode(requestNode));closer.add(()=>exporter?.close());closer.add(()=>adapter?.invalidate());
 closer.add(()=>handoff?.close());closer.add(()=>loader?.cancel());closer.add(()=>permit?.close());
 closer.add(()=>{if(!businessStarted){try{server?.close();}catch(_){}try{Promise.resolve(RED?.stop()).catch(()=>{});}catch(_){}}});
-closer.add(()=>{if(fd3)fs.closeSync(3);fd3=false;});closer.add(()=>{if(fd4&&!permit)fs.closeSync(4);fd4=false;});
+closer.add(()=>{if(fd3)fs.closeSync(3);fd3=false;});closer.add(()=>{if(fd4&&!permit)fs.closeSync(4);fd4=false;});closer.add(()=>{if(statusStream)statusStream.destroy();else if(fd5)fs.closeSync(5);fd5=false;});
 function close(){if(ended)return;ended=true;if(!businessStarted)process.exitCode=1;ready=false;if(rejectStartup)rejectStartup(Error('startup closed'));closer.close();}
 function data(x,k){if(!x||typeof x!=='object'||types.isProxy(x))return;const d=Object.getOwnPropertyDescriptor(x,k);return d&&'value'in d?d.value:undefined;}
 (async()=>{
@@ -63,6 +63,8 @@ function data(x,k){if(!x||typeof x!=='object'||types.isProxy(x))return;const d=O
   lifecycle.requireEpoch(permit.authority(),d.epoch);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(1880,'0.0.0.0',resolve);});
   if(ended||!live())throw Error('permit unavailable');businessStarted=true;rejectStartup=undefined;clearTimeout(timer);
+  const status=Buffer.alloc(76);status.write('CLR1');Buffer.from(d.generation,'hex').copy(status,4);Buffer.from(d.identity,'hex').copy(status,36);status.writeBigUInt64BE(epoch,68);
+  statusStream=fs.createWriteStream(null,{fd:5,autoClose:true});fd5=false;statusStream.on('error',close);if(!live())throw Error('permit unavailable');statusStream.end(status,()=>{status.fill(0);statusStream=undefined;});
 
  }catch(_){if(seed)seed.fill(0);close();}
 })();

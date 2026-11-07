@@ -5,7 +5,7 @@ const fs=require('node:fs'),crypto=require('node:crypto');
 const SOURCES=Object.freeze([
  '/adapter/causal-codec.js',
  ...['causal-marker.js','flow-source-transform.js','lexical-bridge.js','node-source-transform.js','private-causal-exporter.js','private-causal-receipt.js','private-handoff.js','private-owner-permit.js','private-producer-runtime.js','private-wire-dispatch.js','private-wire-transform.js','wire-v2-loader.js'].map(x=>'/adapter/error-integration/'+x),
- ...['credential-check.js','lifecycle.js','live-main.js','live-profile.js','private-bootstrap.js'].map(x=>'/adapter/live-integration/'+x)
+ ...['credential-check.js','lifecycle.js','live-main.js','live-profile.js','private-bootstrap.js','private-launch-proxy.js'].map(x=>'/adapter/live-integration/'+x)
 ].sort());
 const MOUNTS=Object.freeze({ca:'/run/apicontour/live/ca.pem',export_cert:'/run/apicontour/live/export.pem',export_key:'/run/apicontour/live/export.key',product_cert:'/run/apicontour/live/product.pem',product_key:'/run/apicontour/live/product.key',server_cert:'/run/apicontour/live/server.pem',server_key:'/run/apicontour/live/server.key'});
 const MANIFEST='/adapter/live-integration/manifest.json';

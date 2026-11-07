@@ -102,6 +102,20 @@ fn sync_checked(file: &File) -> Result<(), CausalJournalError> {
     file.sync_all().map_err(|_| CausalJournalError::Io)
 }
 
+/// Opaque bound-launch journal input. No public constructor exists: a future
+/// reviewed 503 checked-launch transition must mint it only after binding.
+pub struct BoundLaunchRecord {
+    slot: [u8; 32],
+    launcher: [u8; 32],
+    identity: [u8; 32],
+    record: Vec<u8>,
+}
+impl fmt::Debug for BoundLaunchRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BoundLaunchRecord")
+    }
+}
+
 /// Holds an exclusive advisory lock until dropped, including across issue futures.
 /// This is not a producer fence; a returned session can outlive the owner.
 pub struct CausalIssueOwner {
@@ -278,6 +292,56 @@ impl CausalIssueOwner {
         sync_checked(&file)?;
         sync_checked(&self._dir)
     }
+    // COL2 shares the exclusive launch name with COL1: either form consumes
+    // the one-shot launch permanently, including after an uncertain fsync.
+    pub fn consume_bound_launch(
+        &mut self,
+        input: &BoundLaunchRecord,
+    ) -> Result<(), CausalJournalError> {
+        let BoundLaunchRecord {
+            slot,
+            launcher,
+            identity,
+            record,
+        } = input;
+        use sha2::{Digest, Sha256};
+        if *slot == [0; 32]
+            || *launcher == [0; 32]
+            || *identity == [0; 32]
+            || record.is_empty()
+            || record.len() > 8192
+        {
+            return Err(CausalJournalError::Unsafe);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"apicontour/causal-launcher/1\n");
+        digest.update(record);
+        if digest.finalize().as_slice() != launcher {
+            return Err(CausalJournalError::Mismatch);
+        }
+        let mut file = open_at(
+            &self._dir,
+            LAUNCH,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COL2")
+            .and_then(|_| file.write_all(slot))
+            .and_then(|_| file.write_all(launcher))
+            .and_then(|_| file.write_all(identity))
+            .and_then(|_| file.write_all(&(record.len() as u32).to_be_bytes()))
+            .and_then(|_| file.write_all(record))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
+    }
     /// One checked issue attempt. OutcomeUnknown is returned unchanged; caller decides
     /// whether to attempt the same original request again under current validation.
     pub async fn issue(
@@ -447,6 +511,94 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn bound_launch_is_exact_exclusive_and_never_reusable_after_sync_failure() {
+        use sha2::{Digest, Sha256};
+        let record = b"{\"version\":1}";
+        let mut h = Sha256::new();
+        h.update(b"apicontour/causal-launcher/1\n");
+        h.update(record);
+        let hash: [u8; 32] = h.finalize().into();
+        for step in 0..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            owner.claim_generation().unwrap();
+            assert_eq!(
+                owner.consume_bound_launch(&BoundLaunchRecord {
+                    slot: [1; 32],
+                    launcher: [9; 32],
+                    identity: [2; 32],
+                    record: record.to_vec()
+                }),
+                Err(CausalJournalError::Mismatch)
+            );
+            assert!(!t.path.join("launch").exists());
+            if step == 0 {
+                owner
+                    .consume_bound_launch(&BoundLaunchRecord {
+                        slot: [1; 32],
+                        launcher: hash,
+                        identity: [2; 32],
+                        record: record.to_vec(),
+                    })
+                    .unwrap();
+            } else {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(
+                    owner.consume_bound_launch(&BoundLaunchRecord {
+                        slot: [1; 32],
+                        launcher: hash,
+                        identity: [2; 32],
+                        record: record.to_vec()
+                    }),
+                    Err(CausalJournalError::Io)
+                );
+            }
+            let stored = std::fs::read(t.path.join("launch")).unwrap();
+            assert_eq!(&stored[..4], b"COL2");
+            assert_eq!(&stored[4..36], &[1; 32]);
+            assert_eq!(&stored[36..68], &hash);
+            assert_eq!(&stored[68..100], &[2; 32]);
+            assert_eq!(
+                u32::from_be_bytes(stored[100..104].try_into().unwrap()) as usize,
+                record.len()
+            );
+            assert_eq!(&stored[104..], record);
+            assert_eq!(
+                owner.consume_bound_launch(&BoundLaunchRecord {
+                    slot: [1; 32],
+                    launcher: hash,
+                    identity: [2; 32],
+                    record: record.to_vec()
+                }),
+                Err(CausalJournalError::Mismatch)
+            );
+            assert_eq!(owner.consume_launch(), Err(CausalJournalError::Mismatch));
+        }
+    }
+    #[test]
+    fn old_launch_blocks_bound_launch_without_replacement() {
+        use sha2::{Digest, Sha256};
+        let t = Temp::new();
+        let mut owner = prepare(&t.path).unwrap();
+        owner.claim_generation().unwrap();
+        owner.consume_launch().unwrap();
+        let mut h = Sha256::new();
+        h.update(b"apicontour/causal-launcher/1\n");
+        h.update(b"x");
+        let hash: [u8; 32] = h.finalize().into();
+        assert_eq!(
+            owner.consume_bound_launch(&BoundLaunchRecord {
+                slot: [1; 32],
+                launcher: hash,
+                identity: [2; 32],
+                record: b"x".to_vec()
+            }),
+            Err(CausalJournalError::Mismatch)
+        );
+        assert_eq!(std::fs::read(t.path.join("launch")).unwrap(), b"COL1");
+    }
+
     #[test]
     fn uncertain_generation_sync_still_blocks_reuse() {
         for step in 1..=2 {

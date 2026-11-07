@@ -2,17 +2,17 @@
 // Private one-shot CLB1 parser. The caller owns the returned seed and closes it.
 const net=require('node:net'),crypto=require('node:crypto');
 const DOMAIN=Buffer.from('apicontour/causal-launch/1\n','ascii');
-const FIELDS=Object.freeze(['batch_bytes','batch_events','ca_sha256','epoch','export_credential','export_leaf','generation','identity','manifest_sha256','marker_public','nonce','product_credential','product_leaf','profile_id','queue_bytes','queue_ttl_ms','runtime','server_leaf','tenant','version']);
+const FIELDS=Object.freeze(['batch_bytes','batch_events','ca_sha256','epoch','export_credential','export_leaf','generation','identity','launch_slot','launcher_sha256','manifest_sha256','marker_public','nonce','product_credential','product_leaf','profile_id','queue_bytes','queue_ttl_ms','runtime','server_leaf','tenant','version']);
 const U64=18446744073709551615n;
 const uuid=x=>typeof x==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(x);
 const hex=x=>typeof x==='string'&&/^[0-9a-f]{64}$/.test(x);
 function encode(value){
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).join(',')!==FIELDS.join(','))throw Error('bootstrap schema');
  for(const k of ['export_credential','nonce','product_credential','profile_id','runtime','tenant'])if(!uuid(value[k]))throw Error('bootstrap schema');
- for(const k of ['ca_sha256','export_leaf','generation','identity','manifest_sha256','marker_public','product_leaf','server_leaf'])if(!hex(value[k]))throw Error('bootstrap schema');
+ for(const k of ['ca_sha256','export_leaf','generation','identity','launch_slot','launcher_sha256','manifest_sha256','marker_public','product_leaf','server_leaf'])if(!hex(value[k]))throw Error('bootstrap schema');
  if(typeof value.epoch!=='string'||!/^[1-9][0-9]{0,19}$/.test(value.epoch)||BigInt(value.epoch)>U64||value.version!==1)throw Error('bootstrap schema');
  if(!Number.isSafeInteger(value.batch_events)||value.batch_events<1||value.batch_events>500||!Number.isSafeInteger(value.batch_bytes)||value.batch_bytes<512||value.batch_bytes>1048576||!Number.isSafeInteger(value.queue_bytes)||value.queue_bytes<2*value.batch_bytes||value.queue_bytes>268435456||!Number.isSafeInteger(value.queue_ttl_ms)||value.queue_ttl_ms<1||value.queue_ttl_ms>86400000)throw Error('bootstrap schema');
- if(value.generation==='0'.repeat(64)||value.identity==='0'.repeat(64))throw Error('bootstrap schema');
+ if(value.generation==='0'.repeat(64)||value.identity==='0'.repeat(64)||value.launch_slot==='0'.repeat(64)||value.launcher_sha256==='0'.repeat(64))throw Error('bootstrap schema');
  return Buffer.from(JSON.stringify(value),'utf8');
 }
 function commitment(value){const data={};for(const k of FIELDS)if(k!=='identity')data[k]=value[k];const body=Buffer.from(JSON.stringify(data),'utf8'),len=Buffer.alloc(4);len.writeUInt32BE(body.length);return crypto.createHash('sha256').update(DOMAIN).update(len).update(body).digest('hex');}
