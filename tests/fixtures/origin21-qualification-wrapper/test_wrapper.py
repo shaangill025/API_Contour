@@ -18,6 +18,22 @@ w=importlib.util.module_from_spec(spec); spec.loader.exec_module(w)
 
 
 class WrapperTests(unittest.TestCase):
+    def test_child_diagnostics_are_closed_and_never_emit_raw_values(self):
+        allowed=b'fixture failure phase=full-capture type=RuntimeError location=test-origin21-onboarding.py:123,origin21_sql_runner.py:45'
+        raw=b'private-key-and-business-data\n'+allowed+b'\n'+allowed+b'\n'
+        raw+=b'fixture failure phase=secret type=RuntimeError location=unavailable\n'
+        raw+=b'fixture failure phase=full-capture type=SecretClass location=unavailable\n'
+        raw+=b'fixture failure phase=full-capture type=ValueError location=private-secret.py:2\n'
+        raw+=allowed+b' trailing-secret\n'
+        self.assertEqual(w.public_child_failure_lines(raw),[allowed.decode()])
+        cleanup=b'fixture failure phase=owned-cleanup type=CleanupFailure'
+        self.assertEqual(w.public_child_failure_lines(cleanup),[cleanup.decode()])
+        self.assertEqual(w.public_failure_locations(RuntimeError('secret')),[])
+        try: exec(compile('raise RuntimeError("secret")',str(w.__file__),'exec'))
+        except RuntimeError as error:
+            result=w.public_failure_locations(error)
+        self.assertEqual(result,['FAIL: Origin21 wrapper location=qualify-origin21-onboarding.py:1'])
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name).resolve(); self.owner=self.root/'owner'; self.owner.mkdir(mode=0o700); self.owned=w.OwnedDirectory(self.owner)
         self.head='a'*40; self.sources={'file':'c'*64}; self.token='b'*32; self.image='sha256:'+'d'*64; self.calls=[]
