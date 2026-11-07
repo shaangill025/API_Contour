@@ -20,7 +20,7 @@ LEFT JOIN contour.origin_proofs p USING(tenant_id,collector_id,batch_id,record_i
 LEFT JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id)
 LEFT JOIN contour.variants v ON (v.tenant_id,v.variant_id,v.operation_id,v.collector_id)=(w.tenant_id,w.variant_id,w.operation_id,w.collector_id)
 LEFT JOIN contour.operations o ON (o.tenant_id,o.operation_id)=(w.tenant_id,w.operation_id)
-LEFT JOIN contour.catalog_origin_projection cp USING(tenant_id,collector_id,batch_id,record_id)
+LEFT JOIN contour.catalog_origin_projection cp ON (cp.tenant_id,cp.collector_id,cp.batch_id,cp.record_id)=(m.tenant_id,m.collector_id,m.batch_id,m.record_id)
 WHERE m.tenant_id={t} AND m.collector_id={c} AND r.value->'record'->>'record_id'=m.record_id::text;"""
     raw=psql(sql)
     if not isinstance(raw,str) or len(raw.encode('utf-8'))>8*1024*1024: raise RuntimeError('catalog verification output bound')
