@@ -18,7 +18,13 @@ def run(command, timeout=180):
     result = subprocess.run(command, cwd=ROOT, capture_output=True, timeout=timeout)
     if result.returncode: raise RuntimeError('local startup command failed')
 
+def provision_script(args):
+    if not args: return ROOT / 'deploy/local/provision.py'
+    if args == ['--origin21']: return ROOT / 'deploy/local/origin21_provision.py'
+    raise ValueError('expected [--origin21]')
+
 def main():
+    provision = provision_script(sys.argv[1:])
     os.umask(0o077)
     os.environ['LOCAL_UID'] = str(os.getuid())
     os.environ['LOCAL_GID'] = str(os.getgid())
@@ -46,7 +52,7 @@ def main():
         if ready.returncode == 0: break
         if time.monotonic() >= until: raise RuntimeError('database readiness deadline')
         time.sleep(.5)
-    run([sys.executable, str(ROOT / 'deploy/local/provision.py')])
+    run([sys.executable, str(provision)])
     config = {'issuer': ISSUER, 'authorization_endpoint': ISSUER + '/protocol/openid-connect/auth',
               'token_endpoint': ISSUER + '/protocol/openid-connect/token', 'client_id': 'apicontour-local',
               'callback': 'https://localhost:9443/auth/callback', 'tls_certificate': str(STATE / 'tls/server.crt'),
