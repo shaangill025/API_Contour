@@ -339,6 +339,11 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(MODULE['snapshot']()[str(path)],MODULE['digest_file'](path))
         self.assertNotIn('0022_causal_generation',MODULE['OPT'])
 
+    def test_migration_23_is_hashed_without_being_applied(self):
+        path=MODULE['ROOT']/'db/opt-in-migrations/0023_causal_marker_bindings.sql'
+        self.assertEqual(MODULE['snapshot']()[str(path)],MODULE['digest_file'](path))
+        self.assertNotIn('0023_causal_marker_bindings',MODULE['OPT'])
+
     def test_source_guard_22_missing_mutated_and_symlink(self):
         with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
             root=Path(temp)/'repo';root.mkdir()

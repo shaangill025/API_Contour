@@ -11,6 +11,11 @@ spec=importlib.util.spec_from_file_location('generation_driver',ROOT/'scripts/te
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class Driver(unittest.TestCase):
+    def test_reviewed_23_is_hashed_but_not_applied(self):
+        name='db/opt-in-migrations/0023_causal_marker_bindings.sql'
+        self.assertIn(name,driver.source_snapshot())
+        self.assertNotIn('0023_causal_marker_bindings',driver.OPT_INS)
+
     def test_complete_cases_use_distinct_exact_ledger_clones(self):
         calls=[]; cases=[]
         def execute(db,sql):

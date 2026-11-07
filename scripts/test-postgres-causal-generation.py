@@ -16,9 +16,10 @@ ROOT = Path(__file__).absolute().parent.parent
 PROVISIONS = ('approval','authority','catalog','comparison','declared','human','origin_ingress','review','v2_ingress')
 MIGRATIONS = ('0001_identity','0002_policy','0003_ingestion','0004_catalog','0005_declared','0006_approval','0007_comparison','0008_review','0009_human','0010_public_contracts','0011_import_selectors','0012_public_comparisons','0013_instance_registry','0014_observation_evidence')
 OPT_INS = ('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs','0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox','0021_origin_admission','0022_causal_generation')
+EXTRA_SOURCE_MIGRATIONS = ('0023_causal_marker_bindings',)
 SOURCES = (('db/bootstrap.sql',) + tuple('db/provision_'+x+'.sql' for x in PROVISIONS)
     + tuple('db/migrations/'+x+'.sql' for x in MIGRATIONS)
-    + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS)
+    + tuple('db/opt-in-migrations/'+x+'.sql' for x in OPT_INS + EXTRA_SOURCE_MIGRATIONS)
     + ('db/tests/causal_runtime_registry_pre.sql','db/tests/causal_session_setup.sql',
        'db/tests/causal_generation_basic.sql','scripts/test-postgres-causal-registry.py',
        'scripts/test-postgres-causal-sessions.py','scripts/test-postgres-causal-generation.py',
@@ -45,7 +46,7 @@ def source_snapshot():
     for pattern, expected in (
         ('db/provision_*.sql', {'db/provision_'+x+'.sql' for x in PROVISIONS}),
         ('db/migrations/*.sql', {'db/migrations/'+x+'.sql' for x in MIGRATIONS}),
-        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS})):
+        ('db/opt-in-migrations/*.sql', {'db/opt-in-migrations/'+x+'.sql' for x in OPT_INS + EXTRA_SOURCE_MIGRATIONS})):
         if {str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)} != expected:
             raise ValueError('source list changed')
     return {path:hashlib.sha256(checked_source(path)).hexdigest() for path in SOURCES}

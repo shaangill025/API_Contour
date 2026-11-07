@@ -50,7 +50,7 @@ class Driver(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve(); example=root/'crates/contour-ingress/examples/causal_permit_probe.rs'; node=root/'collectors/nodered/error-integration/private-owner-permit.js'; marker=node.with_name('causal-marker.js')
             paths=[example,node,marker,root/'scripts/test-postgres-causal-permits.py',root/'tests/fixtures/causal-permits/test_driver.py',root/'crates/contour-ingress/Cargo.toml',root/'scripts/test-postgres-causal-https.py',root/'tests/fixtures/causal-https/test_https_driver.py']
-            paths += [root/'db/opt-in-migrations'/(n+'.sql') for n in driver.OPT]
+            paths += [root/'db/opt-in-migrations'/(n+'.sql') for n in driver.OPT + driver.EXTRA_SOURCE_MIGRATIONS]
             for path in paths: path.parent.mkdir(parents=True,exist_ok=True); path.write_text('fixture')
             for crate in ('contour-ingress','contour-delivery','contour-platform','contour-abi','contour-wasm'): (root/'crates'/crate/'src').mkdir(parents=True,exist_ok=True)
             bridge={'source_paths':lambda:[], 'digest_file':lambda p:hashlib.sha256(p.read_bytes()).hexdigest()}

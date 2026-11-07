@@ -130,6 +130,11 @@ class SessionDriverTests(unittest.TestCase):
         self.assertIn(name,MODULE['source_snapshot']())
         self.assertNotIn('0022_causal_generation',MODULE['OPT_INS'])
 
+    def test_migration_23_is_hashed_without_being_applied(self):
+        name='db/opt-in-migrations/0023_causal_marker_bindings.sql'
+        self.assertIn(name,MODULE['source_snapshot']())
+        self.assertNotIn('0023_causal_marker_bindings',MODULE['OPT_INS'])
+
     def test_reviewed_22_source_guard(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp).resolve()
