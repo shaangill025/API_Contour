@@ -36,7 +36,7 @@ class FactoryTests(unittest.TestCase):
                     before={str(path.relative_to(profile)):(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in profile.rglob('*') if path.is_file()}
                 else:
                     products.mkdir(mode=0o700)
-                    for name in ('intent.json','products.json','commitments.json','companions-intent.json','companions.json'):
+                    for name in ('intent.json','products.json','commitments.json','companions-intent.json','companions.json','products-model.json','companions-model.json'):
                         path=products/name; path.write_bytes(b'synthetic'); path.chmod(0o600)
                     before={path.name:(path.read_bytes(),path.stat().st_ino,path.stat().st_mode) for path in products.iterdir()}
                 selected=origin21_profile.PROFILE._replace(state=profile)
@@ -134,10 +134,10 @@ class FactoryTests(unittest.TestCase):
         token='a'*32; pg='b'*64; net='c'*64; prod=['d'*64,'e'*64]; default='f'*64
         deployment={'name':'contour-origin21-qual-'+token,'id':net,'owner_token':token,'postgres_id':pg}
         services={name:{'id':str(i)*64,'started_at':'fixed'} for i,name in enumerate(origin21_products.COMPANIONS,1)}
-        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':''}
+        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':'','model_sha256':'a'*64}
         record={'slots':[{'started_at':'fixed'},{'started_at':'fixed'}]}
         commitments={'version':1,'sha256':['1'*64,'1'*64]}
-        pending={'images':{name:{} for name in services}}
+        pending={'images':{name:{} for name in services},'model_sha256':'b'*64}
         records={'intent.json':intent,'products.json':record,'commitments.json':commitments,'companions-intent.json':pending,'companions.json':{'services':services}}
         ids=prod+[item['id'] for item in services.values()]
         call=mock.Mock(return_value=('\n'.join(ids)).encode())
@@ -153,8 +153,8 @@ class FactoryTests(unittest.TestCase):
         token='a'*32; pg='b'*64; net='c'*64; prod=['d'*64,'e'*64]; default='f'*64
         deployment={'name':'contour-origin21-qual-'+token,'id':net,'owner_token':token,'postgres_id':pg}
         services={name:{'id':str(i)*64,'started_at':'fixed'} for i,name in enumerate(origin21_products.COMPANIONS,1)}
-        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':''}
-        record={'slots':[{'started_at':'fixed'},{'started_at':'fixed'}]}; pending={'images':{name:{} for name in services}}
+        intent={'deployment':deployment,'token':'t','image_id':'image','image_env':[],'image_cmd':None,'image_workdir':'','model_sha256':'a'*64}
+        record={'slots':[{'started_at':'fixed'},{'started_at':'fixed'}]}; pending={'images':{name:{} for name in services},'model_sha256':'b'*64}
         records={'intent.json':intent,'products.json':record,'commitments.json':{'version':1,'sha256':['1'*64,'1'*64]},'companions-intent.json':pending,'companions.json':{'services':services}}
         remaining=set(prod+[item['id'] for item in services.values()]); captured={pg,*[services[n]['id'] for n in ('origin21-capture-ingress','origin21-capture-worker','native-gateway')]}; removed=[]
         def call(args):
@@ -167,7 +167,7 @@ class FactoryTests(unittest.TestCase):
             return {'Id':args[-1]}
         with tempfile.TemporaryDirectory() as directory:
             owner=Path(directory); (owner/'companions-intent.json').touch()
-            with mock.patch.object(driver,'verify_owned_root',return_value=(1,2)), mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_read_record',side_effect=lambda name:records[name]), mock.patch.object(origin21_products,'_recorded_products',return_value=prod), mock.patch.object(origin21_products,'_companion_record',return_value=default), mock.patch.object(origin21_products,'_network',return_value=default), mock.patch.object(origin21_products,'_validate_companion',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_products,'validate',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_evidence,'digest',return_value=bytes.fromhex('1'*64)):
+            with mock.patch.object(driver,'verify_owned_root',return_value=(1,2)), mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_read_record',side_effect=lambda name:records[name]), mock.patch.object(origin21_products,'_verify_model'), mock.patch.object(origin21_products,'_recorded_products',return_value=prod), mock.patch.object(origin21_products,'_companion_record',return_value=default), mock.patch.object(origin21_products,'_network',return_value=default), mock.patch.object(origin21_products,'_validate_companion',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_products,'validate',return_value={'StartedAt':'fixed'}), mock.patch.object(origin21_evidence,'digest',return_value=bytes.fromhex('1'*64)):
                 driver.cleanup_topology(call,inspect,deployment,directory)
         self.assertEqual(removed,[services[n]['id'] for n in reversed(origin21_products.COMPANIONS)]+prod)
         self.assertEqual(captured,{pg}); self.assertFalse(remaining)

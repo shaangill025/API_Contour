@@ -256,6 +256,7 @@ def cleanup_topology(call,inspect,deployment,folder):
     order=list(reversed(p.COMPANIONS)) if has_intent else []
     for service in order:
         if verify_owned_root(folder,'products',p.OWNER)!=owned: raise ValueError('product ownership changed')
+        p._verify_model('products',intent['model_sha256']); p._verify_model('companions',pending['model_sha256'])
         entry=companion[service]; cid=entry['id']
         state=p._validate_companion(inspect(['docker','inspect',cid]),service,cid,pending['images'][service],intent['token'],net,deployment['id'],deployment['name'],running=True)
         if state['StartedAt']!=entry['started_at']: raise RuntimeError('companion generation changed')
@@ -268,6 +269,7 @@ def cleanup_topology(call,inspect,deployment,folder):
         if len(current)!=len(all_ids) or set(current)!=set(all_ids): raise RuntimeError('project membership drift')
     for index,cid in enumerate(product_ids,1):
         if verify_owned_root(folder,'products',p.OWNER)!=owned: raise ValueError('product ownership changed')
+        p._verify_model('products',intent['model_sha256']); p._verify_model('companions',pending['model_sha256'])
         state=p.validate(inspect(['docker','inspect',cid]),index,cid,intent['image_id'],intent['image_env'],intent['image_cmd'],intent['image_workdir'],intent['token'],running=True)
         if state['StartedAt']!=record['slots'][index-1]['started_at']: raise RuntimeError('product generation changed')
         call(['docker','rm','-f',cid]); all_ids.remove(cid); default_members.remove(cid)
@@ -332,7 +334,7 @@ def cleanup_full_artifacts(folder,*,dry_run=False):
     owner_identity=verify_owned_root(folder,'products',owner)
     profile_identity=verify_owned_root(folder,'profile',origin21_profile.PROFILE.state)
     if owner_identity is not None:
-        expected={'intent.json','products.json','commitments.json','companions-intent.json','companions.json'}
+        expected={'intent.json','products.json','commitments.json','companions-intent.json','companions.json','products-model.json','companions-model.json'}
         remove_owned_tree(owner,expected,dry_run=dry_run,required_identity=owner_identity)
     root=origin21_profile.PROFILE.state
     if profile_identity is not None:

@@ -21,6 +21,8 @@ PROJECT='apicontour-origin21'
 NETWORK=PROJECT+'_default'
 OWNER=origin21_profile.STATE.parent/'origin21-products'
 COMPOSE=['docker','compose','--project-name',PROJECT,'-f',str(ROOT/'deploy/local/origin21-compose.yaml')]
+PRODUCTS=('replica1','replica2')
+MODEL_LIMIT=65536
 
 
 def _command(args,timeout=30,*,token=None,app_image=None,capture_network=None):
@@ -143,6 +145,61 @@ def _write_record(name,value):
     origin_credentials._write(OWNER/name,json.dumps(value,sort_keys=True,separators=(',',':')).encode())
 
 
+def _select_model(full,group):
+    """Close a normalized Compose model over one fixed service group."""
+    if group not in ('products','companions') or type(full) is not dict or set(full)!={'name','services','networks'} or full['name']!=PROJECT: raise ValueError('invalid compose model')
+    services=full['services']; networks=full['networks']; selected=PRODUCTS if group=='products' else COMPANIONS
+    if type(services) is not dict or set(services)!=set(PRODUCTS+COMPANIONS) or type(networks) is not dict or set(networks)!={'default','capture'}: raise ValueError('compose service scope drift')
+    required_networks={'default'} if group=='products' else {'default','capture'}
+    output={}; used_networks=set()
+    for name in selected:
+        original=services[name]
+        if type(original) is not dict or any(key in original for key in ('build','links','external_links','extends','volumes_from','network_mode','pid','ipc')): raise ValueError('unsupported compose service reference')
+        service=dict(original); bindings=service.get('networks')
+        if type(bindings) is not dict or not bindings or not set(bindings).issubset(required_networks): raise ValueError('compose network scope drift')
+        used_networks.update(bindings)
+        dependencies=service.get('depends_on')
+        if dependencies is not None:
+            if type(dependencies) is not dict or not set(dependencies).issubset(services): raise ValueError('invalid compose dependencies')
+            dependencies={key:value for key,value in dependencies.items() if key in selected}
+            if dependencies: service['depends_on']=dependencies
+            else: service.pop('depends_on',None)
+        if type(service.get('volumes',[])) is not list: raise ValueError('invalid compose binds')
+        for volume in service.get('volumes',[]):
+            if type(volume) is not dict or volume.get('type')!='bind' or not isinstance(volume.get('source'),str) or not os.path.isabs(volume['source']): raise ValueError('invalid compose bind')
+        output[name]=service
+    if used_networks!=required_networks: raise ValueError('unreferenced compose network')
+    return {'name':PROJECT,'services':output,'networks':{name:networks[name] for name in sorted(required_networks)}}
+
+
+def _derive_model(group,token,app_image,capture_network):
+    raw=_command(COMPOSE+['config','--format','json'],30,token=token,app_image=app_image,capture_network=capture_network)
+    if len(raw)>MODEL_LIMIT: raise ValueError('compose model output bound')
+    full=capture_renew.exact_json(raw)
+    model=_select_model(full,group)
+    default=full['networks']['default']; capture=full['networks']['capture']
+    if (type(default) is not dict or default.get('name')!=NETWORK or default.get('internal') is not True or (default.get('labels') or {}).get('org.apicontour.origin21.owner')!=token or
+        type(capture) is not dict or capture.get('name')!=capture_network or capture.get('external') is not True): raise ValueError('compose network identity drift')
+    result=json.dumps(model,sort_keys=True,separators=(',',':')).encode()
+    if not 1<=len(result)<=MODEL_LIMIT: raise ValueError('compose model bound')
+    return result
+
+
+def _verify_model(group,digest):
+    if group not in ('products','companions') or not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest): raise ValueError('invalid compose model identity')
+    raw=origin_credentials._file(OWNER/(group+'-model.json'),MODEL_LIMIT)
+    if hashlib.sha256(raw).hexdigest()!=digest: raise ValueError('compose model changed')
+    value=capture_renew.exact_json(raw)
+    names=PRODUCTS if group=='products' else COMPANIONS; networks={'default'} if group=='products' else {'default','capture'}
+    if type(value) is not dict or set(value)!={'name','services','networks'} or value['name']!=PROJECT or type(value['services']) is not dict or set(value['services'])!=set(names) or type(value['networks']) is not dict or set(value['networks'])!=networks or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw: raise ValueError('invalid stored compose model')
+    used_networks=set()
+    for service in value['services'].values():
+        if type(service) is not dict or type(service.get('networks')) is not dict or not set(service['networks']).issubset(networks) or type(service.get('depends_on',{})) is not dict or not set(service.get('depends_on',{})).issubset(names): raise ValueError('stored compose model escapes group')
+        used_networks.update(service['networks'])
+    if used_networks!=networks: raise ValueError('stored compose network drift')
+    return OWNER/(group+'-model.json')
+
+
 def _identity_ready():
     profile=origin21_profile.PROFILE
     capture_renew.safe_dir(profile.state.parent); capture_renew.safe_dir(profile.state)
@@ -167,21 +224,30 @@ def start_products(*, app_image_id, build_head, build_receipt, build_receipt_sha
     fd=os.open(OWNER.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try: os.fsync(fd)
     finally: os.close(fd)
-    _write_record('intent.json',{'version':1,'project':PROJECT,'image':origin21_evidence.IMAGE,'image_id':image_id,'image_env':image_env,'image_cmd':image_cmd,'image_workdir':image_workdir,'token':token,'app_image_id':app_image_id,'build_head':build_head,'build_receipt_sha256':build_receipt_sha256,'deployment':deployment,'services':['replica1','replica2']})
+    model=_derive_model('products',token,app_image_id,deployment['name'])
+    origin_credentials._write(OWNER/'products-model.json',model)
+    model_hash=hashlib.sha256(model).hexdigest()
+    _write_record('intent.json',{'version':1,'project':PROJECT,'image':origin21_evidence.IMAGE,'image_id':image_id,'image_env':image_env,'image_cmd':image_cmd,'image_workdir':image_workdir,'token':token,'app_image_id':app_image_id,'build_head':build_head,'build_receipt_sha256':build_receipt_sha256,'deployment':deployment,'services':['replica1','replica2'],'model_sha256':model_hash})
     # Any create/start exception remains an explicit unresolved intent. No
     # broad removal, automatic recovery, or treating partial creation as success.
-    _command(COMPOSE+['create','--no-build','--pull','never','--no-deps','replica1','replica2'],90,token=token,app_image=app_image_id,capture_network=deployment['name'])
+    model_path=_verify_model('products',model_hash)
+    _command(['docker','compose','--project-name',PROJECT,'-f',str(model_path),'create','--no-build','--pull','never',*PRODUCTS],90,token=token,app_image=app_image_id,capture_network=deployment['name'])
+    _verify_model('products',model_hash)
     ids=_command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+PROJECT]).decode('ascii').split()
     if len(ids)!=2 or len(set(ids))!=2: raise RuntimeError('product creation ambiguous')
     mapped={}
     for cid in ids:
+        _verify_model('products',model_hash)
         obj=_objects(['docker','inspect',cid]); service=(obj.get('Config') or {}).get('Labels',{}).get('com.docker.compose.service')
         if service not in ('replica1','replica2') or service in mapped: raise RuntimeError('product identity ambiguous')
         index=int(service[-1]); validate(obj,index,cid,image_id,image_env,image_cmd,image_workdir,token,running=False); mapped[service]=cid
-    for service in ('replica1','replica2'): _command(['docker','start',mapped[service]],30)
+    for service in ('replica1','replica2'):
+        _verify_model('products',model_hash)
+        _command(['docker','start',mapped[service]],30)
     network_id=_network(mapped.values(),token)
     values=[]
     for index in (1,2):
+        _verify_model('products',model_hash)
         cid=mapped['replica'+str(index)]; obj=_objects(['docker','inspect',cid]); state=validate(obj,index,cid,image_id,image_env,image_cmd,image_workdir,token,running=True)
         leaf=hashlib.sha256(origin_credentials._file(origin21_profile.PROFILE.origins[index-1].leaf_der)).hexdigest()
         values.append(origin21_evidence.descriptor({'container_id':cid,'image_id':image_id,'image_ref':origin21_evidence.IMAGE,
@@ -199,8 +265,9 @@ def inspect_slot(index):
     capture_renew.safe_dir(OWNER)
     if stat.S_IMODE(os.lstat(OWNER).st_mode)!=0o700: raise ValueError('unsafe product ownership directory')
     intent=_read_record('intent.json'); record=_read_record('products.json')
-    if set(intent)!={'version','project','image','image_id','image_env','image_cmd','image_workdir','token','app_image_id','build_head','build_receipt_sha256','deployment','services'} or intent['version']!=1 or intent['project']!=PROJECT or intent['image']!=origin21_evidence.IMAGE or intent['services']!=['replica1','replica2']:
+    if set(intent)!={'version','project','image','image_id','image_env','image_cmd','image_workdir','token','app_image_id','build_head','build_receipt_sha256','deployment','services','model_sha256'} or intent['version']!=1 or intent['project']!=PROJECT or intent['image']!=origin21_evidence.IMAGE or intent['services']!=['replica1','replica2']:
         raise ValueError('product intent drift')
+    _verify_model('products',intent['model_sha256'])
     _capture_network(intent['deployment'])
     if set(record)!={'version','slots'} or record['version']!=1 or not isinstance(record['slots'],list) or len(record['slots'])!=2: raise ValueError('product record drift')
     ids=[slot['container_id'] for slot in record['slots']]
@@ -211,6 +278,8 @@ def inspect_slot(index):
         network_id=_network(ids,intent['token'])
         project_ids=_command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+PROJECT]).decode('ascii').split()
         if len(project_ids)!=2 or set(project_ids)!=set(ids): raise ValueError('project membership drift')
+    _verify_model('products',intent['model_sha256'])
+    if os.path.lexists(OWNER/'companions-intent.json'): _verify_model('companions',_read_record('companions-intent.json')['model_sha256'])
     item=record['slots'][index-1]; cid=item['container_id']; obj=_objects(['docker','inspect',cid]); state=validate(obj,index,cid,intent['image_id'],intent['image_env'],intent['image_cmd'],intent['image_workdir'],intent['token'],running=True)
     leaf=hashlib.sha256(origin_credentials._file(origin21_profile.PROFILE.origins[index-1].leaf_der)).hexdigest()
     current=origin21_evidence.descriptor({'container_id':cid,'image_id':intent['image_id'],'image_ref':origin21_evidence.IMAGE,
@@ -310,9 +379,11 @@ def _validate_companion(obj,service,cid,image,token,default_network,capture_netw
 
 
 def _recorded_products(intent,record):
+    _verify_model('products',intent['model_sha256'])
     if type(record) is not dict or set(record)!={'version','slots'} or record['version']!=1 or type(record['slots']) is not list or len(record['slots'])!=2: raise ValueError('product record drift')
     ids=[]
     for index,item in enumerate(record['slots'],1):
+        _verify_model('products',intent['model_sha256'])
         if type(item) is not dict or not re.fullmatch('[0-9a-f]{64}',item.get('container_id','')): raise ValueError('product record drift')
         cid=item['container_id']; ids.append(cid)
         obj=_objects(['docker','inspect',cid]); state=validate(obj,index,cid,intent['image_id'],intent['image_env'],intent['image_cmd'],intent['image_workdir'],intent['token'],running=True)
@@ -327,10 +398,11 @@ def _recorded_products(intent,record):
 
 def _companion_record(intent,products):
     pending=_read_record('companions-intent.json'); record=_read_record('companions.json')
-    if (type(pending) is not dict or set(pending)!={'version','token','image_id','build_head','build_receipt_sha256','capture_network','images','services'} or
+    if (type(pending) is not dict or set(pending)!={'version','token','image_id','build_head','build_receipt_sha256','capture_network','images','services','model_sha256'} or
         pending['version']!=1 or pending['token']!=intent['token'] or pending['image_id']!=intent['app_image_id'] or
         pending['build_head']!=intent['build_head'] or pending['build_receipt_sha256']!=intent['build_receipt_sha256'] or pending['services']!=list(COMPANIONS)):
         raise ValueError('companion intent drift')
+    _verify_model('products',intent['model_sha256']); _verify_model('companions',pending['model_sha256'])
     if type(record) is not dict or set(record)!={'version','services'} or record['version']!=1 or type(record['services']) is not dict or set(record['services'])!=set(COMPANIONS): raise ValueError('companion record drift')
     current=origin21_transport._run(['git','rev-parse','HEAD'],'',deadline=15)
     dirty=origin21_transport._run(['git','status','--porcelain','--untracked-files=all'],'',deadline=15)
@@ -343,6 +415,7 @@ def _companion_record(intent,products):
     slots=record['services']; network_members=products+[slots[x]['id'] for x in ('destination','native-gateway','native-envoy')]
     network=_network(network_members,intent['token'])
     for service in COMPANIONS:
+        _verify_model('products',intent['model_sha256']); _verify_model('companions',pending['model_sha256'])
         entry=slots[service]
         if type(entry) is not dict or set(entry)!={'id','started_at'}: raise ValueError('companion record drift')
         image=pending['images'][service]
@@ -374,6 +447,7 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     if stat.S_IMODE(os.lstat(OWNER).st_mode)!=0o700: raise ValueError('unsafe product ownership directory')
     intent=_read_record('intent.json'); products=_read_record('products.json')
     if (intent.get('app_image_id'),intent.get('build_head'),intent.get('build_receipt_sha256'))!=(app_image_id,build_head,build_receipt_sha256): raise ValueError('app build identity changed')
+    _verify_model('products',intent['model_sha256'])
     if not all(callable(x) for x in (psql,sensitive_execute,authenticate)) or psql is sensitive_execute: raise ValueError('trusted database callbacks required')
     deployment=_build_receipt(app_image_id,build_head,build_receipt,build_receipt_sha256)
     if deployment!=intent['deployment']: raise ValueError('deployment network changed')
@@ -405,18 +479,25 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     if app['id']!=app_image_id or node['id']!=intent['image_id']: raise ValueError('companion image identity changed')
     images={name:(node if name=='destination' else envoy if name=='native-envoy' else app) for name in COMPANIONS}
     capture=_capture_network(intent['deployment'])
+    model=_derive_model('companions',intent['token'],app_image_id,deployment['name'])
+    origin_credentials._write(OWNER/'companions-model.json',model)
+    model_hash=hashlib.sha256(model).hexdigest()
     _write_record('companions-intent.json',{'version':1,'token':intent['token'],'image_id':app_image_id,'build_head':build_head,
-        'build_receipt_sha256':build_receipt_sha256,'capture_network':capture,'images':images,'services':list(COMPANIONS)})
-    _command(COMPOSE+['create','--no-build','--pull','never','--no-deps',*COMPANIONS],90,token=intent['token'],app_image=app_image_id,capture_network=deployment['name'])
+        'build_receipt_sha256':build_receipt_sha256,'capture_network':capture,'images':images,'services':list(COMPANIONS),'model_sha256':model_hash})
+    _verify_model('products',intent['model_sha256']); model_path=_verify_model('companions',model_hash)
+    _command(['docker','compose','--project-name',PROJECT,'-f',str(model_path),'create','--no-build','--pull','never',*COMPANIONS],90,token=intent['token'],app_image=app_image_id,capture_network=deployment['name'])
+    _verify_model('products',intent['model_sha256']); _verify_model('companions',model_hash)
     ids=_command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+PROJECT]).decode('ascii').split()
     if len(ids)!=7 or not set(product_ids).issubset(ids) or len(set(ids))!=7: raise RuntimeError('companion creation ambiguous')
     mapped={}
     for cid in set(ids)-set(product_ids):
+        _verify_model('products',intent['model_sha256']); _verify_model('companions',model_hash)
         obj=_objects(['docker','inspect',cid]); service=((obj.get('Config') or {}).get('Labels') or {}).get('com.docker.compose.service')
         if service not in COMPANIONS or service in mapped: raise RuntimeError('companion identity ambiguous')
         _validate_companion(obj,service,cid,images[service],intent['token'],'','',intent['deployment']['name'],running=False); mapped[service]=cid
     if set(mapped)!=set(COMPANIONS): raise RuntimeError('companion creation incomplete')
     for service in ('origin21-capture-ingress','origin21-capture-worker','destination','native-gateway','native-envoy'):
+        _verify_model('products',intent['model_sha256']); _verify_model('companions',model_hash)
         _command(['docker','start',mapped[service]],30)
     members=product_ids+[mapped[x] for x in ('destination','native-gateway','native-envoy')]
     network=_network(members,intent['token'])
@@ -424,6 +505,7 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     if _recorded_products(intent,products)!=product_ids: raise RuntimeError('product generation changed')
     states={}
     for service in COMPANIONS:
+        _verify_model('products',intent['model_sha256']); _verify_model('companions',model_hash)
         obj=_objects(['docker','inspect',mapped[service]])
         state=_validate_companion(obj,service,mapped[service],images[service],intent['token'],network,capture,intent['deployment']['name'],running=True)
         states[service]={'id':mapped[service],'started_at':state['StartedAt']}

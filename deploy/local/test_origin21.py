@@ -13,6 +13,49 @@ from deploy.local import capture_profiles, origin21_cli, origin21_credentials, o
 
 
 class Origin21Tests(unittest.TestCase):
+    def test_compose_models_close_transitive_dependencies_and_detect_drift(self):
+        services={name:{'networks':{'default':{}},'volumes':[{'type':'bind','source':'/private/input','target':'/input','read_only':True}]} for name in origin21_products.PRODUCTS+origin21_products.COMPANIONS}
+        services['replica1']['depends_on']={'native-envoy':{'condition':'service_started'}}
+        services['replica2']['depends_on']={'native-envoy':{'condition':'service_started'}}
+        services['native-envoy']['depends_on']={'native-gateway':{'condition':'service_started'}}
+        services['native-gateway']['depends_on']={'destination':{'condition':'service_started'},'origin21-capture-ingress':{'condition':'service_started'}}
+        for name in ('origin21-capture-ingress','origin21-capture-worker'): services[name]['networks']={'capture':{}}
+        services['native-gateway']['networks']={'default':{},'capture':{}}
+        full={'name':origin21_products.PROJECT,'services':services,'networks':{'default':{'internal':True},'capture':{'external':True}}}
+        products=origin21_products._select_model(full,'products'); companions=origin21_products._select_model(full,'companions')
+        self.assertEqual(set(products['services']),set(origin21_products.PRODUCTS)); self.assertEqual(set(products['networks']),{'default'})
+        self.assertNotIn('depends_on',products['services']['replica1']); self.assertIn('depends_on',services['replica1'])
+        self.assertEqual(set(companions['services']),set(origin21_products.COMPANIONS)); self.assertEqual(set(companions['networks']),{'default','capture'})
+        self.assertEqual(set(companions['services']['native-envoy']['depends_on']),{'native-gateway'})
+        bad=dict(full,services=dict(services,replica1=dict(services['replica1'],network_mode='service:native-envoy')))
+        with self.assertRaises(ValueError): origin21_products._select_model(bad,'products')
+        bad=dict(full,services=dict(services,replica1=dict(services['replica1'],depends_on={'foreign':{}})))
+        with self.assertRaises(ValueError): origin21_products._select_model(bad,'products')
+        token='a'*64; capture='contour-origin21-qual-'+'b'*32
+        configured=dict(full,networks={'default':{'name':origin21_products.NETWORK,'internal':True,'labels':{'org.apicontour.origin21.owner':token}},'capture':{'name':capture,'external':True}})
+        with mock.patch.object(origin21_products,'_command',return_value=json.dumps(configured).encode()) as command:
+            derived=origin21_products._derive_model('products',token,'sha256:'+'c'*64,capture)
+            self.assertEqual(set(json.loads(derived)['services']),set(origin21_products.PRODUCTS))
+            self.assertEqual(command.call_args.kwargs['capture_network'],capture)
+        wrong=dict(configured,networks=dict(configured['networks'],capture={'name':'foreign','external':True}))
+        with mock.patch.object(origin21_products,'_command',return_value=json.dumps(wrong).encode()):
+            with self.assertRaisesRegex(ValueError,'network identity drift'): origin21_products._derive_model('products',token,'sha256:'+'c'*64,capture)
+        raw=json.dumps(products,sort_keys=True,separators=(',',':')).encode(); digest=hashlib.sha256(raw).hexdigest()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(origin21_products,'OWNER',Path(directory)):
+            origin21_products.origin_credentials._write(Path(directory)/'products-model.json',raw)
+            self.assertEqual(origin21_products._verify_model('products',digest),Path(directory)/'products-model.json')
+            with self.assertRaises(FileExistsError): origin21_products.origin_credentials._write(Path(directory)/'products-model.json',raw)
+            (Path(directory)/'products-model.json').write_bytes(raw+b' ')
+            with self.assertRaisesRegex(ValueError,'changed'): origin21_products._verify_model('products',digest)
+
+    def test_owner_inspection_refuses_model_drift_before_docker(self):
+        intent={'version':1,'project':origin21_products.PROJECT,'image':origin21_evidence.IMAGE,'image_id':'i','image_env':[],'image_cmd':None,'image_workdir':'','token':'t','app_image_id':'a','build_head':'h','build_receipt_sha256':'r','deployment':{},'services':['replica1','replica2'],'model_sha256':'0'*64}
+        with tempfile.TemporaryDirectory() as directory:
+            owner=Path(directory); os.chmod(owner,0o700); model=owner/'products-model.json'; model.write_bytes(b'changed'); model.chmod(0o600)
+            with mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_read_record',side_effect=[intent,{'version':1,'slots':[{},{}]}]), mock.patch.object(origin21_products,'_capture_network') as inspect:
+                with self.assertRaisesRegex(ValueError,'model changed'): origin21_products.inspect_slot(1)
+                inspect.assert_not_called()
+
     def test_postgres_init_overlay_is_opt_in_and_source_bound(self):
         path=origin21_profile.ROOT/'deploy/local/origin21-postgres-init.yaml'
         self.assertEqual(path.read_text(), '# Opt-in for Origin21 only; apply alongside deploy/local/compose.yaml.\nservices:\n  postgres:\n    init: true\n')
@@ -457,9 +500,13 @@ class Origin21Tests(unittest.TestCase):
                 calls.append(args)
                 if args[:2]==['docker','compose']: raise RuntimeError('ambiguous creation')
                 return b''
-            with mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_identity_ready'), mock.patch.object(origin21_products,'_build_receipt',return_value={'name':'synthetic'}), mock.patch.object(origin21_products,'_capture_network'), mock.patch.object(origin21_products,'_command',side_effect=ambiguous), mock.patch.object(origin21_products,'_image_id',return_value=('sha256:'+'a'*64,[],None,'')):
+            model=json.dumps({'name':origin21_products.PROJECT,'services':{x:{'networks':{'default':{}}} for x in origin21_products.PRODUCTS},'networks':{'default':{}}},sort_keys=True,separators=(',',':')).encode()
+            with mock.patch.object(origin21_products,'OWNER',owner), mock.patch.object(origin21_products,'_identity_ready'), mock.patch.object(origin21_products,'_build_receipt',return_value={'name':'synthetic'}), mock.patch.object(origin21_products,'_capture_network'), mock.patch.object(origin21_products,'_derive_model',return_value=model), mock.patch.object(origin21_products,'_command',side_effect=ambiguous), mock.patch.object(origin21_products,'_image_id',return_value=('sha256:'+'a'*64,[],None,'')):
                 with self.assertRaisesRegex(RuntimeError,'ambiguous creation'): origin21_products.start_products(app_image_id='sha256:'+'a'*64,build_head='b'*40,build_receipt='/not-read',build_receipt_sha256='c'*64)
                 self.assertTrue((owner/'intent.json').is_file()); self.assertFalse((owner/'products.json').exists())
+                create=next(args for args in calls if args[:2]==['docker','compose'])
+                self.assertNotIn('--no-deps',create); self.assertEqual(create[-2:],list(origin21_products.PRODUCTS))
+                self.assertTrue((owner/'products-model.json').is_file())
                 self.assertFalse(any('rm' in args for args in calls))
                 count=len(calls)
                 with self.assertRaisesRegex(ValueError,'ownership state already exists'): origin21_products.start_products(app_image_id='sha256:'+'a'*64,build_head='b'*40,build_receipt='/not-read',build_receipt_sha256='c'*64)
@@ -531,12 +578,12 @@ class Origin21Tests(unittest.TestCase):
             command.assert_not_called()
 
     def test_companions_refuse_current_fact_or_auth_drift_before_intent(self):
-        intent={'app_image_id':'image','build_head':'head','build_receipt_sha256':'digest','deployment':{},'token':'token'}
+        intent={'app_image_id':'image','build_head':'head','build_receipt_sha256':'digest','deployment':{},'token':'token','model_sha256':'a'*64}
         products={'slots':[{},{}]}; journal={'completed':len(origin21_state.PHASES),'pending':None}
         for reason in ('revoked lifecycle','revoked credential','revoked grant','authentication failed'):
             with tempfile.TemporaryDirectory() as directory:
                 os.chmod(directory,0o700)
-                with mock.patch.object(origin21_products,'OWNER',Path(directory)), mock.patch.object(origin21_products,'_read_record',side_effect=[intent,products]), mock.patch.object(origin21_products,'_build_receipt',return_value={}), mock.patch.object(origin21_state,'_read',return_value=journal), mock.patch.object(origin21_state,'_source_identity',return_value='source'), mock.patch.object(origin21_products,'_recorded_products',return_value=['one','two']), mock.patch.object(origin21_products,'_network'), mock.patch.object(origin21_products,'_command',return_value=b'one\ntwo\n') as command, mock.patch.object(origin21_evidence,'digest',return_value=b'a'*32), mock.patch.object(origin21_setup,'prepare',side_effect=ValueError(reason)) as prepare, mock.patch.object(origin21_products,'_write_record') as write:
+                with mock.patch.object(origin21_products,'OWNER',Path(directory)), mock.patch.object(origin21_products,'_read_record',side_effect=[intent,products]), mock.patch.object(origin21_products,'_verify_model'), mock.patch.object(origin21_products,'_build_receipt',return_value={}), mock.patch.object(origin21_state,'_read',return_value=journal), mock.patch.object(origin21_state,'_source_identity',return_value='source'), mock.patch.object(origin21_products,'_recorded_products',return_value=['one','two']), mock.patch.object(origin21_products,'_network'), mock.patch.object(origin21_products,'_command',return_value=b'one\ntwo\n') as command, mock.patch.object(origin21_evidence,'digest',return_value=b'a'*32), mock.patch.object(origin21_setup,'prepare',side_effect=ValueError(reason)) as prepare, mock.patch.object(origin21_products,'_write_record') as write:
                     with self.assertRaisesRegex(ValueError,reason):
                         origin21_products.start_companions(app_image_id='image',build_head='head',build_receipt='receipt',build_receipt_sha256='digest',psql=mock.Mock(),sensitive_execute=mock.Mock(),authenticate=mock.Mock())
                     self.assertTrue(prepare.call_args.kwargs['check_only'])
