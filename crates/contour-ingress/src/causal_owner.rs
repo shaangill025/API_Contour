@@ -28,6 +28,8 @@ pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 
 const LOCK: &CStr = c"lock";
 const RECORD: &CStr = c"issue";
+const GENERATION: &CStr = c"generation";
+const LAUNCH: &CStr = c"launch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CausalJournalError {
@@ -227,6 +229,55 @@ impl CausalIssueOwner {
             request,
         })
     }
+    // A generation is consumed even when the caller crashes before launch.
+    pub(crate) fn claim_generation(&mut self) -> Result<[u8; 32], CausalJournalError> {
+        use ring::rand::SecureRandom;
+        let mut generation = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut generation)
+            .map_err(|_| CausalJournalError::Io)?;
+        if generation == [0; 32] {
+            return Err(CausalJournalError::Io);
+        }
+        let mut file = open_at(
+            &self._dir,
+            GENERATION,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COG1")
+            .and_then(|_| file.write_all(&generation))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)?;
+        Ok(generation)
+    }
+    pub(crate) fn consume_launch(&mut self) -> Result<(), CausalJournalError> {
+        let mut file = open_at(
+            &self._dir,
+            LAUNCH,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COL1")
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
+    }
     /// One checked issue attempt. OutcomeUnknown is returned unchanged; caller decides
     /// whether to attempt the same original request again under current validation.
     pub async fn issue(
@@ -238,6 +289,18 @@ impl CausalIssueOwner {
     ) -> Result<CausalSession, CausalError> {
         issuer
             .issue(&self.request, peer, grant_keys, policy_keys)
+            .await
+    }
+    pub(crate) async fn issue_until(
+        &mut self,
+        issuer: &mut CausalIssuer,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: tokio::time::Instant,
+    ) -> Result<CausalSession, CausalError> {
+        issuer
+            .issue_until(&self.request, peer, grant_keys, policy_keys, deadline)
             .await
     }
 }
@@ -349,6 +412,56 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+    #[test]
+    fn generation_claim_is_single_use_across_owner_reopen() {
+        let t = Temp::new();
+        let mut owner = prepare(&t.path).unwrap();
+        owner.claim_generation().unwrap();
+        assert_eq!(owner.claim_generation(), Err(CausalJournalError::Mismatch));
+        drop(owner);
+        let mut reopened = prepare(&t.path).unwrap();
+        assert_eq!(
+            reopened.claim_generation(),
+            Err(CausalJournalError::Mismatch)
+        );
+    }
+    #[test]
+    fn launch_consumption_is_single_use_even_on_sync_failure() {
+        for step in 0..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            let generation = owner.claim_generation().unwrap();
+            assert_ne!(generation, [0; 32]);
+            if step == 0 {
+                owner.consume_launch().unwrap();
+            } else {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(owner.consume_launch(), Err(CausalJournalError::Io));
+            }
+            assert_eq!(owner.consume_launch(), Err(CausalJournalError::Mismatch));
+            drop(owner);
+            assert_eq!(
+                prepare(&t.path).unwrap().claim_generation(),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
+    }
+    #[test]
+    fn uncertain_generation_sync_still_blocks_reuse() {
+        for step in 1..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(owner.claim_generation(), Err(CausalJournalError::Io));
+            }
+            drop(owner);
+            assert_eq!(
+                prepare(&t.path).unwrap().claim_generation(),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
     }
     #[test]
     fn torn_or_unsafe_files_fail_closed() {
