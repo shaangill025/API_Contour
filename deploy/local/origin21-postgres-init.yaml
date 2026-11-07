@@ -1,0 +1,4 @@
+# Opt-in for Origin21 only; apply alongside deploy/local/compose.yaml.
+services:
+  postgres:
+    init: true
