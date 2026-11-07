@@ -1,0 +1,51 @@
+name: Pinned Node profile diagnostics
+on:
+  push:
+    branches: [diag/node-profile-20261107]
+permissions:
+  contents: read
+jobs:
+  public-image-metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Inspect pinned public runtime without activating capture
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, pathlib, secrets, subprocess, tempfile
+          image='docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963'
+          def call(args,timeout=60):
+              return subprocess.check_output(args,timeout=timeout,text=True).strip()
+          call(['docker','pull',image],240)
+          meta=json.loads(call(['docker','image','inspect',image]))[0]
+          print(json.dumps({k:meta.get(k) for k in ['Id','Architecture','Os']}),flush=True)
+          script=r"""
+          const fs=require('fs'),path=require('path'),crypto=require('crypto');
+          const p=require('/adapter/error-integration/wire-v2-profile.js');
+          const m=JSON.parse(fs.readFileSync('/adapter/error-integration/wire-v2-image-manifest.json'));
+          const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+          let files=0,bytes=0,links=0,bad=0,diffs=[],todo=[''];
+          while(todo.length){const rel=todo.pop();for(const n of fs.readdirSync(path.join(m.root,rel))){const r=rel?rel+'/'+n:n,f=path.join(m.root,r),s=fs.lstatSync(f);if(s.isDirectory())todo.push(r);else if(s.isSymbolicLink()){links++;if(m.symlinks[r]!==fs.readlinkSync(f))bad++;}else if(s.isFile()){files++;bytes+=s.size;if(bytes>268435456)throw Error('public tree bound');const h=hash(fs.readFileSync(f)),e=m.files[r];if(!e||e.bytes!==s.size||e.sha256!==h){bad++;if(diffs.length<12)diffs.push({path:r,expected:e?.sha256,actual:h,bytes:s.size});}}else bad++;}}
+          const env={};for(const k of ['NODE_VERSION','NODE_RED_VERSION','YARN_VERSION','PATH','HOME','HOSTNAME','LANG','TZ','NODE_OPTIONS','NODE_PATH'])env[k]=process.env[k];
+          const launch=p.validateLaunch({version:process.versions.node,executable:process.execPath,argv:['/usr/local/bin/node','/fixture/image-wire-v2-fixture.js'],execArgv:['--require','/adapter/error-integration/wire-v2-bootstrap.js'],env:process.env,cached:['/adapter/error-integration/wire-v2-profile.js']});
+          console.log(JSON.stringify({scope:'public pinned image metadata only; NOT qualification',arch:process.arch,node:process.versions.node,env,launchWithExpectedArguments:launch,verifySources:p.verifySources(),expectedFiles:m.file_count,expectedBytes:m.total_bytes,files,bytes,links,mismatches:bad,diffs}));
+          """
+          root=pathlib.Path.cwd();nonce=secrets.token_hex(16);name='contour-public-diag-'+nonce;label='org.apicontour.public-diag';cid=None
+          folder=pathlib.Path(tempfile.mkdtemp(prefix='contour-public-diag-'));os.chmod(folder,0o700)
+          intent=folder/'intent.json';intent.write_text(json.dumps({'name':name,'label':label,'nonce':nonce,'image':image}));intent.chmod(0o600)
+          try:
+              cid=call(['docker','create','--name',name,'--label',label+'='+nonce,'--hostname','causal-wire-v2','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','256m','--pids-limit','128','--user',str(os.getuid())+':'+str(os.getgid()),'--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777','--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','-e','HOME=/data','-e','LANG=C.UTF-8','-e','TZ=UTC','-e','NODE_OPTIONS=','-e','NODE_PATH=/usr/src/node-red/node_modules','-v',str(root/'collectors/nodered')+':/adapter:ro','-v',str(root/'tests/fixtures/nodered-causal')+':/fixture:ro','--entrypoint','node',image,'-e',script])
+              call(['docker','start',cid]);status=call(['docker','wait',cid]);print(call(['docker','logs',cid]),flush=True)
+              if status!='0':raise RuntimeError('diagnostic execution failed')
+          finally:
+              probe=subprocess.run(['docker','inspect',cid or name],capture_output=True,text=True,timeout=15)
+              if probe.returncode==0:
+                  obj=json.loads(probe.stdout)[0]
+                  assert obj['Name']=='/'+name and obj['Config']['Image']==image and obj['Config']['Labels'].get(label)==nonce and obj['HostConfig']['NetworkMode']=='none'
+                  if cid is not None:assert obj['Id']==cid
+                  call(['docker','rm','-f',obj['Id']])
+              elif cid is not None:raise RuntimeError('owned diagnostic cleanup unverified')
+          PYCODE
