@@ -525,6 +525,11 @@ class Origin21Tests(unittest.TestCase):
             'NetworkSettings':{'Networks':{origin21_products.NETWORK:{'NetworkID':node},'apicontour-local_default':{'NetworkID':cap}}}}
         with mock.patch.object(origin21_products,'_companion_mounts',return_value={'/run/native':'/private/fixture'}):
             origin21_products._validate_companion(obj,'native-gateway',cid,image,token,node,cap,'apicontour-local_default',running=True)
+            unset=dict(image,workdir=None); empty=dict(obj,Config=dict(obj['Config'],WorkingDir=''))
+            origin21_products._validate_companion(empty,'native-gateway',cid,unset,token,node,cap,'apicontour-local_default',running=True)
+            for expected,actual in ((None,'/unexpected'),('/work',''),('/work','/other'),(42,'')):
+                mismatch=dict(obj,Config=dict(obj['Config'],WorkingDir=actual))
+                with self.assertRaises(RuntimeError): origin21_products._validate_companion(mismatch,'native-gateway',cid,dict(image,workdir=expected),token,node,cap,'apicontour-local_default',running=True)
             bad=dict(obj,Image='sha256:'+'1'*64)
             with self.assertRaises(RuntimeError): origin21_products._validate_companion(bad,'native-gateway',cid,image,token,node,cap,'apicontour-local_default',running=True)
             bad=dict(obj,NetworkSettings={'Networks':{origin21_products.NETWORK:{'NetworkID':node}}})

@@ -360,7 +360,8 @@ def _validate_companion(obj,service,cid,image,token,default_network,capture_netw
            'native-gateway':['/usr/local/bin/local_gateway','/run/native/gateway.json'],
            'native-envoy':image['entrypoint']}[service]
     cmd=['-c','/run/forwarder/envoy.json','--log-level','error'] if service=='native-envoy' else image['cmd']
-    if config.get('Entrypoint')!=entry or config.get('Cmd')!=cmd or config.get('WorkingDir')!=image['workdir']: raise RuntimeError('companion command drift')
+    workdir='' if image['workdir'] is None else image['workdir']
+    if type(workdir) is not str or config.get('Entrypoint')!=entry or config.get('Cmd')!=cmd or config.get('WorkingDir')!=workdir: raise RuntimeError('companion command drift')
     env=config.get('Env') or []; wanted=dict(x.split('=',1) for x in image['env'])
     if service=='destination': wanted['PILOT_DESTINATION_MODE']='normal'
     if len(env)!=len(wanted) or any('=' not in x for x in env) or dict(x.split('=',1) for x in env)!=wanted: raise RuntimeError('companion environment drift')
