@@ -299,6 +299,57 @@ class ManagedEdgeTests(unittest.TestCase):
         values[7][2]['RW']=False
         with mock.patch.object(edge,'_command',side_effect=lambda args,timeout=10: json.dumps(image).encode() if args[1]=='image' else json.dumps(net).encode() if args[1]=='network' else inspect() if args[1]=='inspect' else b'00'*32+b'\n'), mock.patch.object(peer,'_envoy_and_topology',return_value=('topology',)):
             with self.assertRaises(ValueError): peer.confirm(fingerprint,{'replica_started':started,'envoy_started':started})
+    def test_native_renew_uses_committed_prior_and_timeout_keeps_pending(self):
+        peer=self.native_peer(); binding={'replica_started':'2026-11-07T01:02:03Z','envoy_started':'2026-11-07T01:02:04Z'}
+        with self.native_owner(peer) as owner, mock.patch.object(peer,'verify_created'), mock.patch.object(peer,'observe_live',return_value=binding), mock.patch.object(peer,'confirm') as confirm:
+            owner.prepare_initial(); owner.bind_initial_peer(); owner.reconcile()
+            initial=owner._load(); self.assertIsNone(confirm.call_args.args[2])
+            confirm.side_effect=TimeoutError('old still served')
+            with self.assertRaises(TimeoutError): owner.renew()
+            self.assertEqual(confirm.call_args.args[2],bytes.fromhex(initial['current_commitment']['cert_sha256']))
+            pending=owner._load(); self.assertEqual(pending['current'],initial['current']); self.assertIsNotNone(pending['pending'])
+            with self.assertRaises(RuntimeError): owner.renew()
+            with self.assertRaises(RuntimeError): owner.rollback()
+            confirm.side_effect=None; owner.reconcile()
+            self.assertIsNone(owner._load()['pending'])
+
+    def test_native_confirmation_retries_only_known_previous_with_one_deadline(self):
+        peer=self.native_peer(); old=bytes.fromhex('aa'*32); new=bytes.fromhex('bb'*32)
+        binding={'replica_started':'start','envoy_started':'start'}
+        now=[0.0]; deadlines=[]; outputs=iter([old.hex().encode()+b'\n',new.hex().encode()+b'\n'])
+        def inspect(deadline,*args): deadlines.append(deadline); return ('same replica',)
+        def topology(deadline,*args): deadlines.append(deadline); return ('same topology',)
+        def invoke(args,deadline): deadlines.append(deadline); return next(outputs)
+        with mock.patch.object(edge,'_probe_hash') as source, mock.patch.object(peer,'_inspect',side_effect=inspect), mock.patch.object(peer,'_envoy_and_topology',side_effect=topology), mock.patch.object(peer,'_invoke',side_effect=invoke), mock.patch.object(edge.time,'monotonic',side_effect=lambda:now[0]), mock.patch.object(edge.time,'sleep',side_effect=lambda duration:now.__setitem__(0,now[0]+duration)):
+            peer.confirm(new,binding,old)
+        self.assertEqual(set(deadlines),{30.0}); self.assertEqual(source.call_count,4)
+        self.assertAlmostEqual(now[0],.1)
+
+    def test_native_previous_until_deadline_and_terminal_failures(self):
+        peer=self.native_peer(); old=bytes.fromhex('aa'*32); new=bytes.fromhex('bb'*32)
+        binding={'replica_started':'start','envoy_started':'start'}
+        for scenario in ('deadline','unknown','malformed','identity','topology','tls','bootstrap'):
+            with self.subTest(scenario=scenario):
+                now=[0.0]; calls=[]; replica_calls=[]; topology_calls=[]
+                def inspect(deadline,*args):
+                    replica_calls.append(1)
+                    return ('changed' if scenario=='identity' and len(replica_calls)>1 else 'same',)
+                def topology(deadline,*args):
+                    topology_calls.append(1)
+                    return ('changed' if scenario=='topology' and len(topology_calls)>1 else 'same',)
+                def invoke(args,deadline):
+                    calls.append(deadline)
+                    if scenario=='tls': raise OSError('handshake')
+                    if scenario=='unknown': return b'cc'*32+b'\n'
+                    if scenario=='malformed': return b'not-a-fingerprint\n'
+                    return old.hex().encode()+b'\n'
+                def sleep(duration): now[0]+=duration if scenario!='deadline' else 15
+                with mock.patch.object(edge,'_probe_hash'), mock.patch.object(peer,'_inspect',side_effect=inspect), mock.patch.object(peer,'_envoy_and_topology',side_effect=topology), mock.patch.object(peer,'_invoke',side_effect=invoke), mock.patch.object(edge.time,'monotonic',side_effect=lambda:now[0]), mock.patch.object(edge.time,'sleep',side_effect=sleep):
+                    with self.assertRaises(TimeoutError if scenario=='deadline' else (OSError if scenario=='tls' else ValueError)):
+                        peer.confirm(new,binding,None if scenario=='bootstrap' else old)
+                if scenario!='deadline': self.assertEqual(len(calls),1)
+                else: self.assertEqual(calls,[30.0,30.0,30.0])
+
     def test_native_peer_detects_restart_after_handshake(self):
         import json
         cid='a'*64; image='sha256:'+'b'*64; net='c'*64; started='2026-11-07T00:00:00Z'

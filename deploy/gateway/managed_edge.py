@@ -226,14 +226,22 @@ class NativeReplicaPeer:
         if time.monotonic()>=deadline or first!=second or topology!=again: raise ValueError('live identity changed')
         return {'replica_started':json.loads(first[5]),'envoy_started':json.loads(topology[0][4])}
 
-    def confirm(self,expected,binding):
+    def confirm(self,expected,binding,prior=None):
         if type(binding) is not dict or set(binding)!={'replica_started','envoy_started'}: raise ValueError('missing live binding')
-        deadline=time.monotonic()+30
-        _probe_hash(); before=self._inspect(deadline,binding['replica_started']); topology=self._envoy_and_topology(deadline,binding['envoy_started'])
-        output=self._invoke(['docker','exec','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','LD_DEBUG=','--env','DYLD_INSERT_LIBRARIES=',self.cid,'/usr/bin/env','-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','/pilot/native_edge_probe.js'],deadline)
-        after=self._inspect(deadline,binding['replica_started']); after_topology=self._envoy_and_topology(deadline,binding['envoy_started']); _probe_hash()
-        if time.monotonic()>=deadline: raise TimeoutError('native confirmation deadline')
-        if before!=after or topology!=after_topology or output!=expected.hex().encode('ascii')+b'\n': raise ValueError('served certificate mismatch')
+        if type(expected) is not bytes or len(expected)!=32 or (prior is not None and (type(prior) is not bytes or len(prior)!=32)): raise ValueError('invalid fingerprint')
+        deadline=time.monotonic()+30; baseline=None
+        while True:
+            _probe_hash(); before=self._inspect(deadline,binding['replica_started']); topology=self._envoy_and_topology(deadline,binding['envoy_started'])
+            output=self._invoke(['docker','exec','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','LD_DEBUG=','--env','DYLD_INSERT_LIBRARIES=',self.cid,'/usr/bin/env','-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','/pilot/native_edge_probe.js'],deadline)
+            after=self._inspect(deadline,binding['replica_started']); after_topology=self._envoy_and_topology(deadline,binding['envoy_started']); _probe_hash()
+            if time.monotonic()>=deadline: raise TimeoutError('native confirmation deadline')
+            if before!=after or topology!=after_topology or (baseline is not None and baseline!=(before,topology)): raise ValueError('served certificate mismatch')
+            baseline=(before,topology)
+            if output==expected.hex().encode('ascii')+b'\n': return
+            if prior is None or output!=prior.hex().encode('ascii')+b'\n': raise ValueError('served certificate mismatch')
+            left=deadline-time.monotonic()
+            if left<=0: raise TimeoutError('native confirmation deadline')
+            time.sleep(min(.1,left))
 
 
 class LoopbackPeer:
@@ -370,12 +378,15 @@ class ManagedEdge:
         if self.certs.native_edge_commitment(version)!=commitment: raise ValueError('candidate commitment changed')
         return json.dumps({'version_info':version,'resources':[{'@type':'type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret','name':'gateway','tls_certificate':{'certificate_chain':{'filename':'/certs/'+version+'/cert.pem'},'private_key':{'filename':'/certs/'+version+'/key.pem'}}}]},separators=(',',':')).encode('ascii')
 
-    def _confirm(self,version,commitment,binding):
+    def _confirm(self,version,commitment,binding,prior_version=None,prior_commitment=None):
         if self.certs.native_edge_commitment(version)!=commitment: raise ValueError('candidate commitment changed')
         fingerprint=bytes.fromhex(commitment['cert_sha256'])
-        if type(self.peer) is NativeReplicaPeer: self.peer.confirm(fingerprint,binding)
+        if prior_version is not None and self.certs.native_edge_commitment(prior_version,allow_expired=True)!=prior_commitment: raise ValueError('current commitment changed')
+        prior=bytes.fromhex(prior_commitment['cert_sha256']) if prior_commitment is not None else None
+        if type(self.peer) is NativeReplicaPeer: self.peer.confirm(fingerprint,binding,prior)
         else: self.peer.confirm(fingerprint)
         if self.certs.native_edge_commitment(version)!=commitment: raise ValueError('candidate commitment changed')
+        if prior_version is not None and self.certs.native_edge_commitment(prior_version,allow_expired=True)!=prior_commitment: raise ValueError('current commitment changed')
 
     def _publish(self,version,commitment):
         document=self._document(version,commitment)
@@ -386,7 +397,7 @@ class ManagedEdge:
         if data['pending']['phase']!='staged': raise ValueError('candidate not staged')
         if type(self.peer) is NativeReplicaPeer and data['binding'] is None: raise ValueError('missing live binding')
         version=data['pending']['candidate']; commitment=data['pending']['commitment']; self._publish(version,commitment)
-        self._confirm(version,commitment,data['binding'])
+        self._confirm(version,commitment,data['binding'],data['current'],data['current_commitment'])
         data['previous']=data['current']; data['previous_commitment']=data['current_commitment']
         data['current']=version; data['current_commitment']=commitment; data['pending']=None
         self._save(data)
