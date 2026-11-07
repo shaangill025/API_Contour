@@ -35,8 +35,8 @@ mod transport;
 pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
-    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalReceipt,
-    CausalSession,
+    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
+    CausalMarkerBinding, CausalReceipt, CausalSession,
 };
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
 pub use submit::{DurableReceipt, OriginIngress, ReceiptStatus, SubmitError, V2Ingress};
