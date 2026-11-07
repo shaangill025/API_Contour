@@ -85,43 +85,49 @@ class Driver(unittest.TestCase):
              mock.patch.object(driver,'snapshot',return_value={'source':'hash'}), mock.patch.object(driver,'node_version',return_value='v24.22.1'), \
              mock.patch.object(driver.signal,'signal',return_value=None), mock.patch.object(driver.signal,'setitimer'):
             with self.assertRaises(BaseExceptionGroup) as caught: driver.main()
-        self.assertEqual([type(e) for e in caught.exception.exceptions],[TimeoutError,RuntimeError])
+        self.assertIsInstance(caught.exception.exceptions[0].exceptions[0],TimeoutError)
+        self.assertIsInstance(caught.exception.exceptions[1].exceptions[0],RuntimeError)
 
     def test_exercise_builds_real_modes_and_distinct_journals(self):
-        events=[]; starts=[]; counts=iter(['1|1|92','1|1|92','2|2|184','4|4|368','5|5|460','6|6|552','6|6|552'])
+        events=[]; starts=[]; counts=iter(['1|1|92','1|1|92','2|2|184','4|4|368','5|5|460','6|6|552','6|6|552','6|6|552','7|7|644','7|7|644','8|7|644','8|8|736','9|9|828','9|9|828'])
         class Input:
             def write(self,data): events.append(('send',data))
             def flush(self): pass
         class Monitor:
             def __init__(self,args,env):
                 self.args=args; self.lock=threading.Lock(); self.buffers={'out':bytearray(b'ACTIVE\n'),'err':bytearray()}; self.overflow=False; self.child=SimpleNamespace(stdin=Input(),poll=lambda:None); starts.append(args)
-            def stop(self,_): events.append(('stop',self.args[25]))
+            def stop(self,_): events.append(('stop',self.args[25] if len(self.args)>25 else 'gate'))
         logs_seen=[]
         def process(args,**kw):
             events.append(('process',args))
             if args[:2]==['docker','logs']:
                 logs_seen.append(True)
                 out=b'causal_rival_login SELECT contour.claim_causal_generation\ncausal_rival_login generation conflict\n'
-                if len(logs_seen)>=3: out+=b'causal_revocation_login contour.issue_causal_session\ncausal_revocation_login 23514 session unavailable\n'
+                out+=b'causal_contention_login 40001 origin gate busy\n'*len(logs_seen)
+                disabled=next((i for i,e in enumerate(events) if e[0]=='send' and b'UPDATE contour.collector_authorization SET enabled=false' in e[1]),None)
+                if disabled is not None and any(e[0]=='send' and e[1].startswith(b'COMMIT') for e in events[disabled+1:]): out+=b'causal_contention_login 23514 session unavailable\n'
+                if any(e[0]=='sql' and 'export_revoked' in e[1] for e in events): out+=b'causal_revocation_login contour.issue_causal_session\ncausal_revocation_login 23514 session unavailable\n'
                 return SimpleNamespace(returncode=0,stdout=out,stderr=b'')
             return SimpleNamespace(returncode=0,stdout=b'CLAIM_REJECTED\n',stderr=b'')
         def execute(sql):
             events.append(('sql',sql))
             if 'count(*) FROM contour.causal_sessions' in sql: return next(counts)
+            if 'count(*) FILTER (WHERE enabled=false)' in sql: return '1|0'
             if 'check_causal_session' in sql or 'expires_at>clock_timestamp()' in sql: return 'true'
             return ''
-        def line(m,index,expected,timeout=15): events.append(('line',m.args[25],expected,timeout))
-        def finish(m,expected): events.append(('finish',m.args[25],expected))
+        def line(m,index,expected,timeout=15): events.append(('line',m.args[25] if len(m.args)>25 else 'gate',expected,timeout))
+        def finish(m,expected): events.append(('finish',m.args[25] if len(m.args)>25 else 'gate',expected))
         bridge={'IDS':tuple('id'+str(i) for i in range(10)),'run_process':process}
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(driver,'line',side_effect=line), mock.patch.object(driver,'finish',side_effect=finish):
             base=['probe','localhost','5432','db','ca','causal_issuer_login','unused','grant.pub','policy.pub','grant.json','policy.json','batch','33'*32,*bridge['IDS'],'placeholder']
             driver.exercise(base,Path(tmp),{'PATH':'/bin'},execute,bridge,{'ProbeProcess':Monitor},'owned')
-        self.assertEqual([args[25] for args in starts],['eof','expiry','normal','claim-only','normal','normal'])
-        dirs=[args[24] for args in starts]; self.assertEqual(len(set(dirs)),6)
+        starts=[args for args in starts if len(args)>25]
+        self.assertEqual([args[25] for args in starts],['eof','expiry','normal','claim-only','normal','normal','normal','claim-busy','normal'])
+        dirs=[args[24] for args in starts]; self.assertEqual(len(set(dirs)),9)
         commands=[e[1] for e in events if e[0]=='process' and e[1][:2]!=['docker','logs']]
         self.assertEqual(len(commands),2)
         self.assertEqual(commands[1][5],'causal_rival_login')
-        self.assertNotEqual(commands[1][24],starts[-2][24]); self.assertEqual(commands[1][23],starts[-2][23]); self.assertEqual(starts[-1][5],'causal_revocation_login')
+        self.assertNotEqual(commands[1][24],starts[4][24]); self.assertEqual(commands[1][23],starts[4][23]); self.assertEqual(starts[-1][5],'causal_revocation_login')
         revocation=next(i for i,e in enumerate(events) if e[0]=='sql' and 'export_revoked' in e[1])
         stopped=next(i for i,e in enumerate(events[revocation:],revocation) if e[0]=='line' and e[2]==b'STOPPED')
         self.assertGreater(stopped,revocation)
@@ -132,6 +138,13 @@ class Driver(unittest.TestCase):
         self.assertTrue(driver.authority_rejection_observed(query+denial))
         for bad in (b'',query,denial,query+denial.replace(b'23514',b'40001'),query+denial.replace(b'causal_revocation_login',b'other')):
             self.assertFalse(driver.authority_rejection_observed(bad))
+
+    def test_contention_evidence_requires_role_sqlstate_and_message_on_same_line(self):
+        line=b'causal_contention_login 40001 origin gate busy\n'
+        self.assertEqual(driver.contention_diagnostics(line,b'40001',b'origin gate busy'),1)
+        for bad in (line.replace(b'causal_contention_login',b'other'),line.replace(b'40001',b'23514'),line.replace(b'origin gate busy',b'other'),line.replace(b'busy',b'busy extra'),b'causal_contention_login\n40001 origin gate busy\n'):
+            self.assertEqual(driver.contention_diagnostics(bad,b'40001',b'origin gate busy'),0)
+        with self.assertRaises(ValueError): driver.contention_diagnostics(line,b'40001',b'other')
 
     def test_stale_stop_and_trailing_output_or_stderr_fail(self):
         child=SimpleNamespace(poll=lambda:None,wait=lambda timeout:None,returncode=0)
@@ -179,18 +192,67 @@ class Driver(unittest.TestCase):
         self.assertTrue(monitor.group_absent)
 
     def test_primary_and_cleanup_errors_are_both_preserved(self):
-        monitor=SimpleNamespace(child=SimpleNamespace(pid=123),stop=mock.Mock(side_effect=RuntimeError('cleanup')))
-        with mock.patch.object(driver.sys,'stderr') as stderr:
-            with self.assertRaises(BaseExceptionGroup) as caught:
-                with driver.owned_probe(monitor,'competition'):
-                    raise ValueError('primary')
+        monitor=SimpleNamespace(child=SimpleNamespace(pid=123,poll=lambda:0),stop=mock.Mock(side_effect=RuntimeError('secret cleanup')))
+        with self.assertRaises(BaseExceptionGroup) as caught:
+            with driver.owned_probe(monitor,'competition'):
+                raise ValueError('secret primary')
         self.assertEqual([type(e) for e in caught.exception.exceptions],[ValueError,RuntimeError])
-        self.assertIn('phase=competition pid=123',str(stderr.write.call_args_list))
+        rendered='\n'.join(driver.failure_lines(caught.exception))
+        self.assertIn('FAIL primary ValueError ',rendered)
+        self.assertIn('FAIL cleanup RuntimeError ',rendered)
+        self.assertNotIn('secret',rendered)
+
+    def test_failure_cooperatively_reaps_owner_and_child(self):
+        helper=runpy.run_path(str(ROOT/'scripts/test-postgres-causal-https.py'))['ProbeProcess']
+        descendant='import sys; print("ACTIVE",flush=True); sys.stdin.buffer.read(); print("STOPPED",flush=True)'
+        parent=('import subprocess,sys; child=subprocess.Popen([sys.executable,"-u","-c",sys.argv[1]],stdin=subprocess.PIPE); '
+                'assert sys.stdin.buffer.readline()==b"STOP\\n"; child.stdin.close(); assert child.wait(timeout=3)==0')
+        monitor=helper([sys.executable,'-u','-c',parent,descendant],dict(os.environ))
+        with self.assertRaisesRegex(ValueError,'primary'):
+            with driver.owned_probe(monitor,'contention'):
+                driver.line(monitor,0,b'ACTIVE',timeout=5)
+                raise ValueError('primary')
+        self.assertEqual(monitor.child.returncode,0)
+        self.assertTrue(monitor.group_absent)
+        self.assertEqual(bytes(monitor.buffers['out']),b'ACTIVE\nSTOPPED\n')
+
+    def test_failure_cooperative_modes_and_strict_cleanup(self):
+        for phase,expected in [('gate',b'ROLLBACK;\n\\q\n'),('claim-busy',b''),('epoch-new',b'')]:
+            with self.subTest(phase=phase):
+                code='import sys; data=sys.stdin.buffer.read(); sys.exit(0 if data=='+repr(expected)+' else 42)'
+                helper=runpy.run_path(str(ROOT/'scripts/test-postgres-causal-https.py'))['ProbeProcess']
+                monitor=helper([sys.executable,'-u','-c',code],dict(os.environ))
+                with self.assertRaisesRegex(ValueError,'primary'):
+                    with driver.owned_probe(monitor,phase): raise ValueError('primary')
+                self.assertEqual(monitor.child.returncode,0)
+                self.assertTrue(monitor.group_absent)
+
+    def test_cooperative_failure_still_runs_strict_stop(self):
+        monitor=SimpleNamespace(child=SimpleNamespace(poll=lambda:None,stdin=SimpleNamespace(write=mock.Mock(side_effect=OSError('secret')),close=mock.Mock(),closed=False),wait=mock.Mock(side_effect=TimeoutError('secret'))),stop=mock.Mock(side_effect=PermissionError('secret')))
+        with self.assertRaises(BaseExceptionGroup) as caught:
+            with driver.owned_probe(monitor,'contention'): raise ValueError('secret')
+        monitor.stop.assert_called_once_with(False)
+        lines=driver.failure_lines(caught.exception)
+        self.assertTrue(any('primary ValueError' in line for line in lines))
+        self.assertTrue(any('cleanup PermissionError' in line for line in lines))
+        self.assertNotIn('secret',' '.join(lines))
 
     def test_competition_commands_cooperative_stop(self):
         text=(ROOT/'scripts/test-postgres-causal-permits.py').read_text()
         section=text.split("with owned_probe(monitor,'competition'):",1)[1].split("five=args('revocation'",1)[0]
         self.assertIn("stdin.write(b'STOP\\n')",section)
         self.assertIn("line(monitor,1,b'STOPPED',3)",section)
+
+    def test_released_contention_observation_exceeds_prior_permit_lifetime(self):
+        now=[0.0]; seen=[]
+        def sleep(duration): now[0]+=duration
+        with mock.patch.object(driver.time,'monotonic',side_effect=lambda:now[0]), mock.patch.object(driver.time,'sleep',side_effect=sleep), mock.patch.object(driver,'assert_active',side_effect=lambda _:seen.append(now[0])):
+            driver.confirm_post_contention(object())
+        self.assertGreaterEqual(seen[-1],1.2)
+        now[0]=0.0
+        def closes(_):
+            if now[0]>=.7: raise AssertionError('closed')
+        with mock.patch.object(driver.time,'monotonic',side_effect=lambda:now[0]), mock.patch.object(driver.time,'sleep',side_effect=sleep), mock.patch.object(driver,'assert_active',side_effect=closes):
+            with self.assertRaises(AssertionError): driver.confirm_post_contention(object())
 
 if __name__=='__main__': unittest.main()

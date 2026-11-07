@@ -291,6 +291,18 @@ impl CausalIssueOwner {
             .issue(&self.request, peer, grant_keys, policy_keys)
             .await
     }
+    pub(crate) async fn issue_until(
+        &mut self,
+        issuer: &mut CausalIssuer,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: tokio::time::Instant,
+    ) -> Result<CausalSession, CausalError> {
+        issuer
+            .issue_until(&self.request, peer, grant_keys, policy_keys, deadline)
+            .await
+    }
 }
 
 #[cfg(test)]

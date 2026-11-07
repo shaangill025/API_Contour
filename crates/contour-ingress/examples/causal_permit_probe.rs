@@ -1,7 +1,9 @@
 //! Synthetic owned control-boundary probe. Never use real credentials.
 use contour_core::{CausalGrantKeys, PolicyKeys};
 use contour_ingress::{CausalIssueOwner, CausalPermitOwner};
-use contour_postgres::{CausalBinding, CausalIssue, CausalIssuer, DatabaseSettings, TrustedCa};
+use contour_postgres::{
+    CausalBinding, CausalError, CausalIssue, CausalIssuer, DatabaseSettings, TrustedCa,
+};
 use std::{
     env,
     fs::File,
@@ -214,6 +216,69 @@ fn run() -> Result<(), &'static str> {
         .block_on(async {
             let conn = settings.connect(&trust).await.map_err(|_| "connect")?;
             let mut issuer = CausalIssuer::new(conn);
+            if a[24] == "claim-busy" {
+                let mut owner = owner;
+                let generation = [7u8; 32];
+                let mut original = owner
+                    .issue(&mut issuer, &peer, &grants, &policies)
+                    .await
+                    .map_err(|_| "issue")?;
+                let epoch = original.epoch();
+                println!("ISSUED");
+                std::io::stdout().flush().map_err(|_| "output")?;
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|_| "control")?;
+                if line != "GO\n" {
+                    return Err("control");
+                }
+                if issuer
+                    .claim_generation_until(
+                        &mut original,
+                        &generation,
+                        &peer,
+                        &grants,
+                        &policies,
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                    )
+                    .await
+                    != Err(CausalError::Busy)
+                    || !original.verified_remaining().is_zero()
+                {
+                    return Err("claim");
+                }
+                println!("CLAIM_BUSY");
+                std::io::stdout().flush().map_err(|_| "output")?;
+                line.clear();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|_| "control")?;
+                if line != "GO\n" {
+                    return Err("control");
+                }
+                let mut fresh = owner
+                    .issue(&mut issuer, &peer, &grants, &policies)
+                    .await
+                    .map_err(|_| "issue")?;
+                if fresh.epoch() != epoch {
+                    return Err("epoch");
+                }
+                issuer
+                    .claim_generation_until(
+                        &mut fresh,
+                        &generation,
+                        &peer,
+                        &grants,
+                        &policies,
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                    )
+                    .await
+                    .map_err(|_| "claim")?;
+                println!("CLAIM_OK");
+                std::io::stdout().flush().map_err(|_| "output")?;
+                return Ok(());
+            }
             let (parent, child) = UnixStream::pair().map_err(|_| "pair")?;
             let mut bootstrap = parent.try_clone().map_err(|_| "pair")?;
             let identity = [5u8; 32];

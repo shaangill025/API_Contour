@@ -63,6 +63,31 @@ fn db_error(error: Error) -> CausalError {
     };
     classify_database_error(db.code().code(), db.constraint(), db.message())
 }
+fn classify_issuer_error(code: &str, constraint: Option<&str>, message: &str) -> CausalError {
+    if code == "40001" {
+        return if constraint.is_none()
+            && matches!(
+                message,
+                "origin gate busy" | "credential gate busy" | "collector gate busy"
+            ) {
+            CausalError::Busy
+        } else {
+            CausalError::Database
+        };
+    }
+    classify_database_error(code, constraint, message)
+}
+fn issuer_sql_error(error: Error) -> CausalError {
+    error.as_db_error().map_or(CausalError::Database, |db| {
+        classify_issuer_error(db.code().code(), db.constraint(), db.message())
+    })
+}
+fn nonretry_error(error: Error) -> CausalError {
+    match db_error(error) {
+        CausalError::Busy => CausalError::Database,
+        other => other,
+    }
+}
 fn classify_database_error(code: &str, constraint: Option<&str>, message: &str) -> CausalError {
     match (code, constraint) {
         ("54000", Some("origin_logical_quota_exhausted")) => CausalError::LogicalQuota,
@@ -573,40 +598,67 @@ impl CausalIssuer {
         grant_keys: &CausalGrantKeys,
         policy_keys: &PolicyKeys,
     ) -> Result<(), CausalError> {
+        let deadline = Instant::now() + self.connection.deadline;
+        self.claim_generation_until(session, generation, peer, grant_keys, policy_keys, deadline)
+            .await
+    }
+    /// A single checked claim bounded by the caller's absolute deadline.
+    pub async fn claim_generation_until(
+        &mut self,
+        session: &mut CausalSession,
+        generation: &[u8; 32],
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<(), CausalError> {
+        let deadline = deadline.min(Instant::now() + self.connection.deadline);
+        check_deadline(deadline)?;
         if *generation == [0; 32]
             || !session.matches_peer(peer)
             || session.verified_remaining().is_zero()
         {
             return Err(CausalError::Expired);
         }
-        let deadline = Instant::now() + self.connection.deadline;
         let mut guard = CancellationGuard::arm(&mut self.connection);
         let mut committing = false;
         let mut tightened = None;
         let work = async {
-            let duration = guard.connection.deadline;
             let client = guard
                 .connection
                 .client
                 .as_mut()
                 .ok_or(CausalError::Database)?;
-            check_role(client, "contour_causal_issuer").await?;
+            check_role(client, "contour_causal_issuer")
+                .await
+                .map_err(|e| {
+                    if e == CausalError::Busy {
+                        CausalError::Database
+                    } else {
+                        e
+                    }
+                })?;
             let tx = begin(client).await?;
             let checked = async {
                 let issue = &session.issue;
+                check_deadline(deadline)?;
+                let duration = deadline.saturating_duration_since(Instant::now());
                 configure_tenant(&tx, &issue.binding.ids[0], duration).await?;
                 let now = clock(&tx).await?;
                 let (g, _) = verify(issue, peer, grant_keys, policy_keys, now)?;
                 if g.payload_digest() != session.digest || now < session.issued || now >= session.expires || session.verified_remaining().is_zero() { return Err(CausalError::Expired); }
                 let epoch = session.epoch.to_string();
-                let row = tx.query_one("SELECT contour.claim_causal_generation($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::text::uuid,$5::bytea)", &[&issue.binding.ids[0], &issue.binding.ids[1], &epoch, &issue.nonce, &&generation[..]]).await.map_err(db_error)?;
+                check_deadline(deadline)?;
+                configure_tenant(&tx, &issue.binding.ids[0], deadline.saturating_duration_since(Instant::now())).await?;
+                check_deadline(deadline)?;
+                let row = tx.query_one("SELECT contour.claim_causal_generation($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::text::uuid,$5::bytea)", &[&issue.binding.ids[0], &issue.binding.ids[1], &epoch, &issue.nonce, &&generation[..]]).await.map_err(issuer_sql_error)?;
                 if !row.try_get::<_,bool>(0).map_err(|_| CausalError::Database)? { return Err(CausalError::Scope); }
                 let final_start = Instant::now();
                 let final_now = clock(&tx).await?;
                 let (again, _) = verify(issue, peer, grant_keys, policy_keys, final_now)?;
                 if final_now < now || final_now >= session.expires || again.payload_digest() != session.digest || session.verified_remaining().is_zero() { return Err(CausalError::Expired); }
                 tightened = Some(claim_freshness(session.verified_until, final_start, final_now, session.expires, Instant::now())?);
-                tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(db_error)?;
+                tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(nonretry_error)?;
                 check_deadline(deadline)?;
                 Ok::<_,CausalError>(())
             }.await;
@@ -620,8 +672,11 @@ impl CausalIssuer {
                     Ok(())
                 }
                 Err(e) => {
-                    tx.rollback().await.map_err(db_error)?;
-                    empty_context(client).await?;
+                    tx.rollback().await.map_err(|_| CausalError::Database)?;
+                    empty_context(client)
+                        .await
+                        .map_err(|_| CausalError::Database)?;
+                    check_deadline(deadline)?;
                     if e != CausalError::Deadline {
                         guard.confirm();
                     }
@@ -666,15 +721,24 @@ impl CausalIssuer {
         let mut committing = false;
         let mut accepted = None;
         let work = async {
-            let duration = guard.connection.deadline;
             let client = guard
                 .connection
                 .client
                 .as_mut()
                 .ok_or(CausalError::Database)?;
-            check_role(client, "contour_causal_issuer").await?;
+            check_role(client, "contour_causal_issuer")
+                .await
+                .map_err(|e| {
+                    if e == CausalError::Busy {
+                        CausalError::Database
+                    } else {
+                        e
+                    }
+                })?;
             let tx = begin(client).await?;
             let preparation = async {
+                check_deadline(deadline)?;
+                let duration = deadline.saturating_duration_since(Instant::now());
                 configure_tenant(&tx, &request.binding.ids[0], duration).await?;
                 let now = clock(&tx).await?;
                 let (grant, policy) = verify(request, peer, grant_keys, policy_keys, now)?;
@@ -727,11 +791,22 @@ impl CausalIssuer {
                     &queue_bytes,
                     &queue_ttl,
                 ];
-                let row = tx.query_one(ISSUE_SQL, &params).await.map_err(db_error)?;
+                check_deadline(deadline)?;
+                configure_tenant(
+                    &tx,
+                    &request.binding.ids[0],
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await?;
+                check_deadline(deadline)?;
+                let row = tx
+                    .query_one(ISSUE_SQL, &params)
+                    .await
+                    .map_err(issuer_sql_error)?;
                 let mut result = parse_session(&row, request, digest)?;
                 tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                     .await
-                    .map_err(db_error)?;
+                    .map_err(nonretry_error)?;
                 let clock_start = Instant::now();
                 let final_now = clock(&tx).await?;
                 let (again, pol_again) = verify(request, peer, grant_keys, policy_keys, final_now)?;
@@ -764,8 +839,10 @@ impl CausalIssuer {
                     Ok(())
                 }
                 Err(e) => {
-                    tx.rollback().await.map_err(db_error)?;
-                    empty_context(client).await?;
+                    tx.rollback().await.map_err(|_| CausalError::Database)?;
+                    empty_context(client)
+                        .await
+                        .map_err(|_| CausalError::Database)?;
                     check_deadline(deadline)?;
                     if e != CausalError::Deadline {
                         guard.confirm();
@@ -1255,6 +1332,34 @@ mod tests {
             checked_admission(&s, &[3; 32], b"not-json", &g, &p, s.expires).unwrap_err(),
             CausalError::Expired
         );
+    }
+    #[test]
+    fn issuer_busy_requires_exact_gate_error() {
+        for msg in [
+            "origin gate busy",
+            "credential gate busy",
+            "collector gate busy",
+        ] {
+            assert_eq!(classify_issuer_error("40001", None, msg), CausalError::Busy);
+            assert_eq!(
+                classify_issuer_error("40001", Some("other"), msg),
+                CausalError::Database
+            );
+            assert_eq!(
+                classify_issuer_error("23514", None, msg),
+                CausalError::Scope
+            );
+        }
+        for msg in [
+            "origin operation requires no prior advisory lock",
+            "serialization failure",
+            "origin gate busy ",
+        ] {
+            assert_eq!(
+                classify_issuer_error("40001", None, msg),
+                CausalError::Database
+            );
+        }
     }
     #[test]
     fn database_error_categories_require_the_exact_diagnostic() {

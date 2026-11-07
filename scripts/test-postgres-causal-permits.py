@@ -93,6 +93,11 @@ def authority_rejection_observed(log):
             and any(b'causal_revocation_login' in row and b'23514' in row and b'session unavailable' in row for row in rows))
 
 
+def contention_diagnostics(log, code, message):
+    if (code,message) not in ((b'40001',b'origin gate busy'),(b'23514',b'session unavailable')): raise ValueError('unsupported contention diagnostic')
+    return sum(b'causal_contention_login' in row and code in row and row.rstrip().endswith(message) for row in log.splitlines())
+
+
 def assert_active(monitor):
     # A previously buffered STOPPED cannot be attributed to a later mutation.
     with monitor.lock: out=bytes(monitor.buffers['out']); err=bytes(monitor.buffers['err']); overflow=monitor.overflow
@@ -100,31 +105,53 @@ def assert_active(monitor):
         raise AssertionError('probe was not active at control boundary')
 
 
+def confirm_post_contention(monitor):
+    # The previous permit is at most one second. Staying active beyond that
+    # window proves the signer obtained a fresh response after Q released.
+    until=time.monotonic()+1.2
+    while time.monotonic()<until:
+        assert_active(monitor)
+        time.sleep(.01)
+    assert_active(monitor)
+
+
+def cooperative_stop(monitor,phase):
+    if monitor.child.poll() is not None: return
+    stream=monitor.child.stdin; errors=[]
+    try:
+        if phase=='gate': stream.write(b'ROLLBACK;\n\\q\n'); stream.flush()
+        elif phase not in ('epoch-new','claim-busy','finish'):
+            stream.write(b'STOP\n'); stream.flush()
+    except BaseException as exc: errors.append(exc)
+    try:
+        if not stream.closed: stream.close()
+    except BaseException as exc: errors.append(exc)
+    try: monitor.child.wait(timeout=5)
+    except BaseException as exc: errors.append(exc)
+    if errors: raise BaseExceptionGroup('cooperative cleanup',errors)
+
+
 @contextmanager
 def owned_probe(monitor,phase):
-    if phase not in ('finish','eof','expiry','epoch-old','epoch-new','competition','revocation'):
+    if phase not in ('finish','eof','expiry','epoch-old','epoch-new','competition','revocation','gate','contention','claim-busy'):
         raise ValueError('invalid probe phase')
-    def report():
-        pid=getattr(monitor.child,'pid',None)
-        print('probe cleanup failed phase='+phase+' pid='+(str(pid) if type(pid) is int and pid>0 else 'unknown'),file=sys.stderr)
     try:
         yield monitor
     except BaseException as primary:
+        errors=[]
+        try: cooperative_stop(monitor,phase)
+        except BaseException as cleanup: errors.append(cleanup)
         try: monitor.stop(False)
-        except BaseException as cleanup:
-            report()
-            raise BaseExceptionGroup('probe failure and cleanup failure',[primary,cleanup]) from None
+        except BaseException as cleanup: errors.append(cleanup)
+        if errors: raise BaseExceptionGroup('probe failure and cleanup failure',[primary,*errors]) from None
         raise
     else:
-        try: monitor.stop(False)
-        except BaseException:
-            report()
-            raise
+        monitor.stop(False)
 
 
 def finish(monitor,expected):
-    with owned_probe(monitor,'finish'):
-        monitor.child.wait(timeout=5)
+    monitor.child.wait(timeout=5)
+    monitor.stop(False)
     with monitor.lock: out=bytes(monitor.buffers['out']); err=bytes(monitor.buffers['err']); overflow=monitor.overflow
     if monitor.child.returncode!=0 or overflow or err or out!=expected: raise RuntimeError('probe final output invalid')
 
@@ -138,6 +165,40 @@ def exercise(base,work,env,execute,bridge,https,container):
     def counts(expected):
         sql=f"SELECT (SELECT count(*) FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}')||'|'||(SELECT count(*) FROM contour.causal_generation_claims WHERE tenant_id='{tenant}' AND runtime_id='{runtime}')||'|'||coalesce((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='{tenant}'),0);"
         if execute(sql)!=expected: raise AssertionError('generation accounting mismatch')
+    def gate(disable=False):
+        monitor=https['ProbeProcess'](['docker','exec','-i','-u','postgres',container,'psql','-XqAt','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture'],{'PATH':env['PATH']})
+        try:
+            body="BEGIN; DO $$ BEGIN PERFORM pg_catalog.set_config('apicontour.tenant_id','"+tenant+"',true); PERFORM pg_catalog.pg_advisory_xact_lock(1330792270,pg_catalog.hashtext('"+tenant+"'));"
+            if disable: body+=" PERFORM contour.lock_origin_collector('"+tenant+"','"+bridge['IDS'][2]+"');"
+            body+=" END $$; "
+            if disable: body+="SET LOCAL ROLE contour_admin; UPDATE contour.collector_authorization SET enabled=false WHERE tenant_id='"+tenant+"' AND collector_id='"+bridge['IDS'][2]+"'; "
+            monitor.child.stdin.write((body+"SELECT 'LOCKED';\n").encode()); monitor.child.stdin.flush()
+        except BaseException as primary:
+            failures=[]
+            try: cooperative_stop(monitor,'gate')
+            except BaseException as cleanup: failures.append(cleanup)
+            try: monitor.stop(False)
+            except BaseException as cleanup: failures.append(cleanup)
+            if failures: raise BaseExceptionGroup('gate start and cleanup failure',[primary,*failures]) from None
+            raise
+        return monitor
+    def unlock(monitor):
+        monitor.child.stdin.write(b'COMMIT;\n\\q\n'); monitor.child.stdin.flush()
+        finish(monitor,b'LOCKED\n')
+    def busy_count():
+        result=bridge['run_process'](['docker','logs','--tail','400',container],timeout=10,limit=1048576)
+        if result.returncode: raise RuntimeError('fixture logs unavailable')
+        return contention_diagnostics(result.stdout+result.stderr,b'40001',b'origin gate busy')
+    def wait_busy(previous):
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            if busy_count()>previous: return
+            time.sleep(.01)
+        raise TimeoutError('gate contention was not observed')
+    def authority_denials():
+        result=bridge['run_process'](['docker','logs','--tail','400',container],timeout=10,limit=1048576)
+        if result.returncode: raise RuntimeError('fixture logs unavailable')
+        return contention_diagnostics(result.stdout+result.stderr,b'23514',b'session unavailable')
     one=args('eof','eof',str(uuid.uuid4())); monitor=start(one)
     with owned_probe(monitor,'eof'):
         line(monitor,0,b'ACTIVE'); line(monitor,1,b'STOPPED',3); finish(monitor,b'ACTIVE\nSTOPPED\n')
@@ -176,12 +237,52 @@ def exercise(base,work,env,execute,bridge,https,container):
         counts('5|5|460')
         monitor.child.stdin.write(b'STOP\n'); monitor.child.stdin.flush()
         line(monitor,1,b'STOPPED',3); finish(monitor,b'ACTIVE\nSTOPPED\n')
+    # Observe a real Q-gate denial, release it, and require the existing
+    # generation to remain active; then sustained contention must close it.
+    six=args('contention','normal',str(uuid.uuid4())); six[5]='causal_contention_login'; monitor=start(six)
+    with owned_probe(monitor,'contention'):
+        line(monitor,0,b'ACTIVE'); counts('6|6|552'); previous=busy_count()
+        holder=gate()
+        with owned_probe(holder,'gate'):
+            line(holder,0,b'LOCKED'); wait_busy(previous); unlock(holder)
+        confirm_post_contention(monitor)
+        counts('6|6|552'); previous=busy_count(); holder=gate()
+        with owned_probe(holder,'gate'):
+            line(holder,0,b'LOCKED'); wait_busy(previous); line(monitor,1,b'STOPPED',2); unlock(holder)
+        finish(monitor,b'ACTIVE\nSTOPPED\n'); counts('6|6|552')
+    # Commit a checked collector disable while the gate is held after a Busy;
+    # the next full retry must observe it instead of issuing a permit.
+    authority=args('authority-backoff','normal',str(uuid.uuid4())); authority[5]='causal_contention_login'; monitor=start(authority)
+    with owned_probe(monitor,'contention'):
+        line(monitor,0,b'ACTIVE'); counts('7|7|644'); previous=busy_count(); old_denials=authority_denials(); holder=gate(disable=True)
+        with owned_probe(holder,'gate'):
+            line(holder,0,b'LOCKED'); wait_busy(previous); assert_active(monitor); unlock(holder)
+            stop_deadline=time.monotonic()+2
+        committed=execute("SELECT count(*) FILTER (WHERE enabled=false)::text||'|'||count(*) FILTER (WHERE enabled IS DISTINCT FROM false)::text FROM contour.collector_authorization WHERE tenant_id='"+tenant+"' AND collector_id='"+bridge['IDS'][2]+"';")
+        if committed!='1|0': raise AssertionError('collector disable was not committed')
+        remaining=stop_deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError('authority response deadline')
+        line(monitor,1,b'STOPPED',remaining); finish(monitor,b'ACTIVE\nSTOPPED\n')
+        if authority_denials()<=old_denials: raise AssertionError('authority change was not observed after contention')
+        counts('7|7|644')
+    collector=bridge['IDS'][2]
+    execute("BEGIN; DO $$ BEGIN PERFORM pg_catalog.set_config('apicontour.tenant_id','"+tenant+"',true); PERFORM contour.begin_origin_operation('"+tenant+"'); PERFORM contour.lock_origin_collector('"+tenant+"','"+collector+"'); END $$; SET LOCAL ROLE contour_admin; UPDATE contour.collector_authorization SET enabled=true WHERE tenant_id='"+tenant+"' AND collector_id='"+collector+"'; COMMIT;")
+    # Component proof only: an already-issued session gets a real claim Busy;
+    # after releasing Q the original issue and fixed generation succeed once.
+    seven=args('claim-busy','claim-busy',str(uuid.uuid4())); monitor=start(seven)
+    with owned_probe(monitor,'claim-busy'):
+        line(monitor,0,b'ISSUED'); counts('8|7|644'); holder=gate()
+        with owned_probe(holder,'gate'):
+            line(holder,0,b'LOCKED'); monitor.child.stdin.write(b'GO\n'); monitor.child.stdin.flush()
+            line(monitor,1,b'CLAIM_BUSY'); unlock(holder)
+        monitor.child.stdin.write(b'GO\n'); monitor.child.stdin.flush()
+        line(monitor,2,b'CLAIM_OK'); finish(monitor,b'ISSUED\nCLAIM_BUSY\nCLAIM_OK\n'); counts('8|8|736')
     # A fresh owner and dedicated role make an authority rejection observable
     # independently of the earlier competition and its Q-lock contention.
     five=args('revocation','normal',str(uuid.uuid4())); five[5]='causal_revocation_login'; monitor=start(five)
     with owned_probe(monitor,'revocation'):
-        line(monitor,0,b'ACTIVE'); counts('6|6|552')
-        live_sql=f"SELECT (expires_at>clock_timestamp()+interval '30 seconds' AND (claim).grant_expires>clock_timestamp()+interval '30 seconds' AND (claim).policy_expires>clock_timestamp()+interval '30 seconds')::text FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND epoch=6;"
+        line(monitor,0,b'ACTIVE'); counts('9|9|828')
+        live_sql=f"SELECT (expires_at>clock_timestamp()+interval '30 seconds' AND (claim).grant_expires>clock_timestamp()+interval '30 seconds' AND (claim).policy_expires>clock_timestamp()+interval '30 seconds')::text FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND epoch=9;"
         if execute(live_sql)!='true': raise AssertionError('revocation session lacks live lease')
         logs=bridge['run_process'](['docker','logs','--tail','200',container],timeout=10,limit=1048576)
         if logs.returncode: raise RuntimeError('fixture logs unavailable')
@@ -198,7 +299,7 @@ def exercise(base,work,env,execute,bridge,https,container):
         if not authority_rejection_observed(log): raise AssertionError('post-commit authority rejection not observed')
     # No claim is made that the earlier epoch case isolated epoch rejection from contention.
     print('LIMITATION: epoch closure may include lock contention',flush=True)
-    counts('6|6|552')
+    counts('9|9|828')
 
 
 
@@ -271,8 +372,8 @@ def main():
         execute(safe(ROOT/('db/opt-in-migrations/'+OPT[3]+'.sql')).read_text()); execute(safe(ROOT/'db/tests/causal_session_setup.sql').read_text())
         for n in OPT[4:]: execute(safe(ROOT/('db/opt-in-migrations/'+n+'.sql')).read_text())
         if execute('SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;')!='{'+','.join(map(str,range(1,23)))+'}': raise RuntimeError('ledger mismatch')
-        execute("CREATE ROLE causal_issuer_login LOGIN PASSWORD '"+password+"'; CREATE ROLE causal_rival_login LOGIN PASSWORD '"+password+"'; CREATE ROLE causal_revocation_login LOGIN PASSWORD '"+password+"'; GRANT contour_causal_issuer TO causal_issuer_login,causal_rival_login,causal_revocation_login; ALTER ROLE causal_rival_login SET log_statement='all'; ALTER ROLE causal_revocation_login SET log_statement='all';")
-        hba='local all all trust\nhostnossl all all all reject\nhostssl contour_fixture causal_issuer_login,causal_rival_login,causal_revocation_login all scram-sha-256\nhostssl all all all reject\n'
+        execute("CREATE ROLE causal_issuer_login LOGIN PASSWORD '"+password+"'; CREATE ROLE causal_rival_login LOGIN PASSWORD '"+password+"'; CREATE ROLE causal_revocation_login LOGIN PASSWORD '"+password+"'; CREATE ROLE causal_contention_login LOGIN PASSWORD '"+password+"'; GRANT contour_causal_issuer TO causal_issuer_login,causal_rival_login,causal_revocation_login,causal_contention_login; ALTER ROLE causal_rival_login SET log_statement='all'; ALTER ROLE causal_revocation_login SET log_statement='all'; ALTER ROLE causal_contention_login SET log_statement='all';")
+        hba='local all all trust\nhostnossl all all all reject\nhostssl contour_fixture causal_issuer_login,causal_rival_login,causal_revocation_login,causal_contention_login all scram-sha-256\nhostssl all all all reject\n'
         before_reload=execute('SELECT floor(extract(epoch FROM pg_conf_load_time())*1000000)::bigint;')
         run(['docker','exec','-i',cid,'sh','-c','cat > /var/lib/postgresql/data/pg_hba.conf'],data=hba.encode(),timeout=20)
         if execute('SELECT pg_reload_conf();')!='t': raise RuntimeError('HBA reload failed')
@@ -301,10 +402,32 @@ def main():
             if snapshot(bridge)!=before: raise RuntimeError('qualification source changed')
         checked_cleanup('source',check_source)
         if failures:
-            raise BaseExceptionGroup('qualification failure and cleanup failures',([primary] if primary is not None else [])+failures) from None
+            groups=([BaseExceptionGroup('primary',[primary])] if primary is not None else [])+[BaseExceptionGroup('cleanup',failures)]
+            raise BaseExceptionGroup('qualification',groups) from None
     print('PASS: checked issuer, private Node signer and generation controls; no wire or source attestation')
+
+def failure_lines(error,phase='primary'):
+    if isinstance(error,BaseExceptionGroup):
+        if error.message in ('primary','cleanup'): phase=error.message
+        result=[]
+        for index,child in enumerate(error.exceptions):
+            child_phase=phase
+            if error.message in ('probe failure and cleanup failure','gate start and cleanup failure','qualification failure and cleanup failures') and index>0: child_phase='cleanup'
+            if error.message=='cooperative cleanup': child_phase='cleanup'
+            result.extend(failure_lines(child,child_phase))
+        return result
+    kind=type(error).__name__
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}',kind): kind='Exception'
+    locations=[]; tb=error.__traceback__
+    while tb is not None:
+        name=Path(tb.tb_frame.f_code.co_filename).name
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',name): name='unknown'
+        locations.append(f'{name}:{tb.tb_lineno}'); tb=tb.tb_next
+    return [f'FAIL {phase} {kind} {loc}' for loc in (locations or ['unknown:0'])]
+
 
 if __name__=='__main__':
     try: main()
-    except Exception as error:
-        print('FAIL:',type(error).__name__,file=sys.stderr); sys.exit(1)
+    except BaseException as error:
+        for line in failure_lines(error): print(line,file=sys.stderr)
+        sys.exit(1)
