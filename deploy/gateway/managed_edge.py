@@ -118,6 +118,19 @@ def _probe_hash():
     return _PROBE_SHA
 
 
+class NativeObservationChanged(ValueError):
+    """Public diagnostic codes only; never retain Docker output or mount paths."""
+    def __init__(self, replica, envoy, membership):
+        if any(type(v) is not int or not 0 <= v < (1 << 13) for v in (replica, envoy)) or type(membership) is not bool:
+            raise ValueError('invalid observation diagnostic')
+        self.code=f'r{replica:04x}-e{envoy:04x}-m{int(membership)}'
+        super().__init__('live identity changed')
+
+
+class NativeObservationDeadline(TimeoutError):
+    pass
+
+
 class NativeReplicaPeer:
     """Fixed handshake inside one operator-selected, rechecked owned replica."""
     def __init__(self, cid, image_id, network_id, mounts, envoy_cid, envoy_image_id, envoy_mounts):
@@ -223,7 +236,11 @@ class NativeReplicaPeer:
         deadline=time.monotonic()+30; _probe_hash()
         first=self._inspect(deadline); topology=self._envoy_and_topology(deadline)
         second=self._inspect(deadline); again=self._envoy_and_topology(deadline); _probe_hash()
-        if time.monotonic()>=deadline or first!=second or topology!=again: raise ValueError('live identity changed')
+        if time.monotonic()>=deadline: raise NativeObservationDeadline('live identity deadline')
+        if first!=second or topology!=again:
+            replica=sum(1 << i for i,(a,b) in enumerate(zip(first,second,strict=True)) if a!=b)
+            envoy=sum(1 << i for i,(a,b) in enumerate(zip(topology[0],again[0],strict=True)) if a!=b)
+            raise NativeObservationChanged(replica,envoy,topology[1]!=again[1])
         return {'replica_started':json.loads(first[5]),'envoy_started':json.loads(topology[0][4])}
 
     def confirm(self,expected,binding,prior=None):
