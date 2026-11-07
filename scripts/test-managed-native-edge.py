@@ -24,7 +24,7 @@ import uuid
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from deploy.gateway.managed_edge import ManagedEdge,NativeReplicaPeer
+from deploy.gateway.managed_edge import ManagedEdge,NativeReplicaPeer,NativeDirectoryPublisher,_PUBLISH_CLEAR,_PUBLISH_WARM
 from deploy.pilot import native_envoy,native_gateway_config
 from deploy.pilot.managed_edge_controller import ManagedEdgeController,LABEL
 
@@ -263,7 +263,7 @@ def main():
     folder=Path(tempfile.mkdtemp(prefix=prefix+'-')).resolve(); folder.chmod(0o700)
     resources=[]; monitors=[]; remote=[]; network=None; image=None; paused=None; clean=False; failure=None
     netname=prefix+'-net'; tag=prefix+':fixture'; image_attempted=False; network_attempted=False
-    durable_record(folder,'intent.json',{'version':1,'head':head,'token':token,'network':netname,'tag':tag,'containers':[prefix+'-'+n for n in ('destination','authority','gateway','envoy','replica')]})
+    durable_record(folder,'intent.json',{'version':1,'head':head,'token':token,'network':netname,'tag':tag,'containers':[prefix+'-'+n for n in ('destination','authority','gateway','publisher','envoy','replica')]})
     def mount(path,target): return ['--mount','type=bind,src='+str(path)+',dst='+target+',readonly']
     def create(name,image_ref,extra,args):
         fullname=prefix+'-'+name; intent={'name':fullname,'id':None}; resources.append(intent)
@@ -299,6 +299,17 @@ def main():
             m=Monitor(['docker','start','-a','-i',cid],service_id=cid); monitors.append(m); m.wait(b'READY',timeout=30)
         gateway=create('gateway',image,['--network-alias','native-gateway','--entrypoint','/usr/local/bin/local_gateway',*mount(g,'/run/native')],['/run/native/gateway.json'])
         if run(['docker','start',gateway],timeout=30).strip()!=gateway.encode(): raise RuntimeError('gateway start mismatch')
+        publisher_name=prefix+'-publisher'; publisher_intent={'name':publisher_name,'id':None}; resources.append(publisher_intent)
+        publisher=run(['docker','create','--pull=never','--name',publisher_name,'--label',LABEL+'='+token,'--network','none','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','32','--memory','128m',*sum((['--env',key+'='] for key in _PUBLISH_CLEAR),[]),'--mount','type=bind,src='+str(folder/'watched')+',dst=/watch','--entrypoint','/usr/local/bin/node',NODE,'-e',_PUBLISH_WARM],timeout=30).decode().strip()
+        if not re.fullmatch('[0-9a-f]{64}',publisher): raise RuntimeError('publisher create uncertain')
+        owned_container(run,publisher,publisher_name,token,publisher); publisher_intent['id']=publisher
+        durable_record(folder,'publisher.receipt.json',{'id':publisher})
+        if run(['docker','start',publisher],timeout=30).strip()!=publisher.encode(): raise RuntimeError('publisher start mismatch')
+        publisher_started=json.loads(run(['docker','inspect','--format','{{json .State.StartedAt}}',publisher],timeout=15))
+        publisher_image=json.loads(run(['docker','image','inspect','--format','{{json .Id}}',NODE],timeout=15))
+        publisher_env=json.loads(run(['docker','image','inspect','--format','{{json .Config.Env}}',NODE],timeout=15))
+        publisher_peer=NativeDirectoryPublisher(publisher,publisher_image,publisher_started,folder/'watched',token,os.getuid(),os.getgid(),publisher_env)
+        publisher_peer.verify(); durable_record(folder,'publisher.started.json',publisher_peer.identity())
         replica_mounts={str('/pilot/'+n):str(ROOT/'deploy/pilot'/n) for n in ('settings.js','flows.json','flows-wrong-name.json','flows-wrong-ca.json','check_tls.js','probe.js')}
         replica_mounts.update({'/pilot/ca.crt':str(ca),'/pilot/tls/client.crt':str(folder/'replica-client.crt'),'/pilot/tls/client.key':str(folder/'replica-client.key'),'/pilot/tls/server.crt':str(folder/'replica-server.crt'),'/pilot/tls/server.key':str(folder/'replica-server.key'),'/pilot/native_edge_probe.js':str(ROOT/'deploy/pilot/native_edge_probe.js')})
         envoy_mounts={'/certs':str(folder/'published'),'/run/watch':str(folder/'watched'),'/run/forwarder':str(f)}
@@ -311,7 +322,7 @@ def main():
         durable_record(folder,'replica.receipt.json',{'id':replica})
         node_id=json.loads(run(['docker','image','inspect','--format','{{json .Id}}',NODE],timeout=15)); envoy_id=json.loads(run(['docker','image','inspect','--format','{{json .Id}}',ENVOY],timeout=15))
         peer=NativeReplicaPeer(replica,node_id,network,replica_mounts,envoy,envoy_id,envoy_mounts)
-        with ManagedEdgeController(folder/'state',folder/'published',folder/'watched',ca,cakey,peer,token) as controller:
+        with ManagedEdgeController(folder/'state',folder/'published',folder/'watched',ca,cakey,peer,token,publisher_peer) as controller:
             controller.bootstrap(); owner=controller.edge
             # Prove the stock Node-RED flow plus fresh signed authority and an
             # actual rejected capture delivery attempt before rotation controls.

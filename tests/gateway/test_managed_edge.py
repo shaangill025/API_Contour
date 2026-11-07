@@ -1,6 +1,8 @@
 """Offline filesystem and synthetic socket controls; no real credentials/listeners."""
 import hashlib
 import os
+import subprocess
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -41,7 +43,97 @@ class ManagedEdgeTests(unittest.TestCase):
         return edge.NativeReplicaPeer('a'*64,'sha256:'+'b'*64,'c'*64,mounts,'e'*64,'sha256:'+'f'*64,envoy)
     def native_owner(self,peer):
         r=self.root
-        return edge.ManagedEdge(r/'state',r/'published',r/'watched',r/'ca',r/'ca-key',peer)
+        publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',r/'watched','3'*32,os.getuid() or 1,os.getgid(),['PATH=/usr/bin'])
+        publisher.publish=mock.Mock()
+        return edge.ManagedEdge(r/'state',r/'published',r/'watched',r/'ca',r/'ca-key',peer,publisher)
+    def test_native_publisher_inspects_exact_identity_and_stops_unknown_exec(self):
+        import json
+        publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',self.root/'watched','3'*32,1000,1000,['PATH=/usr/bin'])
+        values=[publisher.cid,publisher.image_id,edge._NODE_IMAGE,{edge._PUBLISH_LABEL:publisher.token},'1000:1000',True,publisher.started,'none',[{'Type':'bind','Source':publisher.watched,'Destination':'/watch','RW':True}],True,['ALL'],['no-new-privileges'],None,['/usr/local/bin/node'],['-e',edge._PUBLISH_WARM],[key+'='+value for key,value in publisher.env.items()],False,None,'','private','','',None,None,None]
+        calls=[]
+        def command(args,timeout=10):
+            calls.append(args)
+            if args[1]=='image': return json.dumps(['PATH=/usr/bin'] if args[-2]=='{{json .Config.Env}}' else publisher.image_id).encode()
+            if args[1]=='exec': return b'DOC_VERIFIED\nPUBLISHED\n'
+            return ('\n'.join(json.dumps(v) for v in values)+'\n').encode()
+        with mock.patch.object(edge,'_command',side_effect=command): publisher.publish(b'document','a'*32)
+        self.assertEqual([args[1] for args in calls],['inspect','image','image','exec','inspect','image','image'])
+        for index,bad in [(1,'sha256:'+'4'*64),(5,False),(6,'2026-11-08T01:00:00Z'),(7,'bridge'),(8,[]),(9,False),(10,[]),(11,['no-new-privileges','seccomp=unconfined']),(13,['/bin/sh']),(14,['-e','evil()']),(15,['NODE_OPTIONS=--require=evil']),(16,True),(17,['SYS_ADMIN']),(18,'host'),(19,'host'),(20,'host'),(21,'host'),(22,[{'PathOnHost':'/dev/sda'}]),(23,[{'Driver':'evil'}]),(24,['c 1:3 rwm'])]:
+            previous=values[index]; values[index]=bad
+            calls.clear()
+            with mock.patch.object(edge,'_command',side_effect=command):
+                with self.assertRaises(ValueError): publisher.publish(b'document','a'*32)
+            self.assertNotIn('exec',[args[1] for args in calls])
+            values[index]=previous
+        calls.clear()
+        def fails(args,timeout=10):
+            if args[1]=='exec': raise TimeoutError('unknown')
+            if args[1]=='stop': calls.append('stopped'); return b''
+            if args[1]=='inspect' and args[-2]=='{{json .State.Running}}': return b'false'
+            return command(args,timeout)
+        with mock.patch.object(edge,'_command',side_effect=fails):
+            with self.assertRaises(TimeoutError): publisher.publish(b'document','a'*32)
+        self.assertIn('stopped',calls)
+
+    def test_fixed_linux_publisher_bounded_file_and_foreign_temp(self):
+        node=shutil.which('node'); self.assertIsNotNone(node)
+        source=edge._PUBLISH_SCRIPT.replace('/watch',str(self.root/'watched'))
+        path=self.root/'watched'/'sds.json'; path.write_bytes(b'document'); path.chmod(0o600)
+        token='a'*32; digest=hashlib.sha256(b'document').hexdigest()
+        def run(): return subprocess.run([node,'-e',source,digest,token],capture_output=True,timeout=5)
+        result=run(); self.assertEqual(result.returncode,0); self.assertEqual(result.stdout,b'DOC_VERIFIED\nPUBLISHED\n'); self.assertEqual(path.read_bytes(),b'document')
+        foreign=self.root/'watched'/('.linux-'+token); foreign.write_bytes(b'foreign')
+        self.assertNotEqual(run().returncode,0); self.assertEqual(foreign.read_bytes(),b'foreign')
+        foreign.unlink(); path.write_bytes(b'x'*65537)
+        self.assertNotEqual(run().returncode,0); self.assertEqual(path.stat().st_size,65537)
+
+    def test_native_publisher_failure_keeps_pending_and_blocks_until_reopen(self):
+        peer=self.native_peer()
+        with self.native_owner(peer) as owner, mock.patch.object(peer,'verify_created'):
+            owner.publisher.publish.side_effect=TimeoutError('unknown')
+            with self.assertRaises(TimeoutError): owner.prepare_initial()
+            self.assertTrue(owner.uncertain)
+            with self.assertRaises(RuntimeError): owner.renew()
+        self.assertTrue((self.root/'state'/'publication.exec.intent').exists())
+        with self.assertRaisesRegex(RuntimeError,'operator recovery'): self.native_owner(peer)
+
+    def test_durable_exec_intent_precedes_call_and_blocks_reopen_after_crash(self):
+        import json
+        peer=self.native_peer(); record=[]
+        with self.native_owner(peer) as owner, mock.patch.object(peer,'verify_created'):
+            def crash(document,nonce):
+                path=self.root/'state'/'publication.exec.intent'
+                self.assertEqual(path.stat().st_mode & 0o777,0o600)
+                intent=json.loads(path.read_text()); record.append(intent)
+                self.assertEqual(intent['publisher'],owner.publisher.identity())
+                self.assertEqual(intent['document_sha256'],hashlib.sha256(document).hexdigest())
+                self.assertEqual(intent['nonce'],nonce)
+                raise SystemExit('simulated interruption')
+            owner.publisher.publish.side_effect=crash
+            with self.assertRaises(SystemExit): owner.prepare_initial()
+            owner.uncertain=False
+            for command in (owner._load,owner.reconcile,owner.renew,owner.rollback):
+                with self.assertRaisesRegex(RuntimeError,'operator recovery'): command()
+        self.assertEqual(len(record),1)
+        with self.assertRaisesRegex(RuntimeError,'operator recovery'): self.native_owner(peer)
+        self.assertTrue((self.root/'state'/'publication.exec.intent').exists())
+
+    def test_completed_exec_removes_intent_before_confirmation(self):
+        peer=self.native_peer(); binding={'replica_started':'2026-11-07T01:02:03Z','envoy_started':'2026-11-07T01:02:04Z'}
+        with self.native_owner(peer) as owner, mock.patch.object(peer,'verify_created'), mock.patch.object(peer,'observe_live',return_value=binding), mock.patch.object(peer,'confirm',side_effect=TimeoutError('not yet served')):
+            owner.prepare_initial()
+            self.assertFalse((self.root/'state'/'publication.exec.intent').exists())
+            owner.bind_initial_peer()
+            with self.assertRaises(TimeoutError): owner.reconcile()
+            self.assertFalse((self.root/'state'/'publication.exec.intent').exists())
+            self.assertIsNotNone(owner._load()['pending'])
+        with self.native_owner(peer) as owner:
+            self.assertIsNotNone(owner._load()['pending'])
+
+    def test_native_requires_bound_publisher(self):
+        r=self.root
+        with self.assertRaises(ValueError): edge.ManagedEdge(r/'state',r/'published',r/'watched',r/'ca',r/'ca-key',self.native_peer())
+
     def test_native_bootstrap_binds_observed_start_before_confirmation(self):
         peer=self.native_peer(); binding={'replica_started':'2026-11-07T01:02:03Z','envoy_started':'2026-11-07T01:02:04Z'}
         with self.native_owner(peer) as owner, mock.patch.object(peer,'verify_created') as created, mock.patch.object(owner,'_confirm') as confirm:

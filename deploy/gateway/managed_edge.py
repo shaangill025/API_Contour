@@ -287,14 +287,71 @@ class LoopbackPeer:
                 if body!=b'{"result":"owned-pilot-ok"}': raise ValueError('confirmation response mismatch')
 
 
+_PUBLISH_SCRIPT = '"use strict";\nconst fs=require(\'node:fs\'),crypto=require(\'node:crypto\');\nconst hash=process.argv[1], token=process.argv[2], tmp=\'/watch/.linux-\'+token;\nif(!/^[0-9a-f]{64}$/.test(hash)||!/^[0-9a-f]{32}$/.test(token))process.exit(1);\nlet input,output,owned;\ntry {\n input=fs.openSync(\'/watch/sds.json\',fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);\n const st=fs.fstatSync(input);if(!st.isFile()||st.nlink!==1||(st.mode&0o777)!==0o600||st.size>65536)throw Error();\n const buf=Buffer.alloc(65537);let size=0,n;while(size<buf.length&&(n=fs.readSync(input,buf,size,buf.length-size,null))>0)size+=n;const data=buf.subarray(0,size);if(size>65536||size!==st.size||crypto.createHash(\'sha256\').update(data).digest(\'hex\')!==hash)throw Error();\n fs.closeSync(input);input=undefined;process.stdout.write(\'DOC_VERIFIED\\n\');\n output=fs.openSync(tmp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);owned=fs.fstatSync(output);\n fs.writeFileSync(output,data);fs.fsyncSync(output);fs.closeSync(output);output=undefined;\n fs.renameSync(tmp,\'/watch/sds.json\');const dir=fs.openSync(\'/watch\',fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}\n process.stdout.write(\'PUBLISHED\\n\');\n} catch (_) {process.exitCode=1} finally {\n if(input!==undefined)fs.closeSync(input);if(output!==undefined)fs.closeSync(output);\n if(owned){try{const now=fs.lstatSync(tmp);if(now.dev!==owned.dev||now.ino!==owned.ino)throw Error();fs.unlinkSync(tmp)}catch(e){if(e.code!==\'ENOENT\')process.exitCode=1}}\n}'
+_PUBLISH_SCRIPT_SHA = '0ee422a54c898554e4acb824387f47f839c4947be4d35f2c980129f3d8648249'
+_PUBLISH_LABEL = 'org.apicontour.managed-edge-owner'
+_PUBLISH_WARM = 'setInterval(()=>{},60000)'
+_PUBLISH_CLEAR = ('NODE_OPTIONS','NODE_PATH','LD_PRELOAD','LD_LIBRARY_PATH','LD_AUDIT','LD_DEBUG','DYLD_INSERT_LIBRARIES')
+
+def _publisher_env(values):
+    if type(values) is not list or len(values)>128: raise ValueError('publisher environment invalid')
+    result={}
+    for item in values:
+        if type(item) is not str or len(item)>4096 or '=' not in item: raise ValueError('publisher environment invalid')
+        key,value=item.split('=',1)
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*',key) or key in result: raise ValueError('publisher environment invalid')
+        result[key]=value
+    return result
+
+
+class NativeDirectoryPublisher:
+    """Fixed owned Linux publisher. A stopped/replaced instance cannot be rebound."""
+    def __init__(self,cid,image_id,started,watched,token,uid,gid,image_env):
+        if not re.fullmatch(r'[0-9a-f]{64}',cid) or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id) or not re.fullmatch(r'[0-9TZ:.-]{1,64}',started) or started.startswith('0001-') or not re.fullmatch(r'[0-9a-f]{32}',token) or type(uid) is not int or type(gid) is not int or uid<1 or gid<0: raise ValueError('invalid publisher identity')
+        self.cid=cid; self.image_id=image_id; self.started=started; self.watched=str(_private_dir(watched)); self.token=token; self.uid=uid; self.gid=gid; self.image_env=_publisher_env(image_env); self.env=dict(self.image_env); self.env.update({key:'' for key in _PUBLISH_CLEAR})
+    def identity(self):
+        return {'cid':self.cid,'image_id':self.image_id,'started':self.started,'watched':self.watched,'token':self.token,'uid':self.uid,'gid':self.gid,'script':_PUBLISH_SCRIPT_SHA,'entrypoint':['/usr/local/bin/node'],'args':['-e',_PUBLISH_WARM],'environment':self.env,'privileged':False,'cap_add':[],'namespaces':'private','devices':[]}
+    def verify(self):
+        if hashlib.sha256(_PUBLISH_SCRIPT.encode()).hexdigest()!=_PUBLISH_SCRIPT_SHA: raise ValueError('publisher source changed')
+        fmt='{{json .Id}}\n{{json .Image}}\n{{json .Config.Image}}\n{{json .Config.Labels}}\n{{json .Config.User}}\n{{json .State.Running}}\n{{json .State.StartedAt}}\n{{json .HostConfig.NetworkMode}}\n{{json .Mounts}}\n{{json .HostConfig.ReadonlyRootfs}}\n{{json .HostConfig.CapDrop}}\n{{json .HostConfig.SecurityOpt}}\n{{json .NetworkSettings.Ports}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n{{json .Config.Env}}\n{{json .HostConfig.Privileged}}\n{{json .HostConfig.CapAdd}}\n{{json .HostConfig.PidMode}}\n{{json .HostConfig.IpcMode}}\n{{json .HostConfig.UTSMode}}\n{{json .HostConfig.UsernsMode}}\n{{json .HostConfig.Devices}}\n{{json .HostConfig.DeviceRequests}}\n{{json .HostConfig.DeviceCgroupRules}}'
+        lines=_command(['docker','inspect','--format',fmt,self.cid]).splitlines()
+        if len(lines)!=25: raise ValueError('publisher inspection invalid')
+        cid,image,ref,labels,user,running,started,network,mounts,readonly,caps,security,ports,entry,cmd,env,privileged,capadd,pidmode,ipcmode,utsmode,userns,devices,requests,rules=map(json.loads,lines)
+        live_image=json.loads(_command(['docker','image','inspect','--format','{{json .Id}}',_NODE_IMAGE]))
+        live_env=_publisher_env(json.loads(_command(['docker','image','inspect','--format','{{json .Config.Env}}',_NODE_IMAGE])))
+        if live_env!=self.image_env or _publisher_env(env)!=self.env or entry!=['/usr/local/bin/node'] or cmd!=['-e',_PUBLISH_WARM] or privileged is not False or capadd not in (None,[]) or pidmode not in ('',None) or ipcmode not in ('','private',None) or utsmode not in ('',None) or userns not in ('',None) or devices not in (None,[]) or requests not in (None,[]) or rules not in (None,[]): raise ValueError('publisher execution profile changed')
+        if cid!=self.cid or image!=self.image_id or live_image!=image or ref!=_NODE_IMAGE or (labels or {}).get(_PUBLISH_LABEL)!=self.token or user!=f'{self.uid}:{self.gid}' or running is not True or started!=self.started or network!='none' or readonly is not True or caps!=['ALL'] or security not in (['no-new-privileges'],['no-new-privileges:true']) or ports not in (None,{}): raise ValueError('publisher identity changed')
+        if type(mounts) is not list or len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('Source')!=self.watched or mounts[0].get('Destination')!='/watch' or mounts[0].get('RW') is not True: raise ValueError('publisher mount changed')
+        return lines
+    def publish(self,document,nonce):
+        if not re.fullmatch(r'[0-9a-f]{32}',nonce): raise ValueError('publisher nonce invalid')
+        if type(document) is not bytes or len(document)>65536: raise ValueError('publisher document invalid')
+        before=self.verify(); digest=hashlib.sha256(document).hexdigest(); token=nonce
+        try:
+            result=_command(['docker','exec','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','LD_DEBUG=',self.cid,'/usr/bin/env','-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','-e',_PUBLISH_SCRIPT,digest,token],timeout=10)
+            after=self.verify()
+            if before!=after or result!=b'DOC_VERIFIED\nPUBLISHED\n': raise ValueError('publisher result invalid')
+        except BaseException as primary:
+            # Unknown exec outcome is never retried against an unverified process.
+            # Stop the exact bound instance; any recovery needs operator rebind.
+            try:
+                _command(['docker','stop','--time','0',self.cid],timeout=10)
+                if json.loads(_command(['docker','inspect','--format','{{json .State.Running}}',self.cid])) is not False: raise RuntimeError('publisher stop unknown')
+            except BaseException as cleanup:
+                raise BaseExceptionGroup('publisher failure and stop failure',[primary,cleanup]) from None
+            raise
+
+
 class ManagedEdge:
     """Single owner. All commands re-read the durable journal under lifetime lock."""
-    def __init__(self, state, published, watched, ca, ca_key, peer):
+    def __init__(self, state, published, watched, ca, ca_key, peer, publisher=None):
         self.state=_private_dir(state); self.published=_private_dir(published); self.watched=_private_dir(watched)
         if len({self.state,self.published,self.watched})!=3 or any(a in b.parents for a in (self.state,self.published,self.watched) for b in (self.state,self.published,self.watched) if a!=b):
             raise ValueError('managed directories overlap')
         if type(peer) not in (LoopbackPeer,NativeReplicaPeer): raise ValueError('unsupported confirmation peer')
-        self.peer=peer; self.ca=Path(ca)
+        if type(peer) is NativeReplicaPeer and (type(publisher) is not NativeDirectoryPublisher or publisher.watched!=str(self.watched)): raise ValueError('native publisher required')
+        if type(peer) is LoopbackPeer and publisher is not None: raise ValueError('unexpected publisher')
+        self.peer=peer; self.publisher=publisher; self.ca=Path(ca)
         if type(peer) is NativeReplicaPeer:
             if peer.envoy_mounts['/certs']!=str(self.published) or peer.envoy_mounts['/run/watch']!=str(self.watched): raise ValueError('envoy publication mounts changed')
             private_state=self.state.resolve(); private_ca=Path(ca_key).resolve()
@@ -322,6 +379,7 @@ class ManagedEdge:
 
     def _identity(self):
         config={'published':str(self.published),'watched':str(self.watched),'ca':str(self.ca.absolute()),'ca_key':str(self.ca_key.absolute()),'ca_digest':hashlib.sha256(self.certs._read(self.ca)).hexdigest(),'peer':self.peer.identity()}
+        if self.publisher is not None: config['publisher']=self.publisher.identity()
         return hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
     def close(self):
@@ -331,6 +389,7 @@ class ManagedEdge:
 
     def _load(self):
         if self.closed or self.uncertain: raise RuntimeError('owner must reopen')
+        if os.path.lexists(self.state/'publication.exec.intent'): raise RuntimeError('publisher execution requires operator recovery')
         if self._identity()!=self.identity: raise ValueError('managed identity changed')
         try: raw=_regular(self.state/'journal.json',4096)
         except FileNotFoundError:
@@ -390,7 +449,14 @@ class ManagedEdge:
 
     def _publish(self,version,commitment):
         document=self._document(version,commitment)
-        try: _replace(self.watched,'sds.json',document)
+        try:
+            _replace(self.watched,'sds.json',document)
+            if self.publisher is not None:
+                nonce=uuid.uuid4().hex
+                intent={'publisher':self.publisher.identity(),'document_sha256':hashlib.sha256(document).hexdigest(),'nonce':nonce}
+                self._binding_file('publication.exec.intent',json.dumps(intent,sort_keys=True,separators=(',',':')).encode('ascii'))
+                self.publisher.publish(document,nonce)
+                os.unlink(self.state/'publication.exec.intent'); _sync_dir(self.state)
         except BaseException: self.uncertain=True; raise
 
     def _publish_and_confirm(self,data):

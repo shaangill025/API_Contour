@@ -4,16 +4,16 @@ The caller must first create the exact labeled Envoy and replica containers.
 This module neither creates nor removes containers and never reads product keys.
 """
 import re
-from deploy.gateway.managed_edge import ManagedEdge, NativeReplicaPeer, _command
+from deploy.gateway.managed_edge import ManagedEdge, NativeReplicaPeer, NativeDirectoryPublisher, _command
 
 LABEL='org.apicontour.managed-edge-owner'
 
 class ManagedEdgeController:
-    def __init__(self, state, published, watched, ca, ca_key, peer, owner_token):
-        if type(peer) is not NativeReplicaPeer or not re.fullmatch(r'[0-9a-f]{32}',owner_token):
+    def __init__(self, state, published, watched, ca, ca_key, peer, owner_token, publisher):
+        if type(peer) is not NativeReplicaPeer or type(publisher) is not NativeDirectoryPublisher or not re.fullmatch(r'[0-9a-f]{32}',owner_token) or publisher.token!=owner_token:
             raise ValueError('invalid owned controller')
         self.peer=peer; self.token=owner_token
-        self.edge=ManagedEdge(state,published,watched,ca,ca_key,peer)
+        self.edge=ManagedEdge(state,published,watched,ca,ca_key,peer,publisher)
     def _owned(self,cid):
         value=_command(['docker','inspect','--format','{{ index .Config.Labels "'+LABEL+'" }}',cid])
         if value!=self.token.encode('ascii')+b'\n': raise ValueError('container ownership mismatch')
