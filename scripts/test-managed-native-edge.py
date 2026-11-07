@@ -252,7 +252,7 @@ def main():
     try:
         for image_ref in (NODE,ENVOY): run(['docker','image','inspect',image_ref],timeout=20)
         image_attempted=True
-        run(['docker','build','--pull=false','--no-cache','--label',LABEL+'='+token,'--label','org.apicontour.managed-edge.source='+head,'--tag',tag,'-f','deploy/local/Dockerfile','.'],timeout=1800,limit=16777216)
+        run(['docker','build','--pull=false','--label',LABEL+'='+token,'--label','org.apicontour.managed-edge.source='+head,'--tag',tag,'-f','deploy/local/Dockerfile','.'],timeout=1800,limit=16777216)
         image=artifact_identity(run,tag,token,head)
         durable_record(folder,'image.receipt.json',{'id':image})
         if source_snapshot(run)!=(head,before): raise RuntimeError('source changed after build')
