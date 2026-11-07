@@ -125,6 +125,7 @@ DISCOVERY_CASES = (
     ('request-compressed', ()), ('response-compressed', ('request',)),
     ('request-oversized', ('response',)), ('response-oversized', ('request',)),
     ('request-chunked', ('request','response')), ('response-chunked', ('request','response')),
+    ('request-progress', ('request','response')), ('response-progress', ('request','response')),
     ('request-trailer', ()), ('response-trailer', ('request',)),
     ('response-409', ('request','response')),
     ('normal', ('request','response')),

@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -63,7 +64,54 @@ class Fixture(unittest.TestCase):
         wrong=row('bad','request'); wrong[0]='b'
         with self.assertRaises(AssertionError): fixture.assert_discovery_case([wrong],set(),'a',('request',))
         self.assertEqual(fixture.DISCOVERY_CASES[0],fixture.DISCOVERY_CASES[-1])
-        self.assertEqual(len(fixture.DISCOVERY_CASES),13)
+        self.assertEqual(len(fixture.DISCOVERY_CASES),15)
+        for name in ('request-progress','response-progress'):
+            self.assertIn((name,('request','response')),fixture.DISCOVERY_CASES)
+
+    def test_progress_barriers_reject_missing_prefix_and_clean_up(self):
+        script = r"""
+const assert=require('assert');
+const {rendezvous,prefixObserver,waitUntil,checked}=require(process.argv[1]);
+const {EventEmitter}=require('events');
+(async()=>{
+ const nonce='a'.repeat(32),wrong='b'.repeat(32),state=rendezvous(200);
+ assert(state.register(nonce,'request'));
+ assert(!state.register(wrong,'response'));
+ assert(!state.mark(wrong,'request'));
+ assert.strictEqual(state.seen(wrong),null);
+ const observe=prefixObserver(Buffer.from('abc'),()=>assert(state.mark(nonce,'request')));
+ observe(Buffer.from('a')); assert.strictEqual(state.seen(nonce),false);
+ await assert.rejects(waitUntil(()=>state.seen(nonce),10,1),/timeout/);
+ await assert.rejects(waitUntil(()=>new Promise(resolve=>setTimeout(()=>resolve(true),30)),5,1),/timeout/);
+ assert.throws(()=>observe(Buffer.from('x')),/prefix/);
+ assert(!state.clear(wrong)); assert(state.clear(nonce));
+ assert.strictEqual(state.seen(nonce),null);
+ assert(state.register(nonce,'response'));
+ const received=prefixObserver(Buffer.from('abc'),()=>assert(state.mark(nonce,'response')));
+ received(Buffer.from('a')); assert.strictEqual(state.seen(nonce),false);
+ received(Buffer.from('bc')); await waitUntil(()=>state.seen(nonce),10,1);
+ assert(state.clear(nonce));
+ assert(state.register(wrong,'request'));
+ await new Promise(resolve=>setTimeout(resolve,250));
+ assert.strictEqual(state.seen(wrong),null);
+ assert(state.register(nonce,'request'));
+ const abort=new AbortController(),pending=waitUntil(()=>false,1000,10,abort.signal);
+ abort.abort(); await assert.rejects(pending,/aborted/);
+ assert(state.clear(nonce)); assert(state.register(wrong,'request'));
+ // A bad observed prefix fails the stream and invokes the cleanup path.
+ const stream=new EventEmitter(); stream.destroy=()=>{stream.destroyed=true;};
+ const oldWrite=process.stderr.write; process.stderr.write=()=>true;
+ let failed=false;
+ checked(stream,Buffer.from('abc'),'client_response_bytes',()=>assert.fail('unexpected completion'),
+   prefixObserver(Buffer.from('abc'),()=>assert.fail('unexpected prefix')),
+   ()=>{failed=true;assert(state.clear(wrong));});
+ stream.emit('data',Buffer.from('x')); process.stderr.write=oldWrite;
+ assert(failed&&stream.destroyed); assert.strictEqual(state.seen(wrong),null);
+ assert(state.register(nonce,'request')); assert(state.clear(nonce)); process.exitCode=0;
+})().catch(()=>process.exitCode=1);
+"""
+        result=subprocess.run(['node','-e',script,str(ROOT/'tests/fixtures/origin-sensor/discovery-matrix.js')],capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
 
     def test_matrix_loss_deltas_and_acknowledgements_are_exact(self):
         total=fixture.parse_matrix_drain('MATRIX 0 2',0,0,2)
