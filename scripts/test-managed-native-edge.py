@@ -30,7 +30,8 @@ from deploy.pilot.managed_edge_controller import ManagedEdgeController,LABEL
 
 NODE='docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963'
 ENVOY='envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4'
-REMOTE_CLIENT_SHELL='/usr/local/bin/node -e "$1" fixture-client "$2" <&0 & p=$!; printf "PID %s\\n" "$p"; wait "$p"'
+REMOTE_CLIENT_SHELL='exec 3<&0; /usr/local/bin/node -e "$1" fixture-client "$2" <&3 3<&- & p=$!; exec 3<&-; printf "PID %s\\n" "$p"; wait "$p"'
+SHELL_CONTROL_JS="if(process.argv[2]!=='request')process.exit(20);let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>{s+=x;if(s.length>128)process.exit(21);if(s.includes('\\n')){if(s!=='RELEASE_REQUEST\\n')process.exit(22);console.log('INPUT_OK');process.exit(0)}});process.stdin.on('end',()=>process.exit(23));setTimeout(()=>process.exit(24),5000)"
 ID='00000000-0000-4000-8000-000000000001'
 FIXTURE=ROOT/'tests/fixtures/managed-native-edge'
 
@@ -350,9 +351,8 @@ def main():
                     time.sleep(.2)
             monitors[1].wait(b'AUTHORITY_SENT',timeout=30); monitors[1].wait(b'BATCH_ATTEMPT',timeout=30)
             src=(FIXTURE/'held_client.js').read_text()
-            def held(mode,operation):
-                d=monitors[0]; req_before=d.lines().count(b'REQUEST_PREFIX'); resp_before=d.lines().count(b'RESPONSE_WRITTEN')
-                args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',REMOTE_CLIENT_SHELL,'fixture',src,mode]
+            def start_client(script,mode):
+                args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',REMOTE_CLIENT_SHELL,'fixture',script,mode]
                 m=Monitor(args); monitors.append(m); deadline=time.monotonic()+15; pid=None
                 while time.monotonic()<deadline:
                     lines=m.lines()
@@ -363,6 +363,14 @@ def main():
                     if m.proc.poll() is not None: raise RuntimeError('remote client exited')
                     time.sleep(.02)
                 if pid is None: raise TimeoutError('remote pid deadline')
+                return m,pid
+            control,control_pid=start_client(SHELL_CONTROL_JS,'request')
+            control.send('RELEASE_REQUEST'); control.wait(b'INPUT_OK')
+            control.finish([b'PID '+control_pid,b'INPUT_OK'])
+            remote_absent(run,replica,control_pid); remote.remove((replica,control_pid))
+            def held(mode,operation):
+                d=monitors[0]; req_before=d.lines().count(b'REQUEST_PREFIX'); resp_before=d.lines().count(b'RESPONSE_WRITTEN')
+                m,pid=start_client(src,mode)
                 if mode=='request': m.wait(b'CLIENT_WRITTEN'); d.wait(b'REQUEST_PREFIX',req_before+1)
                 else: d.wait(b'RESPONSE_WRITTEN',resp_before+1); m.wait(b'RESPONSE_PREFIX')
                 held_since=time.monotonic()

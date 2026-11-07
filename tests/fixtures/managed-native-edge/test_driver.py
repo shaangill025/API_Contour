@@ -2,6 +2,8 @@ import importlib.util
 import json
 import os
 import shutil
+import select
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -105,6 +107,28 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(sum(bool(__import__('re').fullmatch(rb'PID [1-9][0-9]*', line)) for line in lines), 1)
         self.assertIn(b'PASS', lines)
+
+    def test_actual_shell_delivers_stdin_after_pid(self):
+        node=shutil.which('node'); self.assertIsNotNone(node)
+        shell=driver.REMOTE_CLIENT_SHELL.replace('/usr/local/bin/node',node,1)
+        script=driver.SHELL_CONTROL_JS
+        child=subprocess.Popen(['/bin/sh','-c',shell,'fixture',script,'request'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,bufsize=0)
+        try:
+            ready,_,_=select.select([child.stdout],[],[],5); self.assertTrue(ready,'PID deadline')
+            pidline=child.stdout.readline(); self.assertRegex(pidline,rb'^PID [1-9][0-9]*\n$')
+            try: child.stdin.write(b'RELEASE_REQUEST\n'); child.stdin.flush()
+            except BrokenPipeError: pass
+            ready,_,_=select.select([child.stdout],[],[],5); self.assertTrue(ready,'input deadline')
+            out=child.stdout.readline()
+            self.assertEqual(out,b'INPUT_OK\n')
+            self.assertFalse(child.stdin.closed)
+            child.stdin.close(); child.wait(timeout=5)
+            self.assertEqual((child.returncode,child.stderr.read()),(0,b''))
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid,signal.SIGKILL); child.wait(timeout=5)
+            for stream in (child.stdin,child.stdout,child.stderr):
+                if stream and not stream.closed: stream.close()
 
     def test_primary_and_all_cleanup_failures_have_sanitized_locations(self):
         def capture(message):
