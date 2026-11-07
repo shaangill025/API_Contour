@@ -73,11 +73,11 @@ def generated_edge(gateway_port):
     return config
 
 
-def assert_proofs(rows, expected, origin_service, origin_deployment, source):
+def assert_proofs(rows, expected, origin_service, origin_deployment, source, response_statuses=('200',)):
     for row in rows:
         if row[5:9] != [ITEM]*4 or row[15] != 'POST' or row[17] != source or row[18] != 'http_json_v1' or row[19] != 2:
             raise AssertionError('observation tuple mismatch')
-        if row[14] not in ('request','response') or (row[14] == 'response' and row[16] != '200'):
+        if row[14] not in ('request','response') or (row[14] == 'request' and row[16] is not None) or (row[14] == 'response' and row[16] not in response_statuses):
             raise AssertionError('origin record direction/status mismatch')
         if row[20] == 'unattributed':
             if any(x is not None for x in row[:5] + row[9:13]): raise AssertionError('unattributed record has proof')
@@ -116,6 +116,84 @@ def assert_concurrent(rows, before, a, b):
     if observed != shapes: raise AssertionError('concurrent shape attribution mismatch')
 
 
+
+# Per-direction outcomes after exact forwarding: malformed/oversize capture is
+# cancelled; request-level encoding/trailers suppress response capture too.
+DISCOVERY_CASES = (
+    ('normal', ('request','response')),
+    ('request-malformed', ('response',)), ('response-malformed', ('request',)),
+    ('request-compressed', ()), ('response-compressed', ('request',)),
+    ('request-oversized', ('response',)), ('response-oversized', ('request',)),
+    ('request-chunked', ('request','response')), ('response-chunked', ('request','response')),
+    ('request-progress', ('request','response')), ('response-progress', ('request','response')),
+    ('request-trailer', ()), ('response-trailer', ('request',)),
+    ('response-409', ('request','response')),
+    ('normal', ('request','response')),
+)
+
+def assert_discovery_case(rows, before, fingerprint, directions, response_status=200):
+    shape = lambda field, kind: {'kind':'object','fields':{field:{'kind':kind}},'additional':None}
+    expected = {'request':shape('probe','boolean'), 'response':shape('id','integer')}
+    ids = [r[13] for r in rows]
+    if len(ids) != len(set(ids)) or not before.issubset(ids):
+        raise AssertionError('matrix history changed')
+    fresh = [r for r in rows if r[13] not in before]
+    if len(fresh) != len(directions) or {r[14] for r in fresh} != set(directions):
+        raise AssertionError('matrix direction or record count mismatch')
+    if any(r[0] != fingerprint or r[21] != expected[r[14]] or r[16] != (None if r[14]=='request' else str(response_status)) for r in fresh):
+        raise AssertionError('matrix attribution or structure mismatch')
+
+def run_discovery_cases(run_case):
+    # Fail immediately on any case; enclosing owned-resource finally performs cleanup.
+    for case, directions in DISCOVERY_CASES:
+        run_case(case, directions)
+
+def parse_matrix_drain(line, previous, expected_loss, record_count):
+    parts=line.split()
+    if len(parts)!=3 or parts[0]!='MATRIX' or not all(x.isascii() and x.isdigit() for x in parts[1:]):
+        raise AssertionError('invalid matrix drain')
+    losses,acks=map(int,parts[1:])
+    if losses != previous + expected_loss or (acks != 0 if record_count == 0 else not 1 <= acks <= record_count):
+        raise AssertionError('matrix loss or acknowledgement mismatch')
+    return losses
+
+MATRIX_DIAGNOSTICS = frozenset({'server_tls','server_request_metadata','server_request_bytes','server_request_trailers',
+    'client_setup','client_tls','client_status','client_response_metadata','client_response_bytes','client_response_trailers','transport'})
+
+def matrix_diagnostics(*outputs):
+    # Never expose unexpected output, exception messages, traffic or credentials.
+    labels=set()
+    for output in outputs:
+        if len(output)>16384: continue
+        for line in output.splitlines():
+            if line.startswith(b'DIAG '):
+                try: label=line[5:].decode('ascii')
+                except UnicodeDecodeError: continue
+                if label in MATRIX_DIAGNOSTICS: labels.add(label)
+    return tuple(sorted(labels))
+
+def assert_discovery_catalog(catalog, rows, tenant):
+    expected = {}
+    for r in rows:
+        key = [tenant, *r[5:8], 'http', r[14], r[15], '/pilot']
+        expected[r[13]] = ('complete','structure',int(r[16]) if r[16] is not None else None,
+                           r[21],r[17],*r[5:9],r[18],r[19],False,[],key,r[22],1,1,1,*r[23:27])
+    if len(catalog) != len(expected) or {r[0]:tuple(r[1:]) for r in catalog} != expected:
+        raise AssertionError('catalog projection mismatch')
+
+
+def orderly_shutdown(gateway, origin, line, execute, clock=time.monotonic, pause=time.sleep):
+    gateway.stdin.write('STOP\n'); gateway.stdin.flush(); gateway.wait(timeout=5)
+    if gateway.returncode: raise AssertionError('gateway shutdown failed')
+    origin.stdin.write('\n'); origin.stdin.flush()
+    if line(origin,10) != 'STOPPED': raise AssertionError('origin HTTP shutdown failed')
+    origin.stdin.write('\n'); origin.stdin.flush(); origin.stdin.close()
+    origin.wait(timeout=10)
+    if origin.returncode or origin.stderr.read(): raise AssertionError('origin HTTP cleanup failed')
+    until=clock()+10
+    while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_origin_ingress_test';") != '0':
+        if clock()>=until: raise AssertionError('origin database connections leaked')
+        pause(.1)
 
 def assert_owned_replacement(info, name, label):
     if (not re.fullmatch('[0-9a-f]{64}',info.get('Id','')) or info.get('Name')!='/'+name
@@ -271,6 +349,7 @@ def assert_replacement_history(rows, prior, before_old_attempt, old_leaf):
 
 def run_cases(container, execute, setup, directory, environment):
     """Requires migrations 1,2,3,4,13-17 and origin login, and built origin_sensor_probe."""
+    matrix = environment.get('CONTOUR_TLS_DISCOVERY_MATRIX') == '1'
     replacement = environment.get('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE') == '1'
     admission = environment.get('CONTOUR_ORIGIN_ADMISSION_FIXTURE') == '1'
     fixture_image = environment['CONTOUR_ORIGIN_SENSOR_IMAGE']
@@ -405,13 +484,14 @@ def run_cases(container, execute, setup, directory, environment):
         environment=origin_env
         origin,_=child('origin',files('ca.crt','ca.crt.der','server.crt.der','server.key.der','http-client.crt.der','signer.raw'),fixture_image,['/usr/local/bin/origin_https_probe','5432','/fixture',tenant,collector,'5000'],['CONTOUR_FIXTURE_PASSWORD','CONTOUR_ORIGIN_DATABASE_USER'])
         origin_port=ready(origin)
-        destination_mounts=files('destination.crt','destination.key','ca.crt')+mount(ROOT/'tests/fixtures/origin-sensor/destination.js','/fixture/destination.js')
+        destination_script = 'discovery-matrix.js' if matrix else 'destination.js'
+        destination_mounts=files('destination.crt','destination.key','ca.crt')+mount(ROOT/('tests/fixtures/origin-sensor/'+destination_script),'/fixture/destination.js')
         environment=dict(environment,EXPECTED_CLIENT_SHA256=cert_hash('upstream'))
-        destination,_=child('destination',destination_mounts,NODE,['/fixture/destination.js'],['EXPECTED_CLIENT_SHA256'],'node')
+        destination,destination_name=child('destination',destination_mounts,NODE,['/fixture/destination.js',*(['server'] if matrix else [])],['EXPECTED_CLIENT_SHA256'],'node')
         if ready(destination)!=9444: raise AssertionError('destination listener mismatch')
         config = dict(server_certificate_der='/fixture/server.der',server_key_der='/fixture/server-key.der',forwarder_ca_der='/fixture/ca.crt.der',forwarder_leaf_der='/fixture/forwarder.der',upstream_address='127.0.0.1:9444',upstream_name='pilot-destination',upstream_ca_der='/fixture/ca.crt.der',upstream_client_certificate_der='/fixture/upstream.der',upstream_client_key_der='/fixture/upstream-key.der',delivery_address='127.0.0.1:%d'%origin_port,delivery_name='localhost',delivery_ca_der='/fixture/ca.crt.der',delivery_client_certificate_der='/fixture/http-client.der',delivery_client_key_der='/fixture/http-client-key.der',tenant=tenant,collector=collector,source=source,workload=[ITEM]*4,policy_key_id='fixture',policy_key_file='/fixture/signer.raw')
         cfg=write('gateway.json',json.dumps(config))
-        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
+        gateway,_=child('gateway',files('server.der','server-key.der','ca.crt.der','forwarder.der','upstream.der','upstream-key.der','http-client.der','http-client-key.der','signer.raw','gateway.json'),fixture_image,['/usr/local/bin/origin_sensor_probe','/fixture/gateway.json',*(['--discovery-matrix'] if matrix else ['--admission-diagnostic'] if admission else ['--replacement-diagnostic'] if replacement else [])])
         gateway_port=ready(gateway)
         edgecfg=write('envoy.json',json.dumps(generated_edge(gateway_port)))
         edge=prefix+'-edge'
@@ -422,7 +502,7 @@ def run_cases(container, execute, setup, directory, environment):
         for name,other,port in [('a','b',1880),('b','a',1881)]:
             flow=write('flows-'+name+'.json',json.dumps(flows(cert_hash(other),name)))
             cname=prefix+'-'+name
-            mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(folder/(name+'.crt'),'/fixture/client.crt')+mount(folder/(name+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
+            mounts=mount(flow,'/fixture/flows.json')+mount(ROOT/'tests/fixtures/origin-sensor/settings.js','/fixture/settings.js')+mount(ROOT/'tests/fixtures/origin-sensor/trigger.js','/fixture/trigger.js')+mount(ROOT/'tests/fixtures/origin-sensor/discovery-matrix.js','/fixture/discovery-matrix.js')+mount(folder/(name+'.crt'),'/fixture/client.crt')+mount(folder/(name+'.key'),'/fixture/client.key')+mount(folder/'ca.crt','/fixture/ca.crt')
             resources.append({'name':cname,'id':None})
             resources[-1]['id']=docker('run','-d','--name',cname,*common,'-e','FIXTURE_PORT='+str(port),'--tmpfs','/data:rw,nosuid,nodev,noexec,size=16m,mode=1777','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777',*mounts,'--entrypoint','node',NODE,'/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/fixture/settings.js')
             nodes.append((cname,port))
@@ -431,7 +511,7 @@ def run_cases(container, execute, setup, directory, environment):
             if result != ('READY' if mode=='ready' else 'OK'): raise AssertionError('fixture trigger mismatch')
         control_record_ids=set()
         def snapshot():
-            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure')), '[]'::json)
+            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure',m.batch_id,r.value->'record'->>'first_seen',r.value->'record'->>'last_seen',r.value->'record'->>'queued_at',r.value->'record'->>'expires_at')), '[]'::json)
 FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_payloads b USING (tenant_id,collector_id,batch_id)
 LEFT JOIN contour.origin_proofs p USING (tenant_id,collector_id,batch_id,record_id)
 CROSS JOIN LATERAL jsonb_array_elements(convert_from(b.checked_batch,'UTF8')::jsonb->'records') r(value)
@@ -454,6 +534,49 @@ WHERE m.tenant_id='%s' AND m.collector_id='%s' AND r.value->'record'->>'record_i
                 except RuntimeError:
                     if time.monotonic()>=until: raise AssertionError('Node-RED listener unavailable')
                     time.sleep(.1)
+        if matrix:
+            projected=set()
+            matrix_losses=0
+            def project_and_check(rows):
+                batches=json.loads(execute("SELECT coalesce(json_agg(DISTINCT batch_id),'[]'::json) FROM contour.ingestion_v2_metadata WHERE tenant_id='%s' AND collector_id='%s';" % (tenant,collector)))
+                for batch in batches:
+                    if batch in projected: continue
+                    uuid.UUID(batch)
+                    proc,_=child('catalog-'+str(len(projected)),files('ca.crt'),fixture_image,
+                        ['/usr/local/bin/catalog_probe','5432','/fixture/ca.crt',batch,'Processed',tenant,collector,'5000'],['CONTOUR_FIXTURE_PASSWORD'])
+                    if line(proc,15) != 'Processed': raise AssertionError('catalog projection failed')
+                    proc.stdin.write('OK\n'); proc.stdin.flush()
+                    if proc.wait(timeout=15) != 0: raise AssertionError('catalog probe failed')
+                    projected.add(batch)
+                sql="""SELECT coalesce(json_agg(json_build_array(w.record_id,w.completeness,w.visibility,w.status_code,convert_from(v.structure_wire,'UTF8')::jsonb,w.source_id,w.project_id,w.service_id,w.environment_id,w.deployment_id,v.parser_profile,v.policy_revision,w.route_uncertain,to_jsonb(w.reasons),convert_from(o.canonical_key,'UTF8')::jsonb,w.batch_id,w.observation_count,w.sample_numerator,w.sample_denominator,w.first_seen,w.last_seen,w.queued_at,w.expires_at)),'[]'::json)
+FROM contour.observation_windows w JOIN contour.variants v USING(tenant_id,variant_id,operation_id,collector_id)
+JOIN contour.operations o USING(tenant_id,operation_id)
+WHERE w.tenant_id='%s' AND w.collector_id='%s';""" % (tenant,collector)
+                assert_discovery_catalog(json.loads(execute(sql)),rows,tenant)
+            def run_matrix_case(case, directions):
+                nonlocal matrix_losses
+                before={row[13] for row in snapshot()}
+                result=subprocess.run(['docker','exec',nodes[0][0],'node','/fixture/discovery-matrix.js','client',case],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15,env=environment,cwd=ROOT)
+                if result.returncode or result.stdout != b'OK\n' or result.stderr:
+                    try:
+                        logs=subprocess.run(['docker','logs','--tail','50',destination_name],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10,env=environment,cwd=ROOT)
+                        outputs=(result.stdout,result.stderr,logs.stdout,logs.stderr) if logs.returncode==0 else (result.stdout,result.stderr)
+                    except (OSError,subprocess.TimeoutExpired): outputs=(result.stdout,result.stderr)
+                    labels=matrix_diagnostics(*outputs)
+                    print('Matrix diagnostic: '+(','.join(labels) if labels else 'unavailable'),flush=True)
+                    raise AssertionError('matrix forwarding mismatch: '+case)
+                expected_loss = int(case in ('request-malformed','response-malformed','request-oversized','response-oversized'))
+                matrix_losses=parse_matrix_drain(command(gateway,'MATRIX_DRAIN',15),matrix_losses,expected_loss,len(directions))
+                rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source,('200','409'))
+                assert_discovery_case(rows,before,cert_hash('a'),directions,409 if case=='response-409' else 200)
+                project_and_check(rows)
+                leak=execute("SELECT count(*) FROM contour.ingestion_payloads WHERE tenant_id='%s' AND position('synthetic-secret-sentinel-' in convert_from(checked_batch,'UTF8'))>0;" % tenant)
+                if leak != '0': raise AssertionError('matrix sentinel persisted')
+                print('PASS TLS discovery '+case,flush=True)
+            run_discovery_cases(run_matrix_case)
+            orderly_shutdown(gateway,origin,line,execute)
+            print('LIMITATION unavailable plaintext detection not exercised',flush=True)
+            return
         for (node,port),name in zip(nodes,['a','b']):
             before={row[13] for row in snapshot()}
             trigger(node,'normal',port)
@@ -640,19 +763,8 @@ WHERE p.tenant_id='%s' AND p.collector_id='%s' AND p.leaf_sha256 IN (decode('%s'
             if admission:
                 before={row[13] for row in snapshot()}; trigger(nodes[1][0],'normal',1881); after_request(before,cert_hash('b'))
             print('Operator-controlled replacement retained historical attribution on the same shared namespace/address/port; allocator and host PID reuse not tested',flush=True)
-        # Stop the gateway before shutting down the origin HTTP server, then
-        # demand its normal two-phase cancellation and database cleanup.
-        gateway.stdin.write('STOP\n'); gateway.stdin.flush(); gateway.wait(timeout=5)
-        if gateway.returncode: raise AssertionError('gateway shutdown failed')
-        origin.stdin.write('\n'); origin.stdin.flush()
-        if line(origin,10) != 'STOPPED': raise AssertionError('origin HTTP shutdown failed')
-        origin.stdin.write('\n'); origin.stdin.flush(); origin.stdin.close()
-        origin.wait(timeout=10)
-        if origin.returncode or origin.stderr.read(): raise AssertionError('origin HTTP cleanup failed')
-        until=time.monotonic()+10
-        while execute("SELECT count(*) FROM pg_stat_activity WHERE usename='contour_origin_ingress_test';") != '0':
-            if time.monotonic()>=until: raise AssertionError('origin database connections leaked')
-            time.sleep(.1)
+        # Both paths require the same orderly process and DB connection checks.
+        orderly_shutdown(gateway,origin,line,execute)
         print('Two stock Node-RED instances reached origin HTTPS and retained distinct proofs',flush=True)
     finally:
         prior = sys.exc_info()[1]

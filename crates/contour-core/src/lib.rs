@@ -14,6 +14,11 @@ mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod batch_v2;
 pub use batch_v2::{BatchV2, BatchV2Record, OriginWitness};
+mod causal_marker;
+pub use causal_marker::{
+    CausalMarkerClaim, CausalMarkerError, CausalMarkerScope, CausalMarkerVerifier,
+    MAX_CAUSAL_MARKER_BYTES, SignedCausalMarker, VerifiedCausalMarker,
+};
 mod causal_grant;
 pub use causal_grant::{
     CausalGrantError, CausalGrantEventKind, CausalGrantKeys, VerifiedCausalGrant,

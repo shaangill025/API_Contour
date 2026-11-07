@@ -275,6 +275,7 @@ impl Gateway {
         )
         .parse()
         .map_err(|_| ())?;
+        let trailer_nominated = strict_connection_nominated(&parts.headers);
         let eligible = prepare_request_capture(&mut parts.headers) && eligible;
         parts.headers.insert(header::HOST, self.authority.clone());
         let req_capture = if eligible {
@@ -288,7 +289,8 @@ impl Gateway {
         } else {
             None
         };
-        let body = ObservedBody::new_request(incoming, req_capture).boxed_unsync();
+        let body =
+            ObservedBody::new_request(incoming, req_capture, trailer_nominated).boxed_unsync();
         let request = Request::from_parts(parts, body);
         let response = timeout(Duration::from_secs(15), self.upstream.request(request))
             .await
@@ -415,15 +417,29 @@ fn capture_headers(headers: &HeaderMap) -> bool {
         && !headers.contains_key(header::TRAILER)
         && !headers.contains_key(header::UPGRADE)
 }
-fn strip_hop(headers: &mut HeaderMap) {
-    let nominated: Vec<HeaderName> = headers
+fn connection_nominated(headers: &HeaderMap) -> Vec<HeaderName> {
+    headers
         .get_all(header::CONNECTION)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
         .filter_map(|v| HeaderName::from_bytes(v.trim().as_bytes()).ok())
-        .collect();
-    for name in nominated {
+        .collect()
+}
+// Request trailer forwarding fails closed if any original or trailer-frame
+// Connection field cannot be parsed as a complete list of HTTP field names.
+fn strict_connection_nominated(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
+    let mut nominated = Vec::new();
+    for value in headers.get_all(header::CONNECTION) {
+        for token in value.to_str().ok()?.split(',') {
+            let token = token.trim_matches([' ', '\t']);
+            nominated.push(HeaderName::from_bytes(token.as_bytes()).ok()?);
+        }
+    }
+    Some(nominated)
+}
+fn strip_hop(headers: &mut HeaderMap) {
+    for name in connection_nominated(headers) {
         headers.remove(name);
     }
     for name in [
@@ -437,6 +453,18 @@ fn strip_hop(headers: &mut HeaderMap) {
         "upgrade",
     ] {
         headers.remove(name);
+    }
+}
+fn sanitize_request_trailers(trailers: &mut HeaderMap, original: Option<&[HeaderName]>) {
+    if let (Some(original), Some(frame)) = (original, strict_connection_nominated(trailers)) {
+        for name in original.iter().chain(&frame) {
+            trailers.remove(name);
+        }
+        strip_hop(trailers);
+        trailers.remove(ORIGIN_WITNESS);
+        trailers.remove("x-forwarded-client-cert");
+    } else {
+        trailers.clear();
     }
 }
 // TE is hop-scoped. Recreate only the downstream's trailers capability for the
@@ -590,7 +618,8 @@ struct ObservedBody<B> {
     inner: B,
     capture: Option<Capture>,
     driver: Option<AbortTask>,
-    strip_origin_trailers: bool,
+    strip_request_trailers: bool,
+    trailer_nominated: Option<Vec<HeaderName>>,
 }
 impl<B> ObservedBody<B> {
     fn new(inner: B, capture: Option<Capture>, driver: Option<AbortTask>) -> Self {
@@ -598,12 +627,14 @@ impl<B> ObservedBody<B> {
             inner,
             capture,
             driver,
-            strip_origin_trailers: false,
+            strip_request_trailers: false,
+            trailer_nominated: Some(Vec::new()),
         }
     }
-    fn new_request(inner: B, capture: Option<Capture>) -> Self {
+    fn new_request(inner: B, capture: Option<Capture>, nominated: Option<Vec<HeaderName>>) -> Self {
         let mut body = Self::new(inner, capture, None);
-        body.strip_origin_trailers = true;
+        body.strip_request_trailers = true;
+        body.trailer_nominated = nominated;
         body
     }
 }
@@ -620,10 +651,10 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for ObservedBody<
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let mut result = Pin::new(&mut self.inner).poll_frame(cx);
-        if self.strip_origin_trailers {
+        if self.strip_request_trailers {
             if let Poll::Ready(Some(Ok(frame))) = &mut result {
                 if let Some(trailers) = frame.trailers_mut() {
-                    trailers.remove(ORIGIN_WITNESS);
+                    sanitize_request_trailers(trailers, self.trailer_nominated.as_deref());
                 }
             }
         }
@@ -956,16 +987,62 @@ mod tests {
         let mut trailers = HeaderMap::new();
         trailers.append(ORIGIN_WITNESS, HeaderValue::from_static("forged"));
         trailers.append(ORIGIN_WITNESS, HeaderValue::from_static("duplicate"));
+        trailers.insert(
+            "x-forwarded-client-cert",
+            HeaderValue::from_static("forged"),
+        );
+        trailers.append(
+            "x-forwarded-client-cert",
+            HeaderValue::from_static("duplicate"),
+        );
+        trailers.insert("x-hop", HeaderValue::from_static("removed"));
+        trailers.insert(header::CONNECTION, HeaderValue::from_static("x-frame-hop"));
+        trailers.insert("x-frame-hop", HeaderValue::from_static("removed"));
+        trailers.insert("proxy-authorization", HeaderValue::from_static("removed"));
         trailers.insert("x-application", HeaderValue::from_static("kept"));
-        let mut body =
-            ObservedBody::new_request(Frames(VecDeque::from([Frame::trailers(trailers)])), None);
+        let mut headers = HeaderMap::new();
+        headers.append(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.append(header::CONNECTION, HeaderValue::from_static("X-Hop"));
+        let nominated = strict_connection_nominated(&headers);
+        let mut body = ObservedBody::new_request(
+            Frames(VecDeque::from([Frame::trailers(trailers)])),
+            None,
+            nominated,
+        );
         let mut cx = Context::from_waker(std::task::Waker::noop());
         let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut cx) else {
             panic!("missing trailers")
         };
         let trailers = frame.into_trailers().unwrap();
         assert!(!trailers.contains_key(ORIGIN_WITNESS));
+        assert!(!trailers.contains_key("x-forwarded-client-cert"));
+        assert!(!trailers.contains_key("x-hop"));
+        assert!(!trailers.contains_key(header::CONNECTION));
+        assert!(!trailers.contains_key("x-frame-hop"));
+        assert!(!trailers.contains_key("proxy-authorization"));
         assert_eq!(trailers["x-application"], "kept");
+    }
+    #[test]
+    fn malformed_connection_values_reject_request_trailers() {
+        for raw in [&b"x-hop,\x80"[..], &b"x-hop, bad token"[..], &b"x-hop,"[..]] {
+            let mut headers = HeaderMap::new();
+            headers.append(header::CONNECTION, HeaderValue::from_static("x-valid"));
+            headers.append(header::CONNECTION, HeaderValue::from_bytes(raw).unwrap());
+            assert!(strict_connection_nominated(&headers).is_none());
+        }
+        let mut frame = HeaderMap::new();
+        frame.insert(
+            header::CONNECTION,
+            HeaderValue::from_bytes(b"x-hop,\x80").unwrap(),
+        );
+        frame.insert("x-hop", HeaderValue::from_static("private"));
+        assert!(strict_connection_nominated(&frame).is_none());
+        sanitize_request_trailers(&mut frame, Some(&[]));
+        assert!(frame.is_empty());
+        let mut frame = HeaderMap::new();
+        frame.insert("x-hop", HeaderValue::from_static("private"));
+        sanitize_request_trailers(&mut frame, None);
+        assert!(frame.is_empty());
     }
     #[test]
     fn hop_headers_remove_nominated_fields() {
