@@ -14,8 +14,8 @@ use crate::{
     },
 };
 use contour_core::{
-    AdmissionInputs, CaptureScope, CausalEventBatch, CausalGrantKeys, PolicyKeys, SourceAssignment,
-    VerifiedCausalGrant, VerifiedPolicy,
+    AdmissionInputs, CaptureScope, CausalEventBatch, CausalGrantKeys, CausalMarkerScope,
+    CausalMarkerVerifier, PolicyKeys, SourceAssignment, VerifiedCausalGrant, VerifiedPolicy,
 };
 use std::{fmt, time::Duration};
 use time::{OffsetDateTime, UtcOffset};
@@ -95,7 +95,10 @@ fn classify_database_error(code: &str, constraint: Option<&str>, message: &str) 
         ("23505", None)
             if matches!(
                 message,
-                "nonce unavailable" | "causal batch conflict" | "causal fact conflict"
+                "nonce unavailable"
+                    | "causal batch conflict"
+                    | "causal fact conflict"
+                    | "marker binding conflict"
             ) =>
         {
             CausalError::Conflict
@@ -560,6 +563,209 @@ fn receipt(row: &Row) -> Result<CausalReceipt, CausalError> {
 
 const ISSUE_SQL: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_v1',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
 const ACCEPT_SQL: &str = "SELECT receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint,duplicate FROM contour.accept_causal_batch($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::bytea,$5::bytea,$6::bytea)";
+
+fn check_marker_inputs(
+    session: &CausalSession,
+    generation: &[u8; 32],
+    product_credential_id: &str,
+    product_leaf: &[u8; 32],
+    public_key: &[u8; 32],
+    peer: &[u8; 32],
+) -> Result<(), CausalError> {
+    if !uuid(product_credential_id)
+        || *generation == [0; 32]
+        || product_leaf == peer
+        || !session.matches_peer(peer)
+        || session.verified_remaining().is_zero()
+    {
+        return Err(CausalError::Scope);
+    }
+    let leaf_hex: String = product_leaf.iter().map(|b| format!("{b:02x}")).collect();
+    let scope = CausalMarkerScope::new(
+        &session.issue.binding.ids[0],
+        &session.issue.binding.ids[1],
+        session.epoch,
+        &leaf_hex,
+    )
+    .map_err(|_| CausalError::Scope)?;
+    CausalMarkerVerifier::new(*public_key, scope).map_err(|_| CausalError::Signature)?;
+    Ok(())
+}
+
+/// Immutable public binding receipt. It does not grant future authority, attest
+/// possession of a private key, or authorize a producer launch.
+pub struct CausalMarkerBinding {
+    public_key: [u8; 32],
+    bound_at: OffsetDateTime,
+}
+impl CausalMarkerBinding {
+    pub fn public_key(&self) -> [u8; 32] {
+        self.public_key
+    }
+    pub fn bound_at(&self) -> OffsetDateTime {
+        self.bound_at
+    }
+}
+impl fmt::Debug for CausalMarkerBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CausalMarkerBinding")
+    }
+}
+
+// An interrupted future must not leave its borrowed session usable.
+struct MarkerSessionGuard<'a> {
+    session: &'a mut CausalSession,
+    succeeded: bool,
+}
+impl Drop for MarkerSessionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.succeeded {
+            self.session.verified_until = Instant::now();
+        }
+    }
+}
+
+/// Dedicated provisioner connection. The selected credential and public key
+/// are trusted operator inputs; database state is rechecked under locks.
+pub struct CausalMarkerBinder {
+    connection: ConnectedDatabase,
+}
+impl fmt::Debug for CausalMarkerBinder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CausalMarkerBinder")
+    }
+}
+impl CausalMarkerBinder {
+    pub fn new(connection: ConnectedDatabase) -> Self {
+        Self { connection }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind(
+        &mut self,
+        session: &mut CausalSession,
+        generation: &[u8; 32],
+        product_credential_id: &str,
+        product_leaf: &[u8; 32],
+        public_key: &[u8; 32],
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+    ) -> Result<CausalMarkerBinding, CausalError> {
+        let deadline = Instant::now() + self.connection.deadline;
+        let mut session_guard = MarkerSessionGuard {
+            session,
+            succeeded: false,
+        };
+        let result = self
+            .bind_checked(
+                session_guard.session,
+                generation,
+                product_credential_id,
+                product_leaf,
+                public_key,
+                peer,
+                grant_keys,
+                policy_keys,
+                deadline,
+            )
+            .await;
+        session_guard.succeeded = result.is_ok();
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_checked(
+        &mut self,
+        session: &mut CausalSession,
+        generation: &[u8; 32],
+        product_credential_id: &str,
+        product_leaf: &[u8; 32],
+        public_key: &[u8; 32],
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<CausalMarkerBinding, CausalError> {
+        check_deadline(deadline)?;
+        check_marker_inputs(
+            session,
+            generation,
+            product_credential_id,
+            product_leaf,
+            public_key,
+            peer,
+        )?;
+        let deadline = deadline.min(session.verified_until);
+        check_deadline(deadline)?;
+        let mut guard = CancellationGuard::arm(&mut self.connection);
+        let mut committing = false;
+        let mut tightened = None;
+        let work = async {
+            let client = guard
+                .connection
+                .client
+                .as_mut()
+                .ok_or(CausalError::Database)?;
+            check_role(client, "contour_causal_provisioner")
+                .await
+                .map_err(|_| CausalError::Database)?;
+            let tx = begin(client).await?;
+            let checked = async {
+                let issue = &session.issue;
+                configure_tenant(&tx, &issue.binding.ids[0], deadline.saturating_duration_since(Instant::now())).await?;
+                let now = clock(&tx).await?;
+                let (g, _) = verify(issue, peer, grant_keys, policy_keys, now)?;
+                if g.payload_digest() != session.digest || now < session.issued || now >= session.expires || session.verified_remaining().is_zero() { return Err(CausalError::Expired); }
+                let epoch = session.epoch.to_string();
+                check_deadline(deadline)?;
+                configure_tenant(&tx, &issue.binding.ids[0], deadline.saturating_duration_since(Instant::now())).await?;
+                let row = tx.query_one("SELECT floor(extract(epoch FROM contour.bind_causal_marker_key($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::text::uuid,$5::bytea,$6::text::uuid,$7::bytea,$8::bytea))*1000000)::bigint", &[&issue.binding.ids[0], &issue.binding.ids[1], &epoch, &issue.nonce, &&generation[..], &product_credential_id, &&product_leaf[..], &&public_key[..]]).await.map_err(nonretry_error)?;
+                let bound_at = time_from_micros(row.try_get(0).map_err(|_| CausalError::Corrupt)?)?;
+                let final_start = Instant::now();
+                let final_now = clock(&tx).await?;
+                let (again, _) = verify(issue, peer, grant_keys, policy_keys, final_now)?;
+                if final_now < now || final_now < bound_at || final_now >= session.expires || again.payload_digest() != session.digest || session.verified_remaining().is_zero() { return Err(CausalError::Expired); }
+                tightened = Some(claim_freshness(session.verified_until, final_start, final_now, session.expires, Instant::now())?);
+                tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[]).await.map_err(nonretry_error)?;
+                check_deadline(deadline)?;
+                Ok::<_, CausalError>(bound_at)
+            }.await;
+            match checked {
+                Ok(bound_at) => {
+                    committing = true;
+                    tx.commit().await.map_err(|_| CausalError::OutcomeUnknown)?;
+                    empty_context(client).await?;
+                    check_deadline(deadline)?;
+                    guard.confirm();
+                    Ok(bound_at)
+                }
+                Err(e) => {
+                    tx.rollback().await.map_err(|_| CausalError::Database)?;
+                    empty_context(client)
+                        .await
+                        .map_err(|_| CausalError::Database)?;
+                    check_deadline(deadline)?;
+                    if e != CausalError::Deadline {
+                        guard.confirm();
+                    }
+                    Err(e)
+                }
+            }
+        };
+        let result = match timeout_at(deadline, work).await {
+            Ok(Err(_)) if committing => Err(CausalError::OutcomeUnknown),
+            Ok(result) => result,
+            Err(_) if committing => Err(CausalError::OutcomeUnknown),
+            Err(_) => Err(CausalError::Deadline),
+        };
+        let bound_at = result?;
+        session.verified_until =
+            commit_freshness(tightened.ok_or(CausalError::Expired)?, Instant::now())?;
+        Ok(CausalMarkerBinding {
+            public_key: *public_key,
+            bound_at,
+        })
+    }
+}
 
 /// Separate issuer connection. The peer, binding, nonce, and signing key sets
 /// are trusted operator/server inputs, never request-supplied trust anchors.
@@ -1041,6 +1247,65 @@ mod tests {
             verified_until: Instant::now(),
         }
     }
+    #[test]
+    fn marker_session_guard_invalidates_on_drop_and_preserves_success() {
+        let v = fixture();
+        let mut s = session(request(&v, "grant", "policy"));
+        s.verified_until = Instant::now() + Duration::from_secs(10);
+        {
+            let _pending = MarkerSessionGuard {
+                session: &mut s,
+                succeeded: false,
+            };
+        }
+        assert!(s.verified_remaining().is_zero());
+        s.verified_until = Instant::now() + Duration::from_secs(10);
+        {
+            let _complete = MarkerSessionGuard {
+                session: &mut s,
+                succeeded: true,
+            };
+        }
+        assert!(!s.verified_remaining().is_zero());
+    }
+
+    #[test]
+    fn marker_inputs_validate_real_key_and_exact_session_scope() {
+        let v = fixture();
+        let mut s = session(request(&v, "grant", "policy"));
+        s.verified_until = Instant::now() + Duration::from_secs(10);
+        let key = hex32(v["grant_public"].as_str().unwrap());
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], ID, &[4; 32], &key, &[3; 32]),
+            Ok(())
+        );
+        assert_eq!(
+            check_marker_inputs(&s, &[0; 32], ID, &[4; 32], &key, &[3; 32]),
+            Err(CausalError::Scope)
+        );
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], "invalid", &[4; 32], &key, &[3; 32]),
+            Err(CausalError::Scope)
+        );
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], ID, &[3; 32], &key, &[3; 32]),
+            Err(CausalError::Scope)
+        );
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], ID, &[4; 32], &[0; 32], &[3; 32]),
+            Err(CausalError::Signature)
+        );
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], ID, &[4; 32], &key, &[2; 32]),
+            Err(CausalError::Scope)
+        );
+        s.verified_until = Instant::now();
+        assert_eq!(
+            check_marker_inputs(&s, &[8; 32], ID, &[4; 32], &key, &[3; 32]),
+            Err(CausalError::Scope)
+        );
+    }
+
     #[test]
     fn freshness_uses_query_start_and_rejects_late_or_expired() {
         let start = Instant::now();
