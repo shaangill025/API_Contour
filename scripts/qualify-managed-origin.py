@@ -20,6 +20,58 @@ GLOBAL_SECONDS=3600
 BUILD_SECONDS=1800
 QUALIFY_SECONDS=1200
 
+# Closed public diagnostics: never serialize exception messages or locals.
+_PHASE='arguments'
+_ALLOWED_FRAMES={
+    'scripts/test-managed-origin-qualification.py', 'scripts/qualify-managed-origin.py',
+    'deploy/local/origin21_managed_controller.py', 'deploy/local/origin21_managed_init.py',
+    'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
+    'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
+    'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py',
+    'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
+    'scripts/qualify-origin21-onboarding.py',
+}
+_ALLOWED_TYPES={ValueError,RuntimeError,TimeoutError,AssertionError,PermissionError,FileNotFoundError,OSError,KeyError,IndexError,TypeError,AttributeError}
+
+def failure_lines(error,phase):
+    lines=[]
+    def visit(exc,role,depth):
+        if len(lines)>=16 or depth>=8: return
+        if isinstance(exc,BaseExceptionGroup):
+            for index,child in enumerate(exc.exceptions[:8]): visit(child,role if index==0 else 'cleanup',depth+1)
+            return
+        kind=type(exc).__name__ if type(exc) in _ALLOWED_TYPES else 'OtherError'
+        locations=[]; tb=exc.__traceback__; count=0
+        while tb is not None and count<128:
+            filename=tb.tb_frame.f_code.co_filename
+            for relative in _ALLOWED_FRAMES:
+                if filename==str(ROOT/relative) and 0<tb.tb_lineno<10000000:
+                    locations.append(relative+':'+str(tb.tb_lineno)); break
+            tb=tb.tb_next; count+=1
+        location=','.join(locations[-6:]) if locations else 'unavailable'
+        lines.append('managed-failure phase='+phase+' role='+role+' type='+kind+' location='+location)
+    visit(error,'primary',0)
+    return lines
+
+
+def child_failure_lines(owner):
+    """Expose only fixed diagnostic grammar from the owned bounded log."""
+    owner.verify()
+    fd=os.open(owner.path/'qualification.log',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or info.st_size>16777216: raise ValueError('invalid child diagnostic log')
+        with os.fdopen(fd,'rb',closefd=False) as stream: raw=stream.read(16777217)
+        if len(raw)>16777216: raise ValueError('child diagnostic log too large')
+    finally: os.close(fd)
+    phases='arguments|source-check|qualification-begin|initialize|topology-up|transport|positive-streams|initial-readiness|stream-capture-baseline|stream-setup|stream-client-start|stream-prefix|stream-transition|stream-release|stream-capture-wait|stream-readiness|negative-cases|lost-ack|volume-disposal'
+    kinds='ValueError|RuntimeError|TimeoutError|AssertionError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|OtherError'
+    names='|'.join(re.escape(name) for name in sorted(_ALLOWED_FRAMES))
+    location='(?:unavailable|(?:'+names+'):[1-9][0-9]{0,6}(?:,(?:'+names+'):[1-9][0-9]{0,6}){0,5})'
+    pattern=re.compile(('managed-failure phase=(?:'+phases+') role=(?:primary|cleanup) type=(?:'+kinds+') location='+location).encode())
+    return [line.decode('ascii') for line in raw.splitlines() if pattern.fullmatch(line)][:16]
+
 
 def helper():
     if any(p.is_symlink() for p in (HELPER,*HELPER.parents)) or not HELPER.is_file(): raise ValueError('qualification helper unavailable')
@@ -94,6 +146,8 @@ def cleanup_private(run,child,owner,head):
 
 
 def qualify(run,owner,token,h):
+    global _PHASE
+    _PHASE="worktree"
     head,source=h['snapshot'](run,ROOT); child=owner.path/'worktree'; tag='apicontour-origin21-build:'+token
     if os.path.lexists(child): raise ValueError('worktree path exists')
     h['require_registration'](run,ROOT,child,head,expected=False)
@@ -102,17 +156,20 @@ def qualify(run,owner,token,h):
     h['require_registration'](run,ROOT,child,head)
     if not (child/'.git').is_file() or (child/'.git').is_symlink() or h['snapshot'](run,child)!=(head,source): raise ValueError('worktree source mismatch')
     owner.write('worktree.json',h['encode']({'head':head,'path':str(child)})); owner.verify()
+    _PHASE='build'
     run(['docker','build','--pull=false','--label',h['OWNER_LABEL']+'='+token,'--label',h['HEAD_LABEL']+'='+head,'--tag',tag,'-f','deploy/local/Dockerfile','.'],cwd=child,timeout=BUILD_SECONDS,log=owner.path/'build.log')
     image=h['image_identity'](run,child,tag,token,head)
     receipt=h['encode']({'version':1,'head':head,'image_id':image,'status':'passed','owner_token':token,'tag':tag})
     path=owner.write('build-receipt.json',receipt); digest=hashlib.sha256(receipt).hexdigest()
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after build')
+    _PHASE='inner-qualification'
     run([sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest],cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
     if h['image_identity'](run,child,tag,token,head)!=image: raise ValueError('build image changed')
     h['require_registration'](run,ROOT,child,head)
     owner.verify(); run(['docker','image','rm',tag],cwd=child,timeout=30)
     if run(['docker','image','ls','-q','--no-trunc','--filter','reference='+tag],cwd=child,timeout=20).strip(): raise RuntimeError('build image remains')
+    _PHASE='private-cleanup'
     cleanup_private(run,child,owner,head)
     if run(['git','ls-files','--others','--ignored','--exclude-standard','-z'],cwd=child,timeout=15): raise RuntimeError('ignored worktree state retained')
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed before removal')
@@ -123,17 +180,27 @@ def qualify(run,owner,token,h):
 
 
 def main():
+    global _PHASE
     if len(sys.argv)!=1: raise ValueError('no arguments accepted')
     if not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in ('P_PID','WEXITED','WNOHANG','WNOWAIT')):
         print('qualification requires configured Python 3.13 with POSIX waitid/WNOWAIT',file=sys.stderr)
         raise RuntimeError('qualification runtime unavailable')
     deadline=time.monotonic()+GLOBAL_SECONDS
+    _PHASE="helper"
     h=helper(); h['require_process_primitives']()
     os.umask(0o077); folder=Path(tempfile.mkdtemp(prefix='contour-managed-origin-qualification-')).resolve(); folder.chmod(0o700)
     owner=h['OwnedDirectory'](folder); failures=[]
     try:
         run=h['Runner'](deadline,owner); qualify(run,owner,uuid.uuid4().hex,h); owner.remove()
-    except BaseException as error: failures.append(error)
+    except BaseException as error:
+        failures.append(error)
+        if _PHASE=='inner-qualification':
+            try:
+                for line in child_failure_lines(owner): print(line,file=sys.stderr,flush=True)
+            except BaseException as diagnostic_error:
+                # Diagnostic inspection never turns a failure into success.
+                failures.append(diagnostic_error)
+    _PHASE="owner-close" if not failures else _PHASE
     try: owner.close()
     except BaseException as error: failures.append(error)
     if len(failures)==1: raise failures[0]
@@ -142,6 +209,7 @@ def main():
 
 if __name__=='__main__':
     try: main(); print('managed Origin qualification passed')
-    except BaseException:
+    except BaseException as error:
+        for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)
         print('managed Origin qualification failed; owned state retained',file=sys.stderr)
         raise SystemExit(1) from None

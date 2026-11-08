@@ -93,4 +93,44 @@ class ManagedWrapperTests(unittest.TestCase):
     def test_budgets_are_separate_from_legacy(self):
         self.assertEqual((wrapper.GLOBAL_SECONDS,wrapper.BUILD_SECONDS,wrapper.QUALIFY_SECONDS),(3600,1800,1200))
 
+
+class DiagnosticTests(unittest.TestCase):
+    def test_bad_cli_arguments_report_type_and_phase_without_argument(self):
+        import subprocess,sys
+        result=subprocess.run([sys.executable,'-B',str(ROOT/'scripts/qualify-managed-origin.py'),'secret-argument'],capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('managed-failure phase=arguments role=primary type=ValueError',result.stderr)
+        self.assertNotIn('secret-argument',result.stderr)
+    def test_inner_bad_arguments_report_type_without_value(self):
+        import subprocess,sys
+        result=subprocess.run([sys.executable,'-B',str(ROOT/'scripts/test-managed-origin-qualification.py'),'secret-argument'],capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('managed-failure phase=arguments role=primary type=ValueError',result.stderr)
+        self.assertNotIn('secret-argument',result.stderr)
+    def test_nested_failures_are_bounded_and_redacted(self):
+        class SecretError(Exception): pass
+        error=BaseExceptionGroup('secret group',[ValueError('secret primary'),BaseExceptionGroup('secret nested',[OSError('secret cleanup'),SecretError('secret unknown')])]+[RuntimeError('secret')]*40)
+        lines=wrapper.failure_lines(error,'build')
+        self.assertLessEqual(len(lines),16)
+        self.assertTrue(any('role=primary type=ValueError' in line for line in lines))
+        self.assertTrue(any('role=cleanup type=OSError' in line for line in lines))
+        self.assertTrue(any('type=OtherError' in line for line in lines))
+        self.assertNotIn('secret',' '.join(lines))
+    def test_private_log_accepts_only_closed_child_diagnostics(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            owner=mock.Mock(); owner.path=Path(directory)
+            (owner.path/'qualification.log').write_bytes(b'managed-failure phase=stream-prefix role=primary type=TimeoutError location=scripts/test-managed-origin-qualification.py:123\nmanaged-failure phase=secret role=primary type=ValueError location=unavailable\nsecret data\n')
+            self.assertEqual(wrapper.child_failure_lines(owner),['managed-failure phase=stream-prefix role=primary type=TimeoutError location=scripts/test-managed-origin-qualification.py:123'])
+
+class ProgressTests(unittest.TestCase):
+    def test_progress_is_closed_and_flushed_without_untrusted_value(self):
+        import contextlib,io,runpy
+        inner=runpy.run_path(str(ROOT/'scripts/test-managed-origin-qualification.py'))
+        output=io.StringIO()
+        with contextlib.redirect_stderr(output):
+            inner['_set_phase']('initial-readiness')
+            with self.assertRaises(ValueError): inner['_set_phase']('secret-value')
+        self.assertEqual(output.getvalue(),'managed-progress phase=initial-readiness\n')
+
 if __name__=='__main__': unittest.main()

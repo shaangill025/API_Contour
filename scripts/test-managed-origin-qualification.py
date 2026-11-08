@@ -24,6 +24,49 @@ SOURCE='scripts/test-managed-origin-qualification.py'
 M5_HELPER='scripts/test-managed-native-edge.py'
 SHELL='exec 3<&0; /usr/local/bin/node -e "$1" fixture-client "$2" "$3" <&3 3<&- & p=$!; exec 3<&-; printf "PID %s\\n" "$p"; wait "$p"'
 
+# Closed public diagnostics: never serialize exception messages or locals.
+_PHASE='arguments'
+_ALLOWED_FRAMES={
+    'scripts/test-managed-origin-qualification.py', 'scripts/qualify-managed-origin.py',
+    'deploy/local/origin21_managed_controller.py', 'deploy/local/origin21_managed_init.py',
+    'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
+    'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
+    'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py',
+    'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
+    'scripts/qualify-origin21-onboarding.py',
+}
+_ALLOWED_TYPES={ValueError,RuntimeError,TimeoutError,AssertionError,PermissionError,FileNotFoundError,OSError,KeyError,IndexError,TypeError,AttributeError}
+
+_PROGRESS_PHASES=('initial-readiness', 'initialize', 'lost-ack', 'negative-cases', 'positive-streams', 'qualification-begin', 'source-check', 'stream-capture-baseline', 'stream-capture-wait', 'stream-client-start', 'stream-prefix', 'stream-readiness', 'stream-release', 'stream-setup', 'stream-transition', 'topology-up', 'transport', 'volume-disposal')
+
+def _set_phase(phase):
+    global _PHASE
+    if phase not in _PROGRESS_PHASES: raise ValueError('invalid diagnostic phase')
+    _PHASE=phase
+    print('managed-progress phase='+phase,file=sys.stderr,flush=True)
+
+
+def failure_lines(error,phase):
+    lines=[]
+    def visit(exc,role,depth):
+        if len(lines)>=16 or depth>=8: return
+        if isinstance(exc,BaseExceptionGroup):
+            for index,child in enumerate(exc.exceptions[:8]): visit(child,role if index==0 else 'cleanup',depth+1)
+            return
+        kind=type(exc).__name__ if type(exc) in _ALLOWED_TYPES else 'OtherError'
+        locations=[]; tb=exc.__traceback__; count=0
+        while tb is not None and count<128:
+            filename=tb.tb_frame.f_code.co_filename
+            for relative in _ALLOWED_FRAMES:
+                if filename==str(ROOT/relative) and 0<tb.tb_lineno<10000000:
+                    locations.append(relative+':'+str(tb.tb_lineno)); break
+            tb=tb.tb_next; count+=1
+        location=','.join(locations[-6:]) if locations else 'unavailable'
+        lines.append('managed-failure phase='+phase+' role='+role+' type='+kind+' location='+location)
+    visit(error,'primary',0)
+    return lines
+
 
 def _source_guard():
     required={SOURCE,M5_HELPER,'deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
@@ -87,12 +130,15 @@ def _wait_capture(transport,before,descriptor,evidence,revision,index):
 
 
 def _stream(mode,index,transition,destination,descriptor,helper,proof):
+    global _PHASE
+    _set_phase('stream-setup')
     if (mode,index,transition) not in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')): raise ValueError('unsupported qualification stream')
     nonce=secrets.token_hex(16); source=(FIXTURE/'client.js').read_text(); replica=descriptor['container_id']
     args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',SHELL,'fixture',source,mode,nonce]
     monitor=helper['Monitor'](args); pid=None; completed=False
     try:
         deadline=time.monotonic()+15
+        _set_phase('stream-client-start')
         while time.monotonic()<deadline:
             lines=monitor.lines()
             if lines:
@@ -102,14 +148,17 @@ def _stream(mode,index,transition,destination,descriptor,helper,proof):
             if monitor.proc.poll() is not None: raise RuntimeError('qualification client exited')
             time.sleep(.02)
         if pid is None: raise TimeoutError('qualification remote identity deadline')
+        _set_phase('stream-prefix')
         if mode=='request': monitor.wait(b'CLIENT_WRITTEN'); _wait_status(destination,nonce,b'REQUEST_PREFIX')
         else: monitor.wait(b'RESPONSE_PREFIX'); _wait_status(destination,nonce,b'RESPONSE_PREFIX')
+        _set_phase('stream-transition')
         with controller.open_edge(qualification=proof) as owner:
             before=owner._load()['current_commitment']['cert_sha256']
             if transition=='renew': owner.renew()
             else: owner.rollback()
             after=owner._load()['current_commitment']['cert_sha256']
             if before==after: raise RuntimeError('qualification fingerprint unchanged')
+            _set_phase('stream-release')
             if mode=='request': monitor.send('RELEASE_REQUEST')
             else: _control(destination,nonce,'release')
             monitor.wait(b'PASS')
@@ -138,14 +187,19 @@ def qualify_positive_streams(transport,proof):
     if type(transport) is not origin21_transport.ManagedTransport or type(proof) is not origin21_managed_qualification.OwnedManagedQualification: raise ValueError('owned qualification required')
     proof.verify(); source=_source_guard(); helper=_helper(); transport.verify(); destination=_destination()
     original=_products(proof); expected=_commitments()
+    global _PHASE
+    _set_phase('initial-readiness')
     origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport)
     transitions=[]
     for mode,index,transition in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')):
+        _set_phase('stream-capture-baseline')
         before={row[0] for row in origin21_ready.snapshot(transport.admin,selected=profiles.MANAGED)}
         revision=products.require_current_policy(transport.admin,transport.sensitive,selected=profiles.MANAGED)
         transitions.append(_stream(mode,index,transition,destination,original[index-1],helper,proof))
+        _set_phase('stream-capture-wait')
         _wait_capture(transport,before,original[index-1],expected[index-1],revision,index)
         if _products(proof)!=original: raise ValueError('qualification product generation changed')
+        _set_phase('stream-readiness')
         origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport)
         if _source_guard()!=source: raise ValueError('qualification source changed')
     for first,second in ((transitions[0],transitions[1]),(transitions[2],transitions[3])):
@@ -308,16 +362,26 @@ def qualify_wrong_name_and_pending(proof):
 def main(argv):
     """Run using an exact clean worktree and its already verified build receipt."""
     from deploy.local import origin21_managed_qualification as qualification,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
+    global _PHASE
     if len(argv)!=4: raise ValueError('build evidence required')
     image,head,receipt,digest=argv
+    _set_phase('source-check')
     source=_source_guard()
+    _set_phase('qualification-begin')
     with qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest) as proof:
+        _set_phase('initialize')
         path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
+        _set_phase('topology-up')
         cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
+        _set_phase('transport')
         transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
+        _set_phase('positive-streams')
         positive=qualify_positive_streams(transport,proof)
+        _set_phase('negative-cases')
         negative=qualify_wrong_name_and_pending(proof)
+        _set_phase('lost-ack')
         unknown=qualify_lost_publication_ack(proof)
+        _set_phase('volume-disposal')
         disposal.dispose_synthetic_volume(proof)
         if _source_guard()!=source: raise ValueError('qualification source changed')
         return {'positive':positive,'negative':negative,'unknown':unknown,'cleanup':True}
@@ -326,6 +390,7 @@ def main(argv):
 if __name__=='__main__':
     try:
         main(sys.argv[1:]); print('managed Origin qualification passed')
-    except BaseException:
+    except BaseException as error:
+        for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)
         print('managed Origin qualification failed; owned state retained',file=sys.stderr)
         raise SystemExit(1) from None
