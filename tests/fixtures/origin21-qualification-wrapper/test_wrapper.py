@@ -117,6 +117,25 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.owned.remove()
         self.assertEqual(sentinel.read_text(),'foreign'); self.assertFalse((self.owner/'intent.json').exists())
 
+    def test_wait_exit_rejects_already_exited_after_deadline(self):
+        observed=type('Exit',(),{'si_code':os.CLD_EXITED,'si_status':0})()
+        with mock.patch.object(w,'observe_exit',return_value=observed) as inspect,mock.patch.object(w.time,'monotonic',return_value=2):
+            with self.assertRaises(TimeoutError):w.wait_exit(object(),1)
+            inspect.assert_not_called()
+        with mock.patch.object(w,'observe_exit',return_value=observed),mock.patch.object(w.time,'monotonic',side_effect=[0,2]):
+            with self.assertRaises(TimeoutError):w.wait_exit(object(),1)
+
+    def test_leader_is_unreaped_until_the_group_signal(self):
+        original_popen=subprocess.Popen; original_killpg=os.killpg; processes=[]
+        def popen(*args,**kw):
+            child=original_popen(*args,**kw);processes.append(child);return child
+        def killpg(group,signal_number):
+            if signal_number==signal.SIGKILL and group==processes[0].pid:
+                self.assertIsNone(processes[0].returncode,'leader was reaped before group signal')
+            return original_killpg(group,signal_number)
+        with mock.patch.object(w.subprocess,'Popen',side_effect=popen), mock.patch.object(w.os,'killpg',side_effect=killpg):
+            self.assertEqual(w.Runner(time.monotonic()+10,self.owned)([sys.executable,'-c',"print('ok')"],cwd=self.root,timeout=3),b'ok\n')
+
     def test_leader_exit_descendant_holding_pipe_is_killed(self):
         child_code="import time;time.sleep(60)"
         parent_code="import os,subprocess,sys;subprocess.Popen([sys.executable,'-c',sys.argv[1]]);print(os.getpgrp(),flush=True)"
@@ -127,6 +146,40 @@ class WrapperTests(unittest.TestCase):
         self.assertLess(time.monotonic()-start,7)
         group=int((self.owner/'build.log').read_bytes().splitlines()[0])
         with self.assertRaises(ProcessLookupError): os.killpg(group,0)
+
+    def test_exited_permission_requires_eventual_esrch_and_only_one_group_stop(self):
+        original=os.killpg;calls=[];denied=False
+        def killpg(group,number):
+            nonlocal denied
+            calls.append(number)
+            if number==signal.SIGKILL: raise PermissionError('zombie observation')
+            if not denied: denied=True;raise PermissionError('transient absence observation')
+            return original(group,number)
+        with mock.patch.object(w.os,'killpg',side_effect=killpg):
+            self.assertEqual(w.Runner(time.monotonic()+5,self.owned)([sys.executable,'-c',"print('ok')"],cwd=self.root,timeout=2),b'ok\n')
+        self.assertEqual(calls.count(signal.SIGKILL),1);self.assertTrue(denied)
+
+    def test_observed_extra_member_is_failure_even_when_output_and_exit_are_valid(self):
+        with mock.patch.object(w,'group_members',side_effect=lambda group,deadline:{group,group+1}):
+            with self.assertRaisesRegex(RuntimeError,'descendant survived'):
+                w.Runner(time.monotonic()+5,self.owned)([sys.executable,'-c',"print('ok')"],cwd=self.root,timeout=2)
+
+    def test_inspection_failure_still_stops_owned_group_before_reap(self):
+        original=os.killpg;stops=[]
+        def killpg(group,number):
+            if number==signal.SIGKILL:stops.append(group)
+            return original(group,number)
+        with mock.patch.object(w,'group_members',side_effect=ValueError('untrusted observation')),mock.patch.object(w.os,'killpg',side_effect=killpg):
+            with self.assertRaisesRegex(ValueError,'untrusted observation'):
+                w.Runner(time.monotonic()+5,self.owned)([sys.executable,'-c','pass'],cwd=self.root,timeout=2)
+        self.assertEqual(len(stops),1)
+
+    def test_primary_and_persistent_permission_failures_are_both_retained(self):
+        with mock.patch.object(w.os,'killpg',side_effect=PermissionError('denied')):
+            with self.assertRaises(BaseExceptionGroup) as caught:
+                w.Runner(time.monotonic()+.3,self.owned)([sys.executable,'-c','raise SystemExit(3)'],cwd=self.root,timeout=.2)
+        self.assertTrue(any(isinstance(e,RuntimeError) for e in caught.exception.exceptions))
+        self.assertTrue(any(isinstance(e,PermissionError) for e in caught.exception.exceptions))
 
     def test_denied_group_signal_is_failure(self):
         runner=w.Runner(time.monotonic()+5,self.owned)

@@ -88,6 +88,77 @@ def public_failure_locations(error,depth=0):
     return result[-8:]
 
 
+def observe_exit(process):
+    # WNOWAIT retains our child identity through the one group-stop attempt.
+    return os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+
+
+def wait_exit(process,deadline):
+    while True:
+        if time.monotonic()>=deadline: raise TimeoutError('process deadline')
+        observed=observe_exit(process)
+        if time.monotonic()>=deadline: raise TimeoutError('process deadline')
+        if observed is not None:
+            if observed.si_code==os.CLD_EXITED: return observed.si_status
+            if observed.si_code in (os.CLD_KILLED,os.CLD_DUMPED): return -observed.si_status
+            raise RuntimeError('unknown child exit observation')
+        left=deadline-time.monotonic()
+        if left<=0: raise TimeoutError('process deadline')
+        time.sleep(min(.025,left))
+
+
+def group_members(group,deadline):
+    """Bounded observation, not an atomic containment or no-fork attestation."""
+    left=deadline-time.monotonic()
+    if left<=0: raise TimeoutError('group inspection deadline')
+    end=min(deadline,time.monotonic()+1)
+    process=subprocess.Popen(['/bin/ps','-axo','pid=,pgid=,stat='],stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
+        env={'PATH':os.defpath,'LC_ALL':'C'})
+    sel=selectors.DefaultSelector();data=bytearray();failures=[]
+    try:
+        for name,pipe in (('out',process.stdout),('err',process.stderr)):
+            os.set_blocking(pipe.fileno(),False);sel.register(pipe,selectors.EVENT_READ,name)
+        while sel.get_map():
+            left=end-time.monotonic()
+            if left<=0: raise TimeoutError('group inspection deadline')
+            for key,_ in sel.select(left):
+                try: chunk=os.read(key.fd,min(65536,1048576-len(data)+1))
+                except BlockingIOError: continue
+                if not chunk: sel.unregister(key.fileobj);continue
+                if key.data=='err': raise RuntimeError('group inspection stderr')
+                data.extend(chunk)
+                if len(data)>1048576: raise RuntimeError('group inspection overflow')
+        left=end-time.monotonic()
+        if left<=0: raise TimeoutError('group inspection deadline')
+        if process.wait(timeout=left)!=0: raise RuntimeError('group inspection failed')
+        if time.monotonic()>=end: raise TimeoutError('group inspection deadline')
+    except BaseException as error: failures.append(error)
+    finally:
+        try: sel.close()
+        except BaseException as error: failures.append(error)
+        try:
+            if process.returncode is None: process.kill()
+        except BaseException as error: failures.append(error)
+        try: process.wait(timeout=max(0,deadline-time.monotonic()))
+        except BaseException as error: failures.append(error)
+        for pipe in (process.stdout,process.stderr):
+            try: pipe.close()
+            except BaseException as error: failures.append(error)
+    if len(failures)==1: raise failures[0]
+    if failures: raise BaseExceptionGroup('group inspection and cleanup failures',failures)
+    members=set();seen=set()
+    for line in data.splitlines():
+        fields=line.split()
+        if len(fields)!=3 or not all(re.fullmatch(rb'[0-9]{1,10}',v) for v in fields[:2]) or not re.fullmatch(rb'[A-Za-z<+]{1,24}',fields[2]): raise ValueError('group inspection invalid')
+        pid,pgid=map(int,fields[:2])
+        if pid in seen: raise ValueError('duplicate process observation')
+        seen.add(pid)
+        if pgid==group: members.add(pid)
+    if group not in members: raise RuntimeError('owned leader observation missing')
+    return members
+
+
 class Runner:
     def __init__(self,deadline,owner=None): self.deadline=deadline; self.owner=owner
     def __call__(self,args,*,cwd,timeout,log=None):
@@ -112,9 +183,7 @@ class Runner:
                     count+=len(chunk)
                     if count>OUTPUT_LIMIT: raise RuntimeError('process output bound')
                     chunks[key.data].extend(chunk)
-            left=end-time.monotonic()
-            if left<=0: raise TimeoutError('process deadline')
-            status=process.wait(timeout=left)
+            status=wait_exit(process,end)
             if status:
                 if list(args[:3])==[sys.executable,'scripts/test-origin21-onboarding.py','--full-capture']:
                     for line in public_child_failure_lines(bytes(chunks['stdout'])+b'\n'+bytes(chunks['stderr'])): print(line,file=sys.stderr,flush=True)
@@ -122,18 +191,28 @@ class Runner:
         except BaseException as error: failures.append(error)
         finally:
             sel.close()
+            deadline=min(time.monotonic()+5,self.deadline)
+            exited=False
+            try: exited=observe_exit(process) is not None
+            except BaseException as error: failures.append(error)
+            if exited:
+                try:
+                    if group_members(process.pid,deadline)!={process.pid}: raise RuntimeError('descendant survived leader')
+                except BaseException as error: failures.append(error)
             try:
-                live=process.poll() is None
-                try: os.killpg(process.pid,signal.SIGKILL); signalled=True
-                except ProcessLookupError: signalled=False
-                if process.poll() is None: process.wait(timeout=max(0,min(5,self.deadline-time.monotonic())))
-                deadline=min(time.monotonic()+5,self.deadline)
+                try: os.killpg(process.pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                except PermissionError:
+                    if not exited: raise
+                    # Darwin may deny a zombie-only group; only post-reap ESRCH proves absence.
+                process.wait(timeout=max(0,deadline-time.monotonic()))
                 while True:
                     try: os.killpg(process.pid,0)
                     except ProcessLookupError: break
+                    except PermissionError:
+                        if time.monotonic()>=deadline: raise
                     if time.monotonic()>=deadline: raise RuntimeError('process group remains')
-                    time.sleep(.025)
-                if signalled and not live and not failures: raise RuntimeError('descendant survived leader')
+                    time.sleep(min(.025,max(0,deadline-time.monotonic())))
             except BaseException as error: failures.append(error)
             for pipe in (process.stdout,process.stderr):
                 try: pipe.close()
