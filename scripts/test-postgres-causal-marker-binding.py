@@ -28,7 +28,8 @@ L = 'f9000000-0000-4000-8000-000000000001'
 CASES = ('basic','wrong_identity','quota','rollback','race','export_revoked','credential_revoked','lifecycle_closed','selected_revoked_other_live','superseded','expired','product_leaf_lock','export_leaf_lock','disabled_duplicate','policy_drift_duplicate','delayed_insert')
 EXTRAS = ('db/opt-in-migrations/0023_causal_marker_bindings.sql', 'db/tests/causal_marker_bindings.sql',
           'scripts/test-postgres-causal-marker-binding.py','tests/fixtures/causal-marker-binding/test_driver.py')
-SOURCES = GEN['SOURCES'] + EXTRAS
+SOURCE_ONLY_MIGRATIONS = ('db/opt-in-migrations/0024_causal_live_profile.sql',)
+SOURCES = GEN['SOURCES'] + EXTRAS + SOURCE_ONLY_MIGRATIONS
 
 
 def checked_source(name):
@@ -42,7 +43,7 @@ def checked_source(name):
 def snapshot():
     for pattern,expected in (('db/provision_*.sql',{'db/provision_'+x+'.sql' for x in GEN['PROVISIONS']}),
        ('db/migrations/*.sql',{'db/migrations/'+x+'.sql' for x in GEN['MIGRATIONS']}),
-       ('db/opt-in-migrations/*.sql',{'db/opt-in-migrations/'+x+'.sql' for x in GEN['OPT_INS']}|{EXTRAS[0]})):
+       ('db/opt-in-migrations/*.sql',{'db/opt-in-migrations/'+x+'.sql' for x in GEN['OPT_INS']}|{EXTRAS[0]}|set(SOURCE_ONLY_MIGRATIONS))):
         if {str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)} != expected: raise ValueError('source list changed')
     return {p:hashlib.sha256(checked_source(p)).hexdigest() for p in SOURCES}
 

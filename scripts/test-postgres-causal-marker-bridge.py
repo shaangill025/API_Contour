@@ -17,6 +17,7 @@ import uuid
 
 ROOT=Path(__file__).absolute().parent.parent
 OPT=('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs','0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox','0021_origin_admission','0022_causal_generation','0023_causal_marker_bindings')
+EXTRA_SOURCE_MIGRATIONS=('0024_causal_live_profile',)
 EXAMPLE=ROOT/'crates/contour-postgres/examples/causal_marker_binding_probe.rs'
 
 def safe(path):
@@ -36,8 +37,8 @@ def helpers():
 def snapshot(bridge):
     paths=set(bridge['source_paths']())
     paths.update([EXAMPLE, ROOT/'scripts/test-postgres-causal-marker-bridge.py',ROOT/'tests/fixtures/causal-marker-bridge/test_driver.py',ROOT/'scripts/test-postgres-causal-https.py',ROOT/'tests/fixtures/causal-https/test_https_driver.py'])
-    paths.update(ROOT/'db/opt-in-migrations'/(n+'.sql') for n in OPT)
-    if set((ROOT/'db/opt-in-migrations').glob('*.sql'))!={ROOT/'db/opt-in-migrations'/(n+'.sql') for n in OPT}: raise ValueError('migration list changed')
+    paths.update(ROOT/'db/opt-in-migrations'/(n+'.sql') for n in OPT + EXTRA_SOURCE_MIGRATIONS)
+    if set((ROOT/'db/opt-in-migrations').glob('*.sql'))!={ROOT/'db/opt-in-migrations'/(n+'.sql') for n in OPT + EXTRA_SOURCE_MIGRATIONS}: raise ValueError('migration list changed')
     return {str(path):bridge['digest_file'](safe(path)) for path in sorted(paths)}
 
 def artifact(lines,target,bridge):

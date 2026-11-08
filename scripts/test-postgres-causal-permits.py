@@ -22,7 +22,7 @@ import uuid
 
 ROOT=Path(__file__).absolute().parent.parent
 OPT=('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs','0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox','0021_origin_admission','0022_causal_generation')
-EXTRA_SOURCE_MIGRATIONS=('0023_causal_marker_bindings',)
+EXTRA_SOURCE_MIGRATIONS=('0023_causal_marker_bindings','0024_causal_live_profile')
 EXAMPLE=ROOT/'crates/contour-ingress/examples/causal_permit_probe.rs'
 NODE=ROOT/'collectors/nodered/error-integration/private-owner-permit.js'
 MARKER=ROOT/'collectors/nodered/error-integration/causal-marker.js'
