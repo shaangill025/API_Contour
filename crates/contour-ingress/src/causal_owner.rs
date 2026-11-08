@@ -110,6 +110,21 @@ pub struct BoundLaunchRecord {
     identity: [u8; 32],
     record: Vec<u8>,
 }
+impl BoundLaunchRecord {
+    pub(crate) fn checked(
+        slot: [u8; 32],
+        launcher: [u8; 32],
+        identity: [u8; 32],
+        record: Vec<u8>,
+    ) -> Self {
+        Self {
+            slot,
+            launcher,
+            identity,
+            record,
+        }
+    }
+}
 impl fmt::Debug for BoundLaunchRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("BoundLaunchRecord")

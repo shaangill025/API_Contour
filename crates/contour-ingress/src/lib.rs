@@ -1,6 +1,8 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
 mod authority;
 #[cfg(unix)]
+mod causal_launch_bound;
+#[cfg(unix)]
 mod causal_launch_files;
 #[cfg(unix)]
 mod causal_launch_inspect;
@@ -17,6 +19,8 @@ mod causal_service;
 pub mod gateway;
 mod pool;
 mod service;
+#[cfg(unix)]
+pub use causal_launch_bound::{BoundLaunchError, BoundLaunchInputs, BoundTransfer};
 #[cfg(unix)]
 pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
 #[cfg(unix)]

@@ -92,6 +92,18 @@ fn issuer_sql_error(error: Error) -> CausalError {
         classify_issuer_error(db.code().code(), db.constraint(), db.message())
     })
 }
+fn classify_marker_binding_error(
+    code: &str,
+    constraint: Option<&str>,
+    message: &str,
+) -> CausalError {
+    classify_issuer_error(code, constraint, message)
+}
+fn marker_binding_sql_error(error: Error) -> CausalError {
+    error.as_db_error().map_or(CausalError::Database, |db| {
+        classify_marker_binding_error(db.code().code(), db.constraint(), db.message())
+    })
+}
 fn nonretry_error(error: Error) -> CausalError {
     match db_error(error) {
         CausalError::Busy => CausalError::Database,
@@ -354,6 +366,10 @@ impl CausalWireProfile503<'_> {
     }
 }
 impl CausalSession {
+    /// Whether this session is permitted to enter the legacy intent-only path.
+    pub fn is_legacy_intent_profile(&self) -> bool {
+        self.profile == SessionProfile::Legacy501 && !self.verified_remaining().is_zero()
+    }
     /// Candidate profile data tied to this live session, if still fresh.
     pub fn wire_profile_503(&self) -> Option<CausalWireProfile503<'_>> {
         (self.profile == SessionProfile::Candidate503 && !self.verified_remaining().is_zero())
@@ -831,7 +847,7 @@ impl CausalMarkerBinder {
                 let epoch = session.epoch.to_string();
                 check_deadline(deadline)?;
                 configure_tenant(&tx, &issue.binding.ids[0], deadline.saturating_duration_since(Instant::now())).await?;
-                let row = tx.query_one("SELECT floor(extract(epoch FROM contour.bind_causal_marker_key($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::text::uuid,$5::bytea,$6::text::uuid,$7::bytea,$8::bytea))*1000000)::bigint", &[&issue.binding.ids[0], &issue.binding.ids[1], &epoch, &issue.nonce, &&generation[..], &product_credential_id, &&product_leaf[..], &&public_key[..]]).await.map_err(nonretry_error)?;
+                let row = tx.query_one("SELECT floor(extract(epoch FROM contour.bind_causal_marker_key($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::text::uuid,$5::bytea,$6::text::uuid,$7::bytea,$8::bytea))*1000000)::bigint", &[&issue.binding.ids[0], &issue.binding.ids[1], &epoch, &issue.nonce, &&generation[..], &product_credential_id, &&product_leaf[..], &&public_key[..]]).await.map_err(marker_binding_sql_error)?;
                 let bound_at = time_from_micros(row.try_get(0).map_err(|_| CausalError::Corrupt)?)?;
                 let final_start = Instant::now();
                 let final_now = clock(&tx).await?;
@@ -1535,6 +1551,7 @@ mod tests {
         s.profile = SessionProfile::from_verified(&grant).unwrap();
         let ceiling = Instant::now() + Duration::from_secs(10);
         s.verified_until = ceiling;
+        assert!(!s.is_legacy_intent_profile());
         {
             let view = s.wire_profile_503().unwrap();
             assert_eq!(
@@ -1572,6 +1589,9 @@ mod tests {
         old_session.profile = SessionProfile::from_verified(&old).unwrap();
         old_session.verified_until = ceiling;
         assert!(old_session.wire_profile_503().is_none());
+        assert!(old_session.is_legacy_intent_profile());
+        old_session.verified_until = Instant::now();
+        assert!(!old_session.is_legacy_intent_profile());
     }
     #[test]
     fn profile_authority_is_a_closed_pair_mapping() {
@@ -1881,6 +1901,43 @@ mod tests {
             checked_admission(&s, &[3; 32], b"not-json", &g, &p, s.expires).unwrap_err(),
             CausalError::Expired
         );
+    }
+    #[test]
+    fn marker_binding_busy_requires_exact_gate_error() {
+        for msg in [
+            "origin gate busy",
+            "credential gate busy",
+            "collector gate busy",
+        ] {
+            assert_eq!(
+                classify_marker_binding_error("40001", None, msg),
+                CausalError::Busy
+            );
+            assert_eq!(
+                classify_marker_binding_error("40001", Some("other"), msg),
+                CausalError::Database
+            );
+        }
+        for code in ["55P03", "57014", "25P03"] {
+            assert_eq!(
+                classify_marker_binding_error(code, None, "origin gate busy"),
+                CausalError::Deadline
+            );
+        }
+        assert_eq!(
+            classify_marker_binding_error("23514", None, "origin gate busy"),
+            CausalError::Scope
+        );
+        for msg in [
+            "origin operation requires no prior advisory lock",
+            "serialization failure",
+            "origin gate busy ",
+        ] {
+            assert_eq!(
+                classify_marker_binding_error("40001", None, msg),
+                CausalError::Database
+            );
+        }
     }
     #[test]
     fn issuer_busy_requires_exact_gate_error() {
