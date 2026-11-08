@@ -424,7 +424,9 @@ def failure_lines(error,phase='primary'):
         name=Path(tb.tb_frame.f_code.co_filename).name
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',name): name='unknown'
         locations.append(f'{name}:{tb.tb_lineno}'); tb=tb.tb_next
-    return [f'FAIL {phase} {kind} {loc}' for loc in (locations or ['unknown:0'])]
+    state=re.fullmatch(r'fixture command failed SQLSTATE ([0-9A-Z]{5})',str(error)) if type(error) is RuntimeError else None
+    detail=(' SQLSTATE '+state.group(1)) if state else ''
+    return [f'FAIL {phase} {kind} {loc}{detail}' for loc in (locations or ['unknown:0'])]
 
 
 if __name__=='__main__':

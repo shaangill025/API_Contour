@@ -63,6 +63,31 @@ class OwnedDirectory:
 def encode(value): return json.dumps(value,sort_keys=True,separators=(',',':')).encode('ascii')
 
 
+def public_child_failure_lines(data):
+    """Allow only the driver's closed diagnostic grammar, never raw child output."""
+    phases='fixture-setup|select-one|continuity-guard|blocked-transaction|local-death|lost-ack|foreign-tcp|fixture-final-check|full-capture|owned-cleanup'
+    kinds='AssertionError|RuntimeError|TimeoutError|ValueError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|ExceptionGroup|BaseExceptionGroup|CleanupFailure'
+    location=r'(?:test-origin21-onboarding\.py|origin21_sql_runner\.py|origin21_transport\.py):[1-9][0-9]{0,6}'
+    pattern=rb'fixture failure phase=(?:'+phases.encode()+rb') type=(?:'+kinds.encode()+rb')(?: location=(?:unavailable|'+location.encode()+rb'(?:,'+location.encode()+rb'){0,5}))?'
+    result=[]
+    for line in data.splitlines():
+        if re.fullmatch(pattern,line) and line not in result:
+            result.append(line)
+            if len(result)==8: break
+    return [line.decode('ascii') for line in result]
+
+
+def public_failure_locations(error,depth=0):
+    if depth>=8: return []
+    if isinstance(error,BaseExceptionGroup):
+        return [line for child in error.exceptions[:8] for line in public_failure_locations(child,depth+1)][:16]
+    result=[];tb=error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename==__file__: result.append('FAIL: Origin21 wrapper location=qualify-origin21-onboarding.py:'+str(tb.tb_lineno))
+        tb=tb.tb_next
+    return result[-8:]
+
+
 class Runner:
     def __init__(self,deadline,owner=None): self.deadline=deadline; self.owner=owner
     def __call__(self,args,*,cwd,timeout,log=None):
@@ -90,7 +115,10 @@ class Runner:
             left=end-time.monotonic()
             if left<=0: raise TimeoutError('process deadline')
             status=process.wait(timeout=left)
-            if status: raise RuntimeError('process failed')
+            if status:
+                if list(args[:3])==[sys.executable,'scripts/test-origin21-onboarding.py','--full-capture']:
+                    for line in public_child_failure_lines(bytes(chunks['stdout'])+b'\n'+bytes(chunks['stderr'])): print(line,file=sys.stderr,flush=True)
+                raise RuntimeError('process failed')
         except BaseException as error: failures.append(error)
         finally:
             sel.close()
@@ -229,6 +257,7 @@ def main():
 
 if __name__=='__main__':
     try: main(); print('PASS: Origin21 full owned qualification')
-    except BaseException:
+    except BaseException as error:
+        for line in public_failure_locations(error): print(line,file=sys.stderr)
         print('FAIL: Origin21 qualification; private state retained',file=sys.stderr)
         raise SystemExit(1) from None

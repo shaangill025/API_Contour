@@ -180,6 +180,7 @@ class NativeReplicaPeer:
         for dest,source in self.mounts.items():
             matches=[m for m in mounts if m.get('Destination')==dest]
             if len(matches)!=1 or matches[0].get('Type')!='bind' or matches[0].get('Source')!=source or matches[0].get('RW') is not False: raise ValueError('replica mounts changed')
+        lines[7]=json.dumps(sorted(mounts,key=lambda m:m['Destination']),sort_keys=True,separators=(',',':')).encode('ascii')
         return lines
 
     def _envoy_and_topology(self,deadline,expected_started=None,created=False):
@@ -200,6 +201,7 @@ class NativeReplicaPeer:
         network=next(iter(networks.values()))
         if type(network) is not dict or network.get('NetworkID') not in (('',self.network_id) if created else (self.network_id,)) or 'pilot-gateway' not in (network.get('Aliases') or []): raise ValueError('envoy network changed')
         if ports is not None and (type(ports) is not dict or any(v for v in ports.values())): raise ValueError('envoy publishes ports')
+        lines[9]=json.dumps(sorted(mounts,key=lambda m:m['Destination']),sort_keys=True,separators=(',',':')).encode('ascii')
         if created: return lines,()
         members=json.loads(self._invoke(['docker','network','inspect','--format','{{json .Containers}}',self.network_id],deadline))
         if type(members) is not dict or not 2<=len(members)<=32 or self.cid not in members or self.envoy_cid not in members: raise ValueError('network membership changed')

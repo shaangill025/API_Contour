@@ -130,6 +130,30 @@ class ManagedEdgeTests(unittest.TestCase):
         with self.native_owner(peer) as owner:
             self.assertIsNotNone(owner._load()['pending'])
 
+    def test_live_observation_accepts_mount_order_only_and_rejects_value_drift(self):
+        import json
+        peer=self.native_peer(); net=peer.network_id; started='2026-11-07T01:02:03Z'
+        mapping={peer.cid:{'owned':{'NetworkID':net,'Aliases':['replica']}},peer.envoy_cid:{'owned':{'NetworkID':net,'Aliases':['pilot-gateway']}}}
+        replica=[peer.cid,peer.image_id,edge._NODE_IMAGE,['node','/usr/src/node-red/node_modules/node-red/red.js','--userDir','/data','--settings','/pilot/settings.js'],True,started,mapping[peer.cid],[{'Type':'bind','Source':src,'Destination':dst,'RW':False,'Propagation':'rprivate'} for dst,src in peer.mounts.items()],True,{}, {'/data':'rw,nosuid,nodev,noexec,size=16m,mode=1777','/tmp':'rw,nosuid,nodev,noexec,size=16m,mode=1777'},'running','owned-network']
+        envoy=[peer.envoy_cid,peer.envoy_image_id,edge._ENVOY_IMAGE,True,started,mapping[peer.envoy_cid],{},'running','owned-network',[{'Type':'bind','Source':src,'Destination':dst,'RW':False,'Propagation':'rprivate'} for dst,src in peer.envoy_mounts.items()],True]
+        def exercise(drift=False):
+            calls={peer.cid:0,peer.envoy_cid:0}
+            def command(args,timeout=10):
+                if args[1]=='image': return json.dumps(peer.image_id if args[-1]==edge._NODE_IMAGE else peer.envoy_image_id).encode()
+                if args[1]=='network': return json.dumps(net if args[4]=='{{json .Id}}' else {peer.cid:{},peer.envoy_cid:{}}).encode()
+                cid=args[-1]
+                if '.Config.Image' not in args[3]: values=[cid,mapping[cid]]
+                else:
+                    values=json.loads(json.dumps(replica if cid==peer.cid else envoy));index=7 if cid==peer.cid else 9
+                    calls[cid]+=1
+                    if calls[cid]%2==0:
+                        values[index].reverse()
+                        if drift: values[index][0]['Propagation']='rshared'
+                return ('\n'.join(json.dumps(v) for v in values)+'\n').encode()
+            with mock.patch.object(edge,'_command',side_effect=command): return peer.observe_live()
+        self.assertEqual(exercise(),{'replica_started':started,'envoy_started':started})
+        with self.assertRaises(edge.NativeObservationChanged): exercise(True)
+
     def test_live_observation_distinguishes_deadline_and_changed_fields(self):
         import json
         peer=self.native_peer(); started='2026-11-07T01:02:03Z'

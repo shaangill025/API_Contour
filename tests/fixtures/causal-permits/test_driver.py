@@ -18,6 +18,14 @@ spec=importlib.util.spec_from_file_location('permit_driver',ROOT/'scripts/test-p
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class Driver(unittest.TestCase):
+    def test_failure_lines_emit_only_exact_sanitized_sqlstate(self):
+        error=RuntimeError('fixture command failed SQLSTATE 40001')
+        group=BaseExceptionGroup('qualification',[BaseExceptionGroup('primary',[error])])
+        self.assertEqual(driver.failure_lines(group),['FAIL primary RuntimeError unknown:0 SQLSTATE 40001'])
+        for text in ('fixture command failed SQLSTATE 40001 secret','SQLSTATE 40001','fixture command failed SQLSTATE 40001\n','fixture command failed SQLSTATE abcde'):
+            self.assertEqual(driver.failure_lines(RuntimeError(text)),['FAIL primary RuntimeError unknown:0'])
+        self.assertEqual(driver.failure_lines(ValueError('fixture command failed SQLSTATE 40001')),['FAIL primary ValueError unknown:0'])
+
     def test_artifact_requires_exact_source_target_and_containment(self):
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp).resolve()/'target'; target.mkdir(); binary=target/'probe'; binary.write_text('x'); binary.chmod(0o700)
