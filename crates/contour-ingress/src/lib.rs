@@ -2,8 +2,12 @@
 mod authority;
 #[cfg(unix)]
 mod causal_launch_files;
+#[cfg(unix)]
+mod causal_launch_inspect;
 mod causal_launch_material;
 mod causal_launch_metadata;
+#[cfg(unix)]
+mod causal_launch_process;
 mod causal_launch_protocol;
 #[cfg(unix)]
 mod causal_owner;
@@ -15,8 +19,14 @@ mod pool;
 mod service;
 #[cfg(unix)]
 pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
+#[cfg(unix)]
+pub use causal_launch_inspect::{InspectError, InspectedDeployment};
 pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
 pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
+#[cfg(unix)]
+pub use causal_launch_process::{
+    DockerInspect, DockerPolicy, LocalCleanup, LocalProcess, OwnedCreateIntent, ProcessError,
+};
 pub use causal_launch_protocol::{ProtocolError, RelayCodec, RelayEvent};
 #[cfg(unix)]
 pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
