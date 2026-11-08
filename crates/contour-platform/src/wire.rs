@@ -1,4 +1,4 @@
-use crate::{AUTHORITY, MAX_BODY, ORIGIN, PlatformError};
+use crate::{MAX_BODY, PlatformError, TransportProfile};
 use hyper::{HeaderMap, Request};
 use serde::{
     Deserialize, Deserializer,
@@ -102,7 +102,10 @@ pub(crate) fn cookies(headers: &HeaderMap) -> Result<HashMap<String, String>, Pl
     }
     Ok(output)
 }
-pub(crate) fn validate_request<B>(request: &Request<B>) -> Result<(), PlatformError> {
+pub(crate) fn validate_request<B>(
+    request: &Request<B>,
+    transport: TransportProfile,
+) -> Result<(), PlatformError> {
     let headers = request.headers();
     if request.uri().scheme().is_some()
         || request.uri().authority().is_some()
@@ -115,7 +118,7 @@ pub(crate) fn validate_request<B>(request: &Request<B>) -> Result<(), PlatformEr
             .sum::<usize>()
             > 16384
         || headers.get_all("host").iter().count() != 1
-        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(AUTHORITY)
+        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(transport.authority())
         || headers.contains_key("content-encoding")
         || headers.contains_key("expect")
         || headers.get_all("content-length").iter().count() > 1
@@ -140,7 +143,7 @@ pub(crate) fn validate_request<B>(request: &Request<B>) -> Result<(), PlatformEr
             request.method().as_str(),
             "POST" | "PUT" | "PATCH" | "DELETE"
         ) || headers.get_all("origin").iter().count() != 1
-            || headers.get("origin").and_then(|v| v.to_str().ok()) != Some(ORIGIN)
+            || headers.get("origin").and_then(|v| v.to_str().ok()) != Some(transport.origin())
             || headers.get_all("content-type").iter().count() != 1
             || !headers
                 .get("content-type")
@@ -196,6 +199,7 @@ pub(crate) fn token(bytes: &[u8]) -> Result<String, PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AUTHORITY, ORIGIN};
     #[test]
     fn duplicate_and_malformed_queries_are_rejected_after_decoding() {
         assert_eq!(query("code=a%2Bb&state=abc").unwrap()["code"], "a+b");
@@ -255,7 +259,13 @@ mod tests {
     }
     #[test]
     fn exact_origin_json_and_host_required_before_mutations() {
-        assert!(validate_request(&request("POST", Some(ORIGIN), "application/json")).is_ok());
+        assert!(
+            validate_request(
+                &request("POST", Some(ORIGIN), "application/json"),
+                TransportProfile::Host
+            )
+            .is_ok()
+        );
         for origin in [
             None,
             Some("null"),
@@ -263,20 +273,62 @@ mod tests {
             Some("http://localhost:9443"),
             Some("https://localhost:8444"),
         ] {
-            assert!(validate_request(&request("POST", origin, "application/json")).is_err());
+            assert!(
+                validate_request(
+                    &request("POST", origin, "application/json"),
+                    TransportProfile::Host
+                )
+                .is_err()
+            );
         }
-        assert!(validate_request(&request("POST", Some(ORIGIN), "text/plain")).is_err());
+        assert!(
+            validate_request(
+                &request("POST", Some(ORIGIN), "text/plain"),
+                TransportProfile::Host
+            )
+            .is_err()
+        );
         let mut req = request("POST", Some(ORIGIN), "application/json");
         req.headers_mut().append("origin", ORIGIN.parse().unwrap());
-        assert!(validate_request(&req).is_err());
+        assert!(validate_request(&req, TransportProfile::Host).is_err());
         let mut req = request("GET", None, "text/plain");
         req.headers_mut()
             .insert("host", "evil.invalid".parse().unwrap());
-        assert!(validate_request(&req).is_err());
+        assert!(validate_request(&req, TransportProfile::Host).is_err());
         let mut req = request("GET", None, "text/plain");
         *req.uri_mut() = "https://localhost:9443/auth/session".parse().unwrap();
-        assert!(validate_request(&req).is_err());
-        assert!(validate_request(&request("OPTIONS", Some(ORIGIN), "application/json")).is_err());
+        assert!(validate_request(&req, TransportProfile::Host).is_err());
+        assert!(
+            validate_request(
+                &request("OPTIONS", Some(ORIGIN), "application/json"),
+                TransportProfile::Host
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn managed_host_and_origin_are_isolated_from_legacy_profiles() {
+        let managed = TransportProfile::ManagedDocker;
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/auth/logout")
+            .header("host", "mvp.localhost:19443")
+            .header("origin", "https://mvp.localhost:19443")
+            .header("content-type", "application/json")
+            .body(())
+            .unwrap();
+        assert!(validate_request(&req, managed).is_ok());
+        assert!(validate_request(&req, TransportProfile::Host).is_err());
+        assert!(validate_request(&req, TransportProfile::Docker).is_err());
+        req.headers_mut().insert("origin", ORIGIN.parse().unwrap());
+        assert!(validate_request(&req, managed).is_err());
+        req.headers_mut()
+            .insert("origin", "https://mvp.localhost:19443".parse().unwrap());
+        req.headers_mut().insert("host", AUTHORITY.parse().unwrap());
+        assert!(validate_request(&req, managed).is_err());
+        assert!(
+            validate_request(&request("POST", Some(ORIGIN), "application/json"), managed).is_err()
+        );
     }
     #[test]
     fn token_response_does_not_accept_duplicate_selected_fields_or_oversized_token() {
