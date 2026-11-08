@@ -47,7 +47,7 @@ class Driver(unittest.TestCase):
         ids = ['00000000-0000-4000-8000-%012d' % n for n in range(1, 11)]
         before = []
         d.profile_checks(lambda sql: before.append(sql), ids, False)
-        self.assertEqual(len(before), 2)
+        self.assertEqual(len(before), 3)
         self.assertIn('000000000503', before[1])
         self.assertIn('EXCEPTION WHEN check_violation', before[1])
         after = []
@@ -55,7 +55,15 @@ class Driver(unittest.TestCase):
             after.append(sql)
             return '1' if sql.startswith('SELECT count(*)') else ''
         d.profile_checks(execute, ids, True)
-        self.assertEqual(len(after), 9)
+        self.assertEqual(len(after), 16)
+        for sql in before+after:
+            if 'contour.register_causal_profile(' in sql or 'contour.enroll_causal_runtime(' in sql:
+                self.assertTrue(sql.startswith("BEGIN; SELECT set_config("))
+                self.assertTrue(sql.endswith(' COMMIT;'))
+                self.assertEqual(sql.count('contour.register_causal_profile(')+sql.count('contour.enroll_causal_runtime('),1)
+        positive=[sql for sql in after if 'SELECT contour.register_causal_profile(' in sql or 'SELECT contour.enroll_causal_runtime(' in sql]
+        self.assertEqual(positive[1],positive[2])
+        self.assertEqual(positive[3],positive[4])
         self.assertTrue(any('000000000502' in sql for sql in after))
         self.assertTrue(any('insufficient_privilege' in sql for sql in after))
         self.assertTrue(any('000000000501' in sql and 'a4d698a75a' in sql for sql in after))

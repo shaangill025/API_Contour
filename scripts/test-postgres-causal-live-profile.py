@@ -229,11 +229,16 @@ def profile_checks(execute,ids,after):
     prefix=f"BEGIN; SELECT set_config('apicontour.tenant_id','{t}',true); SET LOCAL ROLE contour_causal_provisioner; "
     execute(prefix+'SELECT '+reg(old,old_hash)+'; COMMIT;')
     if not after:
-        execute(prefix+reject(reg(candidate,candidate_hash))+reject(enrollment(candidate,candidate_hash))+' COMMIT;')
+        for call in (reg(candidate,candidate_hash),enrollment(candidate,candidate_hash)):
+            execute(prefix+reject(call)+' COMMIT;')
         return
-    execute(prefix+'SELECT '+reg(candidate,candidate_hash)+'; SELECT '+reg(candidate,candidate_hash)+'; SELECT '+enrollment(candidate,candidate_hash)+'; SELECT '+enrollment(candidate,candidate_hash)+'; COMMIT;')
+    # Each function begins its own Q/leaf/C operation and must have a fresh transaction.
+    for call in (reg(candidate,candidate_hash),reg(candidate,candidate_hash),
+                 enrollment(candidate,candidate_hash),enrollment(candidate,candidate_hash)):
+        execute(prefix+'SELECT '+call+'; COMMIT;')
     for profile,digest in ((candidate,old_hash),(old,candidate_hash),(unknown,candidate_hash),(candidate,'00'*32)):
-        execute(prefix+reject(reg(profile,digest))+reject(enrollment(profile,digest))+' COMMIT;')
+        for call in (reg(profile,digest),enrollment(profile,digest)):
+            execute(prefix+reject(call)+' COMMIT;')
     # Owner-only tables must remain inaccessible to both application roles.
     for role in ('contour_causal_provisioner','contour_causal_issuer'):
         execute(f"BEGIN; SET LOCAL ROLE {role}; DO $$ BEGIN PERFORM count(*) FROM contour.causal_runtime_profiles; RAISE EXCEPTION 'unexpected read'; EXCEPTION WHEN insufficient_privilege THEN NULL; END $$; COMMIT;")
