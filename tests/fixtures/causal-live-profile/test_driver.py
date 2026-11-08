@@ -91,11 +91,29 @@ class Driver(unittest.TestCase):
             target=root/'target'; target.write_text('x'); link=root/'link'; link.symlink_to(target)
             with self.assertRaises(ValueError): d.safe(link)
 
+    def test_deferred_sequence_privilege_checked_before_either_probe(self):
+        for function,login,sequence in ((d.issue_unknown,'causal_issuer_login','fixture_issue_entered'),
+                                        (d.marker_unknown,'causal_provisioner_login','fixture_marker_commit_entered')):
+            with self.subTest(login=login):
+                calls=[]
+                def execute(sql):
+                    calls.append(sql)
+                    if 'has_sequence_privilege' in sql: return 'false'
+                    return ''
+                runner=mock.Mock()
+                with self.assertRaisesRegex(AssertionError,'sequence privilege'):
+                    function(['probe']*24,{},execute,{'IDS':['tenant','runtime'],'run_process':runner})
+                runner.assert_not_called()
+                self.assertEqual(len(calls),2)
+                self.assertIn('GRANT USAGE ON SEQUENCE contour.'+sequence+' TO '+login,calls[0])
+                self.assertIn("has_sequence_privilege('"+login+"','contour."+sequence+"','USAGE')",calls[1])
+
     def test_unknown_issue_requires_entered_commit_and_same_request_retry(self):
         from types import SimpleNamespace
         calls=[]
         def execute(sql):
             calls.append(sql)
+            if 'has_sequence_privilege' in sql: return 't'
             if 'is_called::text' in sql: return 'true|1'
             if 'pg_stat_activity' in sql: return '0'
             if 'SELECT count(*) FROM contour.causal_sessions' in sql: return '1'
@@ -109,7 +127,7 @@ class Driver(unittest.TestCase):
         runner.reset_mock(side_effect=True)
         runner.return_value=SimpleNamespace(returncode=0,stderr=b'',stdout=b'OUTCOME_UNKNOWN\n')
         with self.assertRaisesRegex(AssertionError,'never entered'):
-            d.issue_unknown(['probe']*23,{},lambda sql:'false|1' if 'is_called' in sql else '',bridge)
+            d.issue_unknown(['probe']*23,{},lambda sql:'t' if 'has_sequence_privilege' in sql else ('false|1' if 'is_called' in sql else ''),bridge)
         self.assertEqual(runner.call_count,1)
 
     def test_clock_and_quota_guards_fail_closed(self):
@@ -149,6 +167,7 @@ class Driver(unittest.TestCase):
         calls=[]
         def execute(sql):
             calls.append(sql)
+            if 'has_sequence_privilege' in sql: return 't'
             if 'is_called::text' in sql: return 'true|1'
             if 'pg_stat_activity' in sql: return '0'
             if 'SELECT count(*) FROM contour.causal_marker_bindings' in sql: return '1'
@@ -159,7 +178,7 @@ class Driver(unittest.TestCase):
         self.assertEqual(runner.call_count,1)
         self.assertEqual(runner.call_args.args[0][-1],'marker_unknown')
         with self.assertRaisesRegex(AssertionError,'never entered'):
-            d.marker_unknown(['probe']*24,{},lambda sql:'false|1' if 'is_called' in sql else '',bridge)
+            d.marker_unknown(['probe']*24,{},lambda sql:'t' if 'has_sequence_privilege' in sql else ('false|1' if 'is_called' in sql else ''),bridge)
         self.assertEqual(runner.call_count,2)
 
     def test_probe_uses_borrowed_view_and_candidate_scope(self):

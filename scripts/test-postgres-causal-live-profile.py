@@ -293,7 +293,8 @@ def negative_grants(base,work,env,execute,bridge):
 
 def issue_unknown(base,env,execute,bridge):
     """Delay COMMIT after issue, then reconcile only the identical original request."""
-    execute("CREATE SEQUENCE contour.fixture_issue_entered; GRANT USAGE,SELECT ON SEQUENCE contour.fixture_issue_entered TO contour_owner; CREATE FUNCTION contour.fixture_issue_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('contour.fixture_issue_entered'); PERFORM pg_sleep(3); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER fixture_issue_delay AFTER INSERT ON contour.causal_sessions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.fixture_issue_delay();")
+    execute("CREATE SEQUENCE contour.fixture_issue_entered; GRANT USAGE,SELECT ON SEQUENCE contour.fixture_issue_entered TO contour_owner; GRANT USAGE ON SEQUENCE contour.fixture_issue_entered TO causal_issuer_login; CREATE FUNCTION contour.fixture_issue_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('contour.fixture_issue_entered'); PERFORM pg_sleep(3); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER fixture_issue_delay AFTER INSERT ON contour.causal_sessions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.fixture_issue_delay();")
+    if execute("SELECT has_sequence_privilege('causal_issuer_login','contour.fixture_issue_entered','USAGE');")!='t': raise AssertionError('issue sequence privilege unavailable')
     args=list(base); args[-1]=str(uuid.uuid4())
     result=bridge['run_process'](args+['issue_unknown'],timeout=20,env=env,limit=4096)
     if result.returncode or result.stderr or result.stdout!=b'OUTCOME_UNKNOWN\n': raise AssertionError('unknown issue protocol mismatch')
@@ -333,7 +334,8 @@ def quota_guard(base,env,execute,bridge):
 
 def marker_unknown(base,env,execute,bridge):
     tenant,runtime=bridge['IDS'][:2]
-    execute("CREATE SEQUENCE contour.fixture_marker_commit_entered; GRANT USAGE,SELECT ON SEQUENCE contour.fixture_marker_commit_entered TO contour_owner; CREATE FUNCTION contour.fixture_marker_commit_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('contour.fixture_marker_commit_entered'); PERFORM pg_sleep(3); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER fixture_marker_commit_delay AFTER INSERT ON contour.causal_marker_bindings DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.fixture_marker_commit_delay();")
+    execute("CREATE SEQUENCE contour.fixture_marker_commit_entered; GRANT USAGE,SELECT ON SEQUENCE contour.fixture_marker_commit_entered TO contour_owner; GRANT USAGE ON SEQUENCE contour.fixture_marker_commit_entered TO causal_provisioner_login; CREATE FUNCTION contour.fixture_marker_commit_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('contour.fixture_marker_commit_entered'); PERFORM pg_sleep(3); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER fixture_marker_commit_delay AFTER INSERT ON contour.causal_marker_bindings DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION contour.fixture_marker_commit_delay();")
+    if execute("SELECT has_sequence_privilege('causal_provisioner_login','contour.fixture_marker_commit_entered','USAGE');")!='t': raise AssertionError('marker sequence privilege unavailable')
     args=list(base); args[-1]=str(uuid.uuid4())
     result=bridge['run_process'](args+['marker_unknown'],timeout=20,env=env,limit=4096)
     if result.returncode or result.stderr or result.stdout!=b'MARKER_OUTCOME_UNKNOWN\n': raise AssertionError('unknown marker protocol mismatch')
