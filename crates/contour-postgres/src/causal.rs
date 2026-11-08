@@ -276,17 +276,89 @@ impl fmt::Debug for CausalIssue {
         f.write_str("CausalIssue")
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionProfile {
+    Legacy501,
+    Candidate503,
+}
+impl SessionProfile {
+    fn from_verified(grant: &VerifiedCausalGrant) -> Result<Self, CausalError> {
+        match (grant.causal_profile(), grant.profile_sha256()) {
+            (PROFILE, ARTIFACT) => Ok(Self::Legacy501),
+            (WIRE_PROFILE, WIRE_ARTIFACT) => Ok(Self::Candidate503),
+            _ => Err(CausalError::Identity),
+        }
+    }
+}
+
 /// Created only after confirmed SQL commit. It retains the exact authenticated
 /// envelopes and original input in memory; it cannot be deserialized from a journal.
 pub struct CausalSession {
     issue: CausalIssue,
+    profile: SessionProfile,
     epoch: u64,
     issued: OffsetDateTime,
     expires: OffsetDateTime,
     digest: [u8; 32],
     verified_until: Instant,
 }
+/// Borrowed candidate identity from an issued session. This is data for the
+/// session's lifetime, not producer attestation or independent authority.
+/// Check the current monotonic ceiling again at every use.
+///
+/// The view cannot be constructed by callers:
+/// ```compile_fail
+/// use contour_postgres::CausalWireProfile503;
+/// let _view = CausalWireProfile503 { session: todo!() };
+/// ```
+/// It cannot outlive an immutable borrow of its session:
+/// ```compile_fail
+/// use contour_postgres::CausalSession;
+/// fn cannot_mutate(session: &mut CausalSession) {
+///     let view = session.wire_profile_503().unwrap();
+///     let _mutable = &mut *session;
+///     println!("{}", view.epoch());
+/// }
+/// ```
+pub struct CausalWireProfile503<'a> {
+    session: &'a CausalSession,
+}
+impl CausalWireProfile503<'_> {
+    pub fn tenant_id(&self) -> &str {
+        &self.session.issue.binding.ids[0]
+    }
+    pub fn runtime_id(&self) -> &str {
+        &self.session.issue.binding.ids[1]
+    }
+    pub fn nonce(&self) -> &str {
+        &self.session.issue.nonce
+    }
+    pub fn epoch(&self) -> u64 {
+        self.session.epoch
+    }
+    pub fn profile_id(&self) -> &'static str {
+        "00000000-0000-4000-8000-000000000503"
+    }
+    pub fn profile_name(&self) -> &'static str {
+        WIRE_PROFILE
+    }
+    pub fn profile_sha256(&self) -> &'static str {
+        WIRE_ARTIFACT
+    }
+    /// Current conservative monotonic ceiling; it can only tighten.
+    pub fn verified_until(&self) -> Instant {
+        self.session.verified_until
+    }
+    pub fn verified_remaining(&self) -> Duration {
+        self.session.verified_remaining()
+    }
+}
 impl CausalSession {
+    /// Candidate profile data tied to this live session, if still fresh.
+    pub fn wire_profile_503(&self) -> Option<CausalWireProfile503<'_>> {
+        (self.profile == SessionProfile::Candidate503 && !self.verified_remaining().is_zero())
+            .then_some(CausalWireProfile503 { session: self })
+    }
     /// Compare an operator-configured verified leaf pin without exposing the
     /// retained credential or constructing a session from request data.
     pub fn matches_peer(&self, peer: &[u8; 32]) -> bool {
@@ -494,6 +566,7 @@ fn parse_session(
     row: &Row,
     issue: &CausalIssue,
     digest: [u8; 32],
+    profile: SessionProfile,
 ) -> Result<CausalSession, CausalError> {
     let epoch: String = row.try_get(0).map_err(|_| CausalError::Corrupt)?;
     let epoch = epoch.parse::<u64>().map_err(|_| CausalError::Corrupt)?;
@@ -504,6 +577,7 @@ fn parse_session(
     }
     Ok(CausalSession {
         issue: issue.clone(),
+        profile,
         epoch,
         issued,
         expires,
@@ -1055,7 +1129,12 @@ impl CausalIssuer {
                     )
                     .await
                     .map_err(issuer_sql_error)?;
-                let mut result = parse_session(&row, request, digest)?;
+                let mut result = parse_session(
+                    &row,
+                    request,
+                    digest,
+                    SessionProfile::from_verified(&grant)?,
+                )?;
                 tx.query_one("SELECT set_config('synchronous_commit','on',true)", &[])
                     .await
                     .map_err(nonretry_error)?;
@@ -1286,6 +1365,7 @@ mod tests {
     fn session(request: CausalIssue) -> CausalSession {
         CausalSession {
             issue: request,
+            profile: SessionProfile::Legacy501,
             epoch: u64::MAX,
             issued: now(),
             expires: now() + time::Duration::minutes(1),
@@ -1426,6 +1506,72 @@ mod tests {
         let mut bad = original.clone();
         bad[440..444].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(CausalIssue::from_original_bytes(&bad).is_err());
+    }
+    #[test]
+    fn candidate_view_borrows_identity_and_observes_current_ceiling() {
+        let legacy = fixture();
+        let candidate: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/causal_candidate_503.json"))
+                .unwrap();
+        let grant_keys = CausalGrantKeys::new(&[
+            (
+                "candidate-test",
+                hex32(candidate["test_public_hex"].as_str().unwrap()),
+            ),
+            ("fixture", hex32(legacy["grant_public"].as_str().unwrap())),
+        ])
+        .unwrap();
+        let (_, policy_keys) = keys(&legacy);
+        let issue = CausalIssue::new(
+            binding(),
+            ID,
+            Duration::from_secs(60),
+            &bytes(&candidate, "candidate"),
+            &bytes(&legacy, "policy"),
+        )
+        .unwrap();
+        let (grant, _) = verify(&issue, &[3; 32], &grant_keys, &policy_keys, now()).unwrap();
+        let mut s = session(issue);
+        s.profile = SessionProfile::from_verified(&grant).unwrap();
+        let ceiling = Instant::now() + Duration::from_secs(10);
+        s.verified_until = ceiling;
+        {
+            let view = s.wire_profile_503().unwrap();
+            assert_eq!(
+                (
+                    view.tenant_id(),
+                    view.runtime_id(),
+                    view.nonce(),
+                    view.epoch()
+                ),
+                (ID, ID, ID, u64::MAX)
+            );
+            assert_eq!(
+                (
+                    view.profile_id(),
+                    view.profile_name(),
+                    view.profile_sha256()
+                ),
+                (
+                    "00000000-0000-4000-8000-000000000503",
+                    WIRE_PROFILE,
+                    WIRE_ARTIFACT
+                )
+            );
+            assert_eq!(view.verified_until(), ceiling);
+            assert!(!view.verified_remaining().is_zero());
+        }
+        let tightened = ceiling - Duration::from_secs(5);
+        s.verified_until = tightened;
+        assert_eq!(s.wire_profile_503().unwrap().verified_until(), tightened);
+        s.verified_until = Instant::now();
+        assert!(s.wire_profile_503().is_none());
+        let old_issue = request(&legacy, "grant", "policy");
+        let (old, _) = verify(&old_issue, &[3; 32], &grant_keys, &policy_keys, now()).unwrap();
+        let mut old_session = session(old_issue);
+        old_session.profile = SessionProfile::from_verified(&old).unwrap();
+        old_session.verified_until = ceiling;
+        assert!(old_session.wire_profile_503().is_none());
     }
     #[test]
     fn profile_authority_is_a_closed_pair_mapping() {
