@@ -234,6 +234,31 @@ class NativeReplicaPeer:
         deadline=time.monotonic()+30; _probe_hash()
         self._inspect(deadline,created=True); self._envoy_and_topology(deadline,created=True)
 
+    def verify_existing_before_publication(self,replica_started,leaf_sha256):
+        """Check one recorded live replica and created Envoy; never observe a new generation."""
+        if type(replica_started) is not str or not re.fullmatch(r'[0-9TZ:.-]{1,64}',replica_started) or replica_started.startswith('0001-') or type(leaf_sha256) is not str or not re.fullmatch(r'[0-9a-f]{64}',leaf_sha256): raise ValueError('invalid existing product binding')
+        deadline=time.monotonic()+30; _probe_hash()
+        first=self._inspect(deadline,replica_started); topology=self._envoy_and_topology(deadline,created=True)
+        path=Path(self.mounts['/pilot/tls/client.crt']); public=_public_bytes(path)
+        try: cert=ssl.PEM_cert_to_DER_cert(public.decode('ascii'))
+        except (ValueError,UnicodeError): raise ValueError('invalid product certificate') from None
+        if hashlib.sha256(cert).hexdigest()!=leaf_sha256: raise ValueError('product leaf changed')
+        second=self._inspect(deadline,replica_started); again=self._envoy_and_topology(deadline,created=True); _probe_hash()
+        if _public_bytes(path)!=public: raise ValueError('product leaf changed')
+        if time.monotonic()>=deadline or first!=second or topology!=again: raise ValueError('existing product identity changed')
+
+    def verify_existing_after_start(self,replica_started,leaf_sha256,envoy_started):
+        """Recheck the recorded product and one fixed live Envoy generation."""
+        if any(type(x) is not str or not re.fullmatch(r'[0-9TZ:.-]{1,64}',x) or x.startswith('0001-') for x in (replica_started,envoy_started)) or type(leaf_sha256) is not str or not re.fullmatch(r'[0-9a-f]{64}',leaf_sha256): raise ValueError('invalid existing product binding')
+        deadline=time.monotonic()+30; _probe_hash()
+        first=self._inspect(deadline,replica_started); topology=self._envoy_and_topology(deadline,envoy_started)
+        path=Path(self.mounts['/pilot/tls/client.crt']); public=_public_bytes(path)
+        try: cert=ssl.PEM_cert_to_DER_cert(public.decode('ascii'))
+        except (ValueError,UnicodeError): raise ValueError('invalid product certificate') from None
+        if hashlib.sha256(cert).hexdigest()!=leaf_sha256: raise ValueError('product leaf changed')
+        second=self._inspect(deadline,replica_started); again=self._envoy_and_topology(deadline,envoy_started); _probe_hash()
+        if _public_bytes(path)!=public or time.monotonic()>=deadline or first!=second or topology!=again: raise ValueError('existing product identity changed')
+
     def observe_live(self):
         deadline=time.monotonic()+30; _probe_hash()
         first=self._inspect(deadline); topology=self._envoy_and_topology(deadline)
@@ -325,11 +350,18 @@ def _publisher_env(values):
 
 class NativeDirectoryPublisher:
     """Fixed owned Linux publisher. A stopped/replaced instance cannot be rebound."""
-    def __init__(self,cid,image_id,started,watched,token,uid,gid,image_env):
+    def __init__(self,cid,image_id,started,watched,token,uid,gid,image_env,*,qualification=None):
         if not re.fullmatch(r'[0-9a-f]{64}',cid) or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id) or not re.fullmatch(r'[0-9TZ:.-]{1,64}',started) or started.startswith('0001-') or not re.fullmatch(r'[0-9a-f]{32}',token) or type(uid) is not int or type(gid) is not int or uid<1 or gid<0: raise ValueError('invalid publisher identity')
+        if qualification is not None:
+            from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+            if type(qualification) is not OwnedManagedQualification: raise ValueError('qualification proof required')
+            qualification.verify()
+        self.qualification=qualification
         self.cid=cid; self.image_id=image_id; self.started=started; self.watched=str(_private_dir(watched)); self.token=token; self.uid=uid; self.gid=gid; self.image_env=_publisher_env(image_env); self.env=dict(self.image_env); self.env.update({key:'' for key in _PUBLISH_CLEAR})
     def identity(self):
-        return {'cid':self.cid,'image_id':self.image_id,'started':self.started,'watched':self.watched,'token':self.token,'uid':self.uid,'gid':self.gid,'script':_PUBLISH_SCRIPT_SHA,'entrypoint':['/usr/local/bin/node'],'args':['-e',_PUBLISH_WARM],'environment':self.env,'privileged':False,'cap_add':[],'namespaces':'private','devices':[]}
+        result={'cid':self.cid,'image_id':self.image_id,'started':self.started,'watched':self.watched,'token':self.token,'uid':self.uid,'gid':self.gid,'script':_PUBLISH_SCRIPT_SHA,'entrypoint':['/usr/local/bin/node'],'args':['-e',_PUBLISH_WARM],'environment':self.env,'privileged':False,'cap_add':[],'namespaces':'private','devices':[]}
+        if self.qualification is not None: result['qualification']={'token':self.qualification.token,'script_sha256':hashlib.sha256(self.qualification.publisher_source()).hexdigest()}
+        return result
     def verify(self):
         if hashlib.sha256(_PUBLISH_SCRIPT.encode()).hexdigest()!=_PUBLISH_SCRIPT_SHA: raise ValueError('publisher source changed')
         fmt='{{json .Id}}\n{{json .Image}}\n{{json .Config.Image}}\n{{json .Config.Labels}}\n{{json .Config.User}}\n{{json .State.Running}}\n{{json .State.StartedAt}}\n{{json .HostConfig.NetworkMode}}\n{{json .Mounts}}\n{{json .HostConfig.ReadonlyRootfs}}\n{{json .HostConfig.CapDrop}}\n{{json .HostConfig.SecurityOpt}}\n{{json .NetworkSettings.Ports}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n{{json .Config.Env}}\n{{json .HostConfig.Privileged}}\n{{json .HostConfig.CapAdd}}\n{{json .HostConfig.PidMode}}\n{{json .HostConfig.IpcMode}}\n{{json .HostConfig.UTSMode}}\n{{json .HostConfig.UsernsMode}}\n{{json .HostConfig.Devices}}\n{{json .HostConfig.DeviceRequests}}\n{{json .HostConfig.DeviceCgroupRules}}'
@@ -347,7 +379,13 @@ class NativeDirectoryPublisher:
         if type(document) is not bytes or len(document)>65536: raise ValueError('publisher document invalid')
         before=self.verify(); digest=hashlib.sha256(document).hexdigest(); token=nonce
         try:
-            result=_command(['docker','exec','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','LD_DEBUG=',self.cid,'/usr/bin/env','-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','-e',_PUBLISH_SCRIPT,digest,token],timeout=10)
+            armed=self.qualification is not None and self.qualification.consume_ack_loss()
+            script=self.qualification.publisher_source().decode('utf-8') if armed else _PUBLISH_SCRIPT
+            args=['docker','exec','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','LD_DEBUG=',self.cid,'/usr/bin/env','-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','-e',script]
+            if armed:
+                args+=['fixture-publisher']
+                self.qualification._mark_publication_exec_ready(self,digest,token)
+            result=_command(args+[digest,token],timeout=2 if armed else 10)
             after=self.verify()
             if before!=after or result!=b'DOC_VERIFIED\nPUBLISHED\n': raise ValueError('publisher result invalid')
         except BaseException as primary:
@@ -363,13 +401,18 @@ class NativeDirectoryPublisher:
 
 class ManagedEdge:
     """Single owner. All commands re-read the durable journal under lifetime lock."""
-    def __init__(self, state, published, watched, ca, ca_key, peer, publisher=None):
+    def __init__(self, state, published, watched, ca, ca_key, peer, publisher=None, *, qualification=None):
         self.state=_private_dir(state); self.published=_private_dir(published); self.watched=_private_dir(watched)
         if len({self.state,self.published,self.watched})!=3 or any(a in b.parents for a in (self.state,self.published,self.watched) for b in (self.state,self.published,self.watched) if a!=b):
             raise ValueError('managed directories overlap')
         if type(peer) not in (LoopbackPeer,NativeReplicaPeer): raise ValueError('unsupported confirmation peer')
         if type(peer) is NativeReplicaPeer and (type(publisher) is not NativeDirectoryPublisher or publisher.watched!=str(self.watched)): raise ValueError('native publisher required')
         if type(peer) is LoopbackPeer and publisher is not None: raise ValueError('unexpected publisher')
+        if qualification is not None:
+            from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+            if type(qualification) is not OwnedManagedQualification or type(peer) is not NativeReplicaPeer: raise ValueError('qualification proof required')
+            qualification.verify()
+        self.qualification=qualification
         self.peer=peer; self.publisher=publisher; self.ca=Path(ca)
         if type(peer) is NativeReplicaPeer:
             if peer.envoy_mounts['/certs']!=str(self.published) or peer.envoy_mounts['/run/watch']!=str(self.watched): raise ValueError('envoy publication mounts changed')
@@ -386,7 +429,7 @@ class ManagedEdge:
         self.ca_key=Path(ca_key)
         self.identity=self._identity()
         fd=os.open(self.state/'lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
-        self.lock=os.fdopen(fd,'r+b'); self.closed=False; self.uncertain=False
+        self.lock=os.fdopen(fd,'r+b'); self.closed=False; self.uncertain=False; self._existing_start_capability=None
         try:
             st=os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or st.st_nlink!=1 or stat.S_IMODE(st.st_mode)!=0o600: raise ValueError('unsafe managed lock')
@@ -474,15 +517,27 @@ class ManagedEdge:
                 nonce=uuid.uuid4().hex
                 intent={'publisher':self.publisher.identity(),'document_sha256':hashlib.sha256(document).hexdigest(),'nonce':nonce}
                 self._binding_file('publication.exec.intent',json.dumps(intent,sort_keys=True,separators=(',',':')).encode('ascii'))
+                if self.qualification is not None: self.qualification._prepare_publication_intent(self.publisher,document,nonce)
                 self.publisher.publish(document,nonce)
+                if self.qualification is not None: self.qualification._record_publication_ack(self.publisher,document,nonce)
                 os.unlink(self.state/'publication.exec.intent'); _sync_dir(self.state)
         except BaseException: self.uncertain=True; raise
 
+    def _managed_gate(self,data):
+        path=self.state/'existing-origin.intent'
+        if not os.path.lexists(path): return
+        from deploy.local import origin21_managed_controller
+        raw=_regular(path,32768); record=json.loads(raw)
+        if json.dumps(record,sort_keys=True,separators=(',',':')).encode('ascii')!=raw or type(record) is not dict or record.get('peer')!=self.peer.identity() or record.get('publisher')!=self.publisher.identity(): raise ValueError('existing-origin intent changed')
+        if data['binding'] is None or origin21_managed_controller.verify_after_start(self.peer,self.publisher,record,qualification=self.qualification)!=data['binding']: raise ValueError('managed topology changed')
+
     def _publish_and_confirm(self,data):
+        self._managed_gate(data)
         if data['pending']['phase']!='staged': raise ValueError('candidate not staged')
         if type(self.peer) is NativeReplicaPeer and data['binding'] is None: raise ValueError('missing live binding')
         version=data['pending']['candidate']; commitment=data['pending']['commitment']; self._publish(version,commitment)
         self._confirm(version,commitment,data['binding'],data['current'],data['current_commitment'])
+        self._managed_gate(data)
         data['previous']=data['current']; data['previous_commitment']=data['current_commitment']
         data['current']=version; data['current_commitment']=commitment; data['pending']=None
         self._save(data)
@@ -500,14 +555,27 @@ class ManagedEdge:
     def prepare_initial(self,days=1):
         """Publish bootstrap SDS but leave it pending until a live confirmation."""
         data=self._load()
-        if data['current'] is not None or data['pending'] is not None: raise RuntimeError('initial publication unavailable')
+        if data['current'] is not None or data['pending'] is not None or os.path.lexists(self.state/'existing-origin.intent'): raise RuntimeError('initial publication unavailable')
         if type(self.peer) is NativeReplicaPeer: self.peer.verify_created()
         candidate=self._stage_new(data,days)
         if type(self.peer) is NativeReplicaPeer: self.peer.verify_created()
         self._publish(candidate,data['pending']['commitment'])
 
-    def renew(self,days=1):
+    def prepare_initial_existing_origin(self,days=1):
+        """Persist the fixed managed-Origin topology before initial SDS publication."""
+        from deploy.local import origin21_managed_controller
         data=self._load()
+        if type(self.peer) is not NativeReplicaPeer or type(self.publisher) is not NativeDirectoryPublisher or data['current'] is not None or data['pending'] is not None: raise RuntimeError('existing-origin publication unavailable')
+        record=origin21_managed_controller.verify_before_publication(self.peer,self.publisher,qualification=self.qualification)
+        raw=json.dumps(record,sort_keys=True,separators=(',',':')).encode('ascii')
+        if len(raw)>32768: raise ValueError('existing-origin identity bound')
+        self._binding_file('existing-origin.intent',raw)
+        candidate=self._stage_new(data,days)
+        if origin21_managed_controller.verify_before_publication(self.peer,self.publisher,qualification=self.qualification)!=record: raise ValueError('existing-origin topology changed')
+        self._publish(candidate,data['pending']['commitment'])
+
+    def renew(self,days=1):
+        data=self._load(); self._managed_gate(data)
         if data['pending'] is not None: raise RuntimeError('publication reconciliation required')
         if type(self.peer) is NativeReplicaPeer and data['current'] is None: raise RuntimeError('prepare_initial required')
         self._stage_new(data,days)
@@ -521,8 +589,50 @@ class ManagedEdge:
             _sync_dir(self.state)
         except BaseException: self.uncertain=True; raise
 
+    def _begin_existing_start(self,launch):
+        """Reserve the sole in-process observation before starting Envoy."""
+        if self._existing_start_capability is not None: raise RuntimeError('existing start already armed')
+        self._binding_file('existing-envoy-start.intent',launch)
+        self._binding_file('existing-bind.intent',launch)
+        self._existing_start_capability=object()
+        return self._existing_start_capability
+
+    def bind_initial_existing_origin(self):
+        """Reconcile only an already recorded managed Envoy generation."""
+        return self._bind_initial_existing_origin(None)
+
+    def _bind_initial_existing_origin(self,capability):
+        from deploy.local import origin21_managed_controller
+        self._load()
+        if type(self.peer) is not NativeReplicaPeer or type(self.publisher) is not NativeDirectoryPublisher: raise ValueError('managed native identities required')
+        raw=_regular(self.state/'existing-origin.intent',32768); record=json.loads(raw)
+        if json.dumps(record,sort_keys=True,separators=(',',':')).encode('ascii')!=raw or type(record) is not dict or record.get('peer')!=self.peer.identity() or record.get('publisher')!=self.publisher.identity(): raise ValueError('existing-origin intent changed')
+        try: product_started=record['products'][0]['started_at']; envoy_cid=record['companions']['native-envoy']['id']
+        except (KeyError,IndexError,TypeError): raise ValueError('existing-origin intent invalid') from None
+        if envoy_cid!=self.peer.envoy_cid: raise ValueError('existing-origin Envoy changed')
+        launch=json.dumps({'version':1,'existing_sha256':hashlib.sha256(raw).hexdigest(),'envoy_cid':envoy_cid},sort_keys=True,separators=(',',':')).encode('ascii')
+        if _regular(self.state/'existing-envoy-start.intent',4096)!=launch or _regular(self.state/'existing-bind.intent',4096)!=launch: raise ValueError('Envoy start intent changed')
+        result_path=self.state/'binding.result'
+        if capability is None:
+            if not os.path.lexists(result_path): raise RuntimeError('incomplete existing binding requires intervention')
+            stored=json.loads(_regular(result_path,4096)); expected=stored.get('binding') if type(stored) is dict else None
+            if type(expected) is not dict or expected.get('replica_started')!=product_started: raise ValueError('existing product binding changed')
+        else:
+            if capability is not self._existing_start_capability or self._existing_start_capability is None or os.path.lexists(result_path): raise ValueError('existing start capability invalid')
+            self._existing_start_capability=None
+            expected=origin21_managed_controller.verify_after_start(self.peer,self.publisher,record,qualification=self.qualification)
+            if type(expected) is not dict or expected.get('replica_started')!=product_started: raise ValueError('existing product binding changed')
+        if origin21_managed_controller.verify_after_start(self.peer,self.publisher,record,qualification=self.qualification)!=expected: raise ValueError('existing live topology changed')
+        self._bind_initial_peer(expected)
+        if origin21_managed_controller.verify_after_start(self.peer,self.publisher,record,qualification=self.qualification)!=expected:
+            self.uncertain=True; raise ValueError('existing live topology changed')
+
     def bind_initial_peer(self):
         """Observe one live start pair; persist it before any confirmation."""
+        if os.path.lexists(self.state/'existing-origin.intent'): raise RuntimeError('existing-origin binding required')
+        return self._bind_initial_peer()
+
+    def _bind_initial_peer(self,expected_binding=None):
         data=self._load()
         if type(self.peer) is not NativeReplicaPeer or data['current'] is not None or not data['pending'] or data['pending']['phase']!='staged' or data['pending']['kind']!='renew': raise RuntimeError('initial binding unavailable')
         if _regular(self.watched/'sds.json',65536)!=self._document(data['pending']['candidate'],data['pending']['commitment']): raise ValueError('bootstrap SDS mismatch')
@@ -541,18 +651,20 @@ class ManagedEdge:
             try: os.fsync(fd)
             finally: os.close(fd)
             _sync_dir(self.state)
+            if expected_binding is not None and binding!=expected_binding: raise ValueError('recorded binding changed')
             if self.peer.observe_live()!=binding: raise ValueError('live binding changed')
         else:
             if data['binding'] is not None or os.path.lexists(result_path): raise ValueError('binding artifacts inconsistent')
             self._binding_file('binding.intent',intent)
             binding=self.peer.observe_live()
+            if expected_binding is not None and binding!=expected_binding: raise ValueError('recorded binding changed')
             raw=json.dumps({'identity':self.identity,'binding':binding},sort_keys=True,separators=(',',':')).encode('ascii')
             self._binding_file('binding.result',raw)
         if data['binding'] is not None and data['binding']!=binding: raise ValueError('live binding changed')
         if data['binding'] is None: data['binding']=binding; self._save(data)
 
     def rollback(self):
-        data=self._load()
+        data=self._load(); self._managed_gate(data)
         if data['pending'] is not None: raise RuntimeError('publication reconciliation required')
         if data['previous'] is None: raise ValueError('no previous edge version')
         self.certs.validate_native_edge(data['previous'])
@@ -560,7 +672,7 @@ class ManagedEdge:
         self._publish_and_confirm(data)
 
     def reconcile(self):
-        data=self._load()
+        data=self._load(); self._managed_gate(data)
         if data['pending'] is None: raise ValueError('no pending publication')
         pending=data['pending']
         if pending['phase']=='reserved':

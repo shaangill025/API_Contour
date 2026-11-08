@@ -391,24 +391,37 @@ exit 94
 '''
 
 
-def for_deployment(directory, deployment):
+def for_deployment(directory, deployment, *, selected=None,qualification=None):
     """Bind a private runner to an exact operator-owned deployment."""
     import os
     import subprocess
     from deploy.local import capture_renew, origin21_products, origin21_profile, origin21_transport
+    if selected is None: selected=origin21_profile.STATIC
+    origin21_profile.require_context(selected)
+    if selected is origin21_profile.MANAGED:
+        from deploy.local.origin21_managed_qualification import require_matching
+        require_matching(qualification)
+    elif qualification is not None: raise ValueError('unexpected qualification')
     fields={'name','id','owner_kind','owner_token','postgres_id','postgres_image_id','ca_sha256'}
     if type(deployment) is not dict or set(deployment)!=fields or not all(isinstance(x,str) for x in deployment.values()): raise ValueError('invalid SQL deployment')
     if not re.fullmatch('[0-9a-f]{64}',deployment['id']) or not re.fullmatch('[0-9a-f]{64}',deployment['postgres_id']) or not re.fullmatch('sha256:[0-9a-f]{64}',deployment['postgres_image_id']) or not re.fullmatch('[0-9a-f]{64}',deployment['ca_sha256']): raise ValueError('invalid SQL deployment identity')
-    if deployment['owner_kind']=='local':
+    if deployment['owner_kind']=='local' and selected is origin21_profile.STATIC:
         if (deployment['name'],deployment['owner_token'])!=('apicontour-local_default','apicontour-local'): raise ValueError('invalid local network')
+    elif deployment['owner_kind']=='managed-local' and selected is origin21_profile.MANAGED:
+        if (deployment['name'],deployment['owner_token'])!=('apicontour-origin21-managed-db_default','apicontour-origin21-managed-db'): raise ValueError('invalid managed network')
     elif deployment['owner_kind']=='fixture':
-        if not re.fullmatch('[0-9a-f]{32}',deployment['owner_token']) or deployment['name']!='contour-origin21-qual-'+deployment['owner_token']: raise ValueError('invalid fixture network')
+        prefix='contour-origin21-qual-' if selected is origin21_profile.STATIC else 'contour-managed-origin21-qual-'
+        if not re.fullmatch('[0-9a-f]{32}',deployment['owner_token']) or deployment['name']!=prefix+deployment['owner_token']: raise ValueError('invalid fixture network')
     else: raise ValueError('unsupported SQL deployment')
     deployment=dict(deployment)
     target = {'container_id': deployment['postgres_id'], 'image_id': deployment['postgres_image_id'], 'network_id': deployment['id']}
     def verify(value):
         if value != target: raise RuntimeError('SQL target changed')
-        origin21_products._capture_network(deployment)
+        if selected is origin21_profile.STATIC: origin21_products._capture_network(deployment)
+        else:
+            origin21_products._capture_network(deployment,selected=selected)
+            from deploy.local import origin21_managed_init
+            origin21_managed_init.verify_runtime_target(deployment,qualification=qualification)
     verify(target)
     capture_renew.safe_dir(directory)
     timeout_options = '-c statement_timeout=60000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=60000'
@@ -428,8 +441,11 @@ def for_deployment(directory, deployment):
     return Runner(directory, target, verify, cleanup, launch)
 
 
-def production():
-    """Bind to the recorded, reverified local PostgreSQL container only."""
+def production(*,selected=None):
+    """Bind only the static recorded local PostgreSQL container."""
+    from deploy.local import origin21_profile
+    if selected is None: selected=origin21_profile.STATIC
+    if selected is not origin21_profile.STATIC: raise ValueError('managed transport requires a verified receipt')
     import os
     from deploy.local import capture_renew, origin21_products, origin21_profile
     deployment=origin21_products._read_record('intent.json')['deployment']

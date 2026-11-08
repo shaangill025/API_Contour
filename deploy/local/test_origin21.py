@@ -12,6 +12,157 @@ from unittest import mock
 from deploy.local import capture_profiles, origin21_cli, origin21_credentials, origin21_evidence, origin21_logins, origin21_products, origin21_profile, origin21_provision, origin21_ready, origin21_runtime, origin21_schema, origin21_setup, origin21_sql_runner, origin21_state, origin21_transport, provision, up
 
 
+class ManagedContextTests(unittest.TestCase):
+    def test_only_two_exact_immutable_contexts_and_descriptors(self):
+        profile=origin21_profile
+        self.assertIs(profile.context_for_profile(profile.PROFILE),profile.STATIC)
+        self.assertIs(profile.context_for_bound(profile.MANAGED_BOUND),profile.MANAGED)
+        self.assertIs(profile.context_for_capture(profile.MANAGED_BOUND.capture),profile.MANAGED)
+        with self.assertRaises(ValueError): profile.require_context(profile.MANAGED._replace())
+        with self.assertRaises(ValueError): profile.context_for_profile(profile.MANAGED_PROFILE._replace())
+        with self.assertRaises(ValueError): profile.context_for_bound(profile.MANAGED_BOUND._replace())
+        self.assertNotEqual(profile.MANAGED.profile.state,profile.STATIC.profile.state)
+        self.assertNotEqual(profile.MANAGED.owner,profile.STATIC.owner)
+        self.assertNotEqual(profile.MANAGED.edge.parent,profile.STATIC.profile.state.parent)
+        self.assertEqual(profile.MANAGED.profile.ingress_login,profile.STATIC.profile.ingress_login)
+        with self.assertRaises(AttributeError): profile.MANAGED.project='other'
+
+    def test_managed_setup_refuses_raw_or_mixed_transport_before_operations(self):
+        callback=mock.Mock(); evidence=(b'a'*32,b'b'*32)
+        with mock.patch.object(origin21_schema,'require_reference') as refs:
+            for selected,transport in ((origin21_profile.MANAGED,None),(origin21_profile.MANAGED,object()),(origin21_profile.STATIC,object()),(origin21_profile.MANAGED._replace(),None)):
+                with self.subTest(selected=selected,transport=transport):
+                    with self.assertRaises(ValueError): origin21_setup.prepare(psql=callback,sensitive_execute=callback,authenticate=callback,inspect_slot=callback,expected_evidence=evidence,selected=selected,transport=transport)
+            refs.assert_not_called(); callback.assert_not_called()
+
+    def test_managed_setup_rejects_every_external_inspector_before_verify(self):
+        from deploy.local import origin21_transport
+        runner=mock.Mock(); transport=origin21_transport.ManagedTransport(origin21_transport._MANAGED_SEAL,runner,{'id':'fixture'},'image','head','receipt','digest')
+        evidence=(b'a'*32,b'b'*32)
+        with mock.patch.object(origin21_transport.ManagedTransport,'verify') as verify, mock.patch.object(origin21_schema,'require_reference') as refs, mock.patch.object(origin21_credentials,'Credentials') as creds:
+            for inspector in (mock.Mock(),origin21_products.inspect_slot,lambda index:origin21_products.inspect_slot(index,selected=origin21_profile.MANAGED)):
+                with self.assertRaises(ValueError):
+                    origin21_setup.prepare(transport=transport,inspect_slot=inspector,expected_evidence=evidence,selected=origin21_profile.MANAGED)
+            verify.assert_not_called(); refs.assert_not_called(); creds.assert_not_called(); runner.run.assert_not_called()
+
+    def test_managed_credentials_require_exact_managed_ca_paths_without_reads(self):
+        from deploy.pilot import origin_credentials
+        managed=origin21_profile.MANAGED_PROFILE; root=managed.state.parent
+        with mock.patch.object(origin_credentials,'_file') as read:
+            for cert,key in ((origin21_profile.STATE.parent/'ca.crt',origin21_profile.STATE.parent/'ca.key'),(root/'other.crt',root/'ca.key'),(root/'ca.crt',root/'other.key'),('ca.crt','ca.key'),(root/'../ca.crt',root/'ca.key')):
+                with self.subTest(cert=cert,key=key):
+                    with self.assertRaises(ValueError): origin21_credentials.Credentials(managed,cert,key)
+            value=origin21_credentials.Credentials(managed,root/'ca.crt',root/'ca.key')
+            self.assertEqual((value.ca_cert,value.ca_key),(root/'ca.crt',root/'ca.key'))
+            origin21_credentials.Credentials(origin21_profile.PROFILE,'relative','still-relative')
+            read.assert_not_called()
+
+    def test_managed_transport_rechecks_receipt_owner_and_target_before_sql(self):
+        from deploy.local import origin21_transport
+        deployment={'name':'managed','id':'i'}; runner=mock.Mock(); runner.target={'id':'i'}
+        transport=origin21_transport.ManagedTransport(origin21_transport._MANAGED_SEAL,runner,deployment,'image','head','receipt','digest')
+        record={'deployment':deployment,'app_image_id':'image','build_head':'head','build_receipt_sha256':'digest'}
+        with mock.patch.object(origin21_products,'_build_receipt',return_value=deployment), mock.patch.object(origin21_products,'_read_record',return_value=record):
+            runner.verify_target.side_effect=RuntimeError('target changed')
+            with self.assertRaises(RuntimeError): transport.admin('SELECT 1')
+            runner.run.assert_not_called()
+        with self.assertRaises(AttributeError): transport._image='other'
+        with self.assertRaises(ValueError): origin21_transport.ManagedTransport(object(),runner,deployment,'image','head','receipt','digest')
+
+    def test_managed_source_closure_rejects_symlink_without_touching_static(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); source=root/'source'; source.write_bytes(b'fixture')
+            with mock.patch.object(origin21_profile,'ROOT',root),mock.patch.object(origin21_state,'MANAGED_SOURCE_FILES',('source',)):
+                self.assertEqual(origin21_state._source_snapshot(origin21_profile.MANAGED),{'source':b'fixture'})
+                source.unlink(); source.symlink_to('/dev/null')
+                with self.assertRaises(ValueError): origin21_state._source_snapshot(origin21_profile.MANAGED)
+                with self.assertRaises(ValueError): origin21_state._source_snapshot(origin21_profile.MANAGED._replace())
+
+    def test_managed_compose_requires_network_and_pins_mounted_sources(self):
+        from deploy.local import origin21_state
+        text=origin21_profile.MANAGED.compose.read_text()
+        self.assertIn('${ORIGIN21_CAPTURE_NETWORK:?managed capture network required}',text)
+        self.assertNotIn('apicontour-local_default',text)
+        for name in ('deploy/pilot/flows-wrong-name.json','deploy/pilot/flows-wrong-ca.json','deploy/pilot/native_edge_probe.js'):
+            self.assertIn(name,origin21_state.MANAGED_SOURCE_FILES)
+        self.assertNotIn('deploy/pilot/flows-wrong-name.json',origin21_state.SOURCE_FILES)
+
+    def test_managed_product_mounts_and_network_are_separate_and_closed(self):
+        context=origin21_profile.MANAGED
+        for index in (1,2):
+            mounts=origin21_products._mounts(index,selected=context)
+            self.assertEqual(mounts['/pilot/native_edge_probe.js'],str(origin21_profile.ROOT/'deploy/pilot/native_edge_probe.js'))
+            self.assertEqual(mounts['/pilot/ca.crt'],str(context.profile.state.parent/'ca.crt'))
+            self.assertEqual(mounts['/pilot/tls/client.key'],str(context.profile.state/('replica'+str(index))/'client.key'))
+            self.assertNotEqual(mounts['/pilot/ca.crt'],origin21_products._mounts(index)['/pilot/ca.crt'])
+        members=['a'*64,'b'*64]; token='c'*64; network_id='d'*64
+        network={'Name':context.network,'Id':network_id,'Internal':True,'Labels':{'com.docker.compose.project':context.project,'com.docker.compose.network':'default','org.apicontour.origin21.owner':token},'Containers':{x:{} for x in members}}
+        with mock.patch.object(origin21_products,'_objects',return_value=network) as inspect:
+            self.assertEqual(origin21_products._network(members,token,selected=context),network_id)
+            self.assertEqual(inspect.call_args.args[0],['docker','network','inspect',context.network])
+            with self.assertRaises(RuntimeError): origin21_products._network(members[:1],token,selected=context)
+        with self.assertRaises(ValueError): origin21_products._mounts(1,selected=context._replace())
+
+    def test_managed_envoy_requires_both_owner_labels_before_start(self):
+        context=origin21_profile.MANAGED; cid='a'*64; origin='b'*64; edge='c'*32
+        image={'id':'sha256:'+'d'*64,'env':['PATH=/bin'],'cmd':None,'entrypoint':['envoy'],'workdir':None}
+        mounts={'/certs':'/private/certs','/run/watch':'/private/watch','/run/forwarder':'/private/forwarder'}
+        obj={'Id':cid,'Name':'/'+context.project+'-native-envoy-1','Image':image['id'],
+             'Config':{'Image':origin21_products.ENVOY,'Labels':{'com.docker.compose.project':context.project,'com.docker.compose.service':'native-envoy','org.apicontour.origin21.owner':origin,'org.apicontour.managed-edge-owner':edge},'User':str(os.getuid())+':'+str(os.getgid()),'Env':['PATH=/bin'],'Cmd':['-c','/run/forwarder/envoy.json','--log-level','error'],'WorkingDir':'','Entrypoint':['envoy']},
+             'HostConfig':{'ReadonlyRootfs':True,'Privileged':False,'CapDrop':['ALL'],'CapAdd':None,'SecurityOpt':['no-new-privileges:true'],'PidMode':'','IpcMode':'private','UTSMode':'','UsernsMode':'','Devices':None,'Memory':256*1024*1024,'NanoCpus':1000000000,'PidsLimit':128,'PortBindings':{},'Tmpfs':{}},
+             'Mounts':[{'Destination':k,'Type':'bind','RW':False,'Source':v} for k,v in mounts.items()],'State':{'Running':False}}
+        with mock.patch.object(origin21_products,'_managed_edge_token',return_value=edge), mock.patch.object(origin21_products,'_companion_mounts',return_value=mounts):
+            origin21_products._validate_companion(obj,'native-envoy',cid,image,origin,'','','capture',running=False,selected=context)
+            changed=dict(obj,Config=dict(obj['Config'],Labels=dict(obj['Config']['Labels'],**{'org.apicontour.managed-edge-owner':'f'*32})))
+            with self.assertRaises(RuntimeError): origin21_products._validate_companion(changed,'native-envoy',cid,image,origin,'','','capture',running=False,selected=context)
+
+    def test_managed_edge_token_is_exclusive_durable_and_required_for_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            edge=Path(directory)/'edge'; context=origin21_profile.MANAGED._replace(edge=edge)
+            token='a'*64
+            with mock.patch.object(origin21_profile,'MANAGED',context), mock.patch.object(origin21_products,'_command',return_value=b'{}') as command:
+                with self.assertRaises((FileNotFoundError,ValueError)):
+                    origin21_products._derive_model('products',token,'image','network',selected=context)
+                command.assert_not_called()
+                edge_token=origin21_products._reserve_managed_edge(context,token)
+                self.assertEqual(len(edge_token),32); self.assertNotEqual(edge_token,token)
+                self.assertEqual(origin21_products._managed_edge_token(context,token),edge_token)
+                self.assertEqual((edge/'intent.json').stat().st_mode & 0o777,0o600)
+                for name in ('state','published','watched'): self.assertEqual((edge/name).stat().st_mode & 0o777,0o700)
+                with self.assertRaises(FileExistsError): origin21_products._reserve_managed_edge(context,token)
+                with self.assertRaises(ValueError): origin21_products._managed_edge_token(context,'b'*64)
+                with self.assertRaises(ValueError): origin21_products._derive_model('products',token,'image','network',selected=context)
+                self.assertEqual(command.call_args.kwargs['edge_token'],edge_token)
+
+    def test_managed_policy_cas_requires_exact_sensitive_transport(self):
+        from deploy.local import origin21_lease,origin21_transport
+        capture=origin21_profile.MANAGED_BOUND.capture
+        callback=mock.Mock(); runner=mock.Mock(); runner.run.return_value=''
+        transport=origin21_transport.ManagedTransport(origin21_transport._MANAGED_SEAL,runner,{'id':'fixture'},'image','head','receipt','digest')
+        args=(b'a',1,b'b',2,'start','end',False,capture)
+        with mock.patch.object(origin21_lease.p.base,'psql') as fallback, mock.patch.object(origin21_transport.ManagedTransport,'verify') as verify:
+            for executor in (None,callback,origin21_transport.sensitive,transport.admin):
+                with self.subTest(executor=executor):
+                    with self.assertRaises(ValueError): origin21_lease.locked_transaction(*args,executor=executor)
+            callback.assert_not_called(); fallback.assert_not_called(); runner.run.assert_not_called(); verify.assert_not_called()
+            origin21_lease.locked_transaction(*args,executor=transport.sensitive)
+            runner.run.assert_called_once(); self.assertGreaterEqual(verify.call_count,1)
+        with mock.patch.object(origin21_lease.p.base,'psql',return_value='') as static_fallback:
+            origin21_lease.locked_transaction(b'a',1,b'b',2,'start','end',False,origin21_profile.BOUND.capture)
+            static_fallback.assert_called_once()
+
+    def test_runtime_static_default_and_managed_sds_are_separate(self):
+        from deploy.pilot import native_envoy
+        from deploy.local import origin21_configs
+        default=origin21_runtime.configs()
+        self.assertEqual(default,origin21_runtime.configs(origin21_profile.PROFILE))
+        self.assertEqual(default['envoy'],native_envoy.config(origin_v2=True))
+        managed=origin21_runtime.configs(origin21_profile.MANAGED_PROFILE)
+        self.assertEqual(managed['envoy'],native_envoy.config(origin_v2=True,managed_edge=True))
+        with self.assertRaises(ValueError): origin21_runtime.configs(origin21_profile.MANAGED_PROFILE._replace())
+        self.assertNotEqual(origin21_configs.expected()['native/forwarder/envoy.json'],origin21_configs.expected(origin21_profile.MANAGED_PROFILE)['native/forwarder/envoy.json'])
+
+
 class Origin21Tests(unittest.TestCase):
     def test_compose_models_close_transitive_dependencies_and_detect_drift(self):
         services={name:{'networks':{'default':{}},'volumes':[{'type':'bind','source':'/private/input','target':'/input','read_only':True}]} for name in origin21_products.PRODUCTS+origin21_products.COMPANIONS}

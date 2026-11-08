@@ -46,6 +46,90 @@ class ManagedEdgeTests(unittest.TestCase):
         publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',r/'watched','3'*32,os.getuid() or 1,os.getgid(),['PATH=/usr/bin'])
         publisher.publish=mock.Mock()
         return edge.ManagedEdge(r/'state',r/'published',r/'watched',r/'ca',r/'ca-key',peer,publisher)
+    def test_intent_visibility_does_not_signal_before_durable_writer_returns(self):
+        import threading
+        owner=object.__new__(edge.ManagedEdge); owner.state=self.root/'state'; owner.watched=self.root/'watched'; owner.qualification=mock.Mock(); owner.publisher=mock.Mock(); owner.publisher.identity.return_value={'publisher':'fixed'}; owner.uncertain=False
+        visible=threading.Event(); durable=threading.Event(); failures=[]
+        def binding(name,data):
+            (owner.state/name).write_bytes(b''); visible.set()
+            if not durable.wait(2): raise TimeoutError('fixture')
+            (owner.state/name).write_bytes(data)
+        def publish():
+            try: owner._publish('version',{})
+            except BaseException as error: failures.append(error)
+        with mock.patch.object(edge.ManagedEdge,'_document',return_value=b'document'),mock.patch.object(edge.ManagedEdge,'_binding_file',side_effect=binding),mock.patch.object(edge,'_replace'),mock.patch.object(edge,'_sync_dir'):
+            thread=threading.Thread(target=publish); thread.start()
+            try:
+                self.assertTrue(visible.wait(2)); owner.qualification._prepare_publication_intent.assert_not_called(); owner.publisher.publish.assert_not_called()
+            finally: durable.set(); thread.join(3)
+        self.assertFalse(thread.is_alive()); self.assertFalse(failures); owner.qualification._prepare_publication_intent.assert_called_once()
+
+    def test_failed_durable_intent_never_signals_or_starts_publisher(self):
+        owner=object.__new__(edge.ManagedEdge); owner.state=self.root/'state'; owner.watched=self.root/'watched'; owner.qualification=mock.Mock(); owner.publisher=mock.Mock(); owner.publisher.identity.return_value={'publisher':'fixed'}; owner.uncertain=False
+        def binding(name,data):
+            (owner.state/name).write_bytes(b'partial'); raise OSError('fsync failure')
+        with mock.patch.object(edge.ManagedEdge,'_document',return_value=b'document'),mock.patch.object(edge.ManagedEdge,'_binding_file',side_effect=binding),mock.patch.object(edge,'_replace'):
+            with self.assertRaises(OSError): owner._publish('version',{})
+        self.assertTrue(owner.uncertain); self.assertTrue((owner.state/'publication.exec.intent').exists()); owner.qualification._prepare_publication_intent.assert_not_called(); owner.publisher.publish.assert_not_called()
+
+    def test_exec_readiness_waits_for_fixed_source_preparation(self):
+        import threading
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        proof=object.__new__(OwnedManagedQualification)
+        for name,value in (('_token','4'*32),('_ack_armed',True),('_exec_intent',None),('_exec_ready',None)): object.__setattr__(proof,name,value)
+        entered=threading.Event(); release=threading.Event(); failures=[]; ready_at_exec=[]
+        with mock.patch.object(OwnedManagedQualification,'verify',return_value=proof),mock.patch.object(OwnedManagedQualification,'publisher_source',return_value=b'fixed-source'),mock.patch.object(OwnedManagedQualification,'consume_ack_loss',return_value=True),mock.patch.object(edge.NativeDirectoryPublisher,'verify',return_value=['fixed']):
+            publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',self.root/'watched','3'*32,1000,1000,['PATH=/usr/bin'],qualification=proof)
+            proof._prepare_publication_intent(publisher,b'document','a'*32)
+            def source():
+                entered.set()
+                if not release.wait(2): raise TimeoutError('fixture')
+                return b'fixed-source'
+            def command(*args,**kwargs):
+                ready_at_exec.append(proof.publication_exec_ready()); return b'DOC_VERIFIED\nPUBLISHED\n'
+            def publish():
+                try: publisher.publish(b'document','a'*32)
+                except BaseException as error: failures.append(error)
+            with mock.patch.object(OwnedManagedQualification,'publisher_source',side_effect=source),mock.patch.object(edge,'_command',side_effect=command):
+                thread=threading.Thread(target=publish); thread.start()
+                try:
+                    self.assertTrue(entered.wait(2)); self.assertIsNone(proof.publication_exec_ready())
+                finally: release.set(); thread.join(3)
+            with self.assertRaises(ValueError): proof._mark_publication_exec_ready(publisher,hashlib.sha256(b'document').hexdigest(),'a'*32)
+        self.assertFalse(thread.is_alive()); self.assertFalse(failures); self.assertEqual(len(ready_at_exec),1)
+        self.assertEqual(ready_at_exec[0]['intent']['nonce'],'a'*32); self.assertIsInstance(ready_at_exec[0]['started'],float)
+
+    def test_failed_preexec_source_never_signals_readiness(self):
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        proof=object.__new__(OwnedManagedQualification)
+        for name,value in (('_token','4'*32),('_ack_armed',True),('_exec_intent',None),('_exec_ready',None)): object.__setattr__(proof,name,value)
+        with mock.patch.object(OwnedManagedQualification,'verify',return_value=proof),mock.patch.object(OwnedManagedQualification,'publisher_source',return_value=b'fixed-source'),mock.patch.object(OwnedManagedQualification,'consume_ack_loss',return_value=True),mock.patch.object(edge.NativeDirectoryPublisher,'verify',return_value=['fixed']):
+            publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',self.root/'watched','3'*32,1000,1000,['PATH=/usr/bin'],qualification=proof)
+            proof._prepare_publication_intent(publisher,b'document','a'*32)
+            def command(args,**kwargs):
+                if args[1]=='inspect': return b'false'
+                return b''
+            with mock.patch.object(OwnedManagedQualification,'publisher_source',side_effect=ValueError('source failure')),mock.patch.object(edge,'_command',side_effect=command) as run:
+                with self.assertRaises(ValueError): publisher.publish(b'document','a'*32)
+            self.assertIsNone(proof.publication_exec_ready()); self.assertFalse(any(c.args[0][1]=='exec' for c in run.call_args_list))
+
+    def test_qualification_publisher_binds_source_and_stops_on_lost_ack(self):
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        proof=object.__new__(OwnedManagedQualification); object.__setattr__(proof,'_token','4'*32); object.__setattr__(proof,'_ack_armed',True); object.__setattr__(proof,'_exec_intent',None); object.__setattr__(proof,'_exec_ready',None)
+        calls=[]
+        def command(args,timeout=10):
+            calls.append((args,timeout))
+            if args[1]=='exec': raise TimeoutError('unknown')
+            if args[1]=='inspect': return b'false'
+            return b''
+        with mock.patch.object(OwnedManagedQualification,'verify',return_value=proof),mock.patch.object(OwnedManagedQualification,'publisher_source',return_value=b'fixed-source'),mock.patch.object(OwnedManagedQualification,'consume_ack_loss',return_value=True),mock.patch.object(edge.NativeDirectoryPublisher,'verify',return_value=['fixed']),mock.patch.object(edge,'_command',side_effect=command):
+            publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',self.root/'watched','3'*32,1000,1000,['PATH=/usr/bin'],qualification=proof)
+            self.assertEqual(publisher.identity()['qualification']['script_sha256'],hashlib.sha256(b'fixed-source').hexdigest())
+            proof._prepare_publication_intent(publisher,b'document','a'*32)
+            with self.assertRaises(TimeoutError): publisher.publish(b'document','a'*32)
+        self.assertEqual(calls[0][1],2); self.assertEqual(calls[0][0][-3:],['fixture-publisher',hashlib.sha256(b'document').hexdigest(),'a'*32])
+        self.assertEqual(calls[1][0][:2],['docker','stop']); self.assertEqual(calls[2][0][:2],['docker','inspect'])
+
     def test_native_publisher_inspects_exact_identity_and_stops_unknown_exec(self):
         import json
         publisher=edge.NativeDirectoryPublisher('1'*64,'sha256:'+'2'*64,'2026-11-07T01:00:00Z',self.root/'watched','3'*32,1000,1000,['PATH=/usr/bin'])
@@ -399,6 +483,94 @@ class ManagedEdgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unsafe'): certs.validate_native_edge(version)
         (self.root/'linked').unlink(); (path/'key.pem').chmod(0o644)
         with self.assertRaisesRegex(ValueError,'unsafe'): certs.validate_native_edge(version)
+
+    def test_existing_origin_persists_topology_before_staging_and_publication(self):
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer(); record={'version':1,'products':[{'started_at':'fixed-one'},{'started_at':'fixed-two'}]}
+        with self.native_owner(peer) as owner, mock.patch.object(origin21_managed_controller,'verify_before_publication',return_value=record), mock.patch.object(owner,'_publish') as publish:
+            stage=owner._stage_new
+            def checked_stage(data,days):
+                self.assertTrue((self.root/'state'/'existing-origin.intent').is_file())
+                return stage(data,days)
+            with mock.patch.object(owner,'_stage_new',side_effect=checked_stage): owner.prepare_initial_existing_origin()
+            self.assertEqual((self.root/'state'/'existing-origin.intent').stat().st_mode & 0o777,0o600)
+            publish.assert_called_once()
+            self.assertIsNone(owner._load()['current']); self.assertIsNotNone(owner._load()['pending'])
+
+    def test_existing_origin_changed_topology_never_publishes(self):
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer()
+        with self.native_owner(peer) as owner, mock.patch.object(origin21_managed_controller,'verify_before_publication',side_effect=[{'version':1},{'version':2}]), mock.patch.object(owner,'_publish') as publish:
+            with self.assertRaises(ValueError): owner.prepare_initial_existing_origin()
+            publish.assert_not_called()
+            self.assertTrue((self.root/'state'/'existing-origin.intent').exists())
+            self.assertIsNotNone(owner._load()['pending'])
+
+    def test_existing_origin_binds_recorded_product_and_one_envoy_start(self):
+        import json
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer(); product='2026-11-07T01:02:03Z'; envoy='2026-11-07T01:02:04Z'
+        with self.native_owner(peer) as owner:
+            record={'version':1,'peer':peer.identity(),'publisher':owner.publisher.identity(),'products':[{'started_at':product},{'started_at':'second'}],'companions':{'native-envoy':{'id':peer.envoy_cid}}}
+            expected={'replica_started':product,'envoy_started':envoy}
+            with mock.patch.object(origin21_managed_controller,'verify_before_publication',return_value=record), mock.patch.object(origin21_managed_controller,'verify_after_start',return_value=expected) as topology, mock.patch.object(peer,'observe_live',return_value=expected), mock.patch.object(owner,'_confirm'):
+                owner.prepare_initial_existing_origin()
+                raw=(self.root/'state'/'existing-origin.intent').read_bytes()
+                launch=json.dumps({'version':1,'existing_sha256':hashlib.sha256(raw).hexdigest(),'envoy_cid':peer.envoy_cid},sort_keys=True,separators=(',',':')).encode()
+                capability=owner._begin_existing_start(launch)
+                with self.assertRaises(RuntimeError): owner.bind_initial_peer()
+                owner._bind_initial_existing_origin(capability); self.assertEqual(owner._load()['binding'],expected)
+                before=topology.call_count; owner.reconcile(); self.assertGreaterEqual(topology.call_count-before,2)
+                self.assertIsNotNone(owner._load()['current'])
+
+    def test_reopened_start_intent_cannot_observe_new_envoy(self):
+        import json
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer()
+        with self.native_owner(peer) as owner:
+            record={'version':1,'peer':peer.identity(),'publisher':owner.publisher.identity(),'products':[{'started_at':'fixed'},{'started_at':'second'}],'companions':{'native-envoy':{'id':peer.envoy_cid}}}
+            raw=json.dumps(record,sort_keys=True,separators=(',',':')).encode(); owner._binding_file('existing-origin.intent',raw)
+            launch=json.dumps({'version':1,'existing_sha256':hashlib.sha256(raw).hexdigest(),'envoy_cid':peer.envoy_cid},sort_keys=True,separators=(',',':')).encode()
+            owner._begin_existing_start(launch)
+        with self.native_owner(peer) as reopened, mock.patch.object(origin21_managed_controller,'verify_after_start') as observe:
+            with self.assertRaises(RuntimeError): reopened.bind_initial_existing_origin()
+            observe.assert_not_called()
+
+    def test_reopened_launch_only_cannot_adopt_envoy_start(self):
+        import json
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer()
+        with self.native_owner(peer) as owner:
+            record={'version':1,'peer':peer.identity(),'publisher':owner.publisher.identity(),'products':[{'started_at':'fixed'},{'started_at':'second'}],'companions':{'native-envoy':{'id':peer.envoy_cid}}}
+            raw=json.dumps(record,sort_keys=True,separators=(',',':')).encode(); owner._binding_file('existing-origin.intent',raw)
+            launch=json.dumps({'version':1,'existing_sha256':hashlib.sha256(raw).hexdigest(),'envoy_cid':peer.envoy_cid},sort_keys=True,separators=(',',':')).encode()
+            owner._binding_file('existing-envoy-start.intent',launch)
+        with self.native_owner(peer) as reopened, mock.patch.object(origin21_managed_controller,'verify_after_start') as observe:
+            with self.assertRaises((RuntimeError,FileNotFoundError)): reopened.bind_initial_existing_origin()
+            observe.assert_not_called()
+
+    def test_incomplete_existing_bind_never_reobserves(self):
+        import json
+        from deploy.local import origin21_managed_controller
+        peer=self.native_peer()
+        with self.native_owner(peer) as owner:
+            record={'version':1,'peer':peer.identity(),'publisher':owner.publisher.identity(),'products':[{'started_at':'fixed'},{'started_at':'second'}],'companions':{'native-envoy':{'id':peer.envoy_cid}}}
+            raw=json.dumps(record,sort_keys=True,separators=(',',':')).encode(); owner._binding_file('existing-origin.intent',raw)
+            launch=json.dumps({'version':1,'existing_sha256':hashlib.sha256(raw).hexdigest(),'envoy_cid':peer.envoy_cid},sort_keys=True,separators=(',',':')).encode()
+            owner._binding_file('existing-envoy-start.intent',launch); owner._binding_file('existing-bind.intent',launch)
+            with mock.patch.object(origin21_managed_controller,'verify_after_start') as verify:
+                with self.assertRaises(RuntimeError): owner.bind_initial_existing_origin()
+                verify.assert_not_called()
+
+    def test_existing_product_prepublication_requires_recorded_start_and_leaf(self):
+        peer=self.native_peer(); started='2026-11-07T01:02:03Z'; der=b'public-certificate'; fingerprint=hashlib.sha256(der).hexdigest()
+        with mock.patch.object(edge,'_probe_hash'), mock.patch.object(peer,'_inspect',return_value=['same']) as inspect, mock.patch.object(peer,'_envoy_and_topology',return_value=['created']) as envoy, mock.patch.object(edge,'_public_bytes',return_value=b'fixture'), mock.patch.object(edge.ssl,'PEM_cert_to_DER_cert',return_value=der):
+            peer.verify_existing_before_publication(started,fingerprint)
+            self.assertEqual(inspect.call_count,2); self.assertTrue(all(call.args[1]==started for call in inspect.call_args_list))
+            self.assertTrue(all(call.kwargs.get('created') is True for call in envoy.call_args_list))
+            with self.assertRaises(ValueError): peer.verify_existing_before_publication(started,'b'*64)
+        with mock.patch.object(edge,'_probe_hash'), mock.patch.object(peer,'_inspect',side_effect=[['old'],['new']]), mock.patch.object(peer,'_envoy_and_topology',return_value=['created']), mock.patch.object(edge,'_public_bytes',return_value=b'fixture'), mock.patch.object(edge.ssl,'PEM_cert_to_DER_cert',return_value=der):
+            with self.assertRaises(ValueError): peer.verify_existing_before_publication(started,fingerprint)
 
     def test_native_replica_rechecks_identity_mounts_and_fingerprint(self):
         import json

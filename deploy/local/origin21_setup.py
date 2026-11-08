@@ -92,19 +92,33 @@ class VerifiedLogins(origin21_logins.Logins):
         return result
 
 
-def prepare_identities():
+def prepare_identities(*, selected=origin21_profile.STATIC,qualification=None):
     """Create/reconcile only the fixed credential bundle; never enroll or start."""
+    if selected is origin21_profile.MANAGED:
+        from deploy.local.origin21_managed_qualification import require_matching
+        require_matching(qualification)
+    elif qualification is not None: raise ValueError('unexpected qualification')
     for stage in range(14,22): origin21_schema.require_reference(stage,'pre')
     origin21_schema.require_reference(14,'groups'); origin21_schema.require_reference(21,'enrolled')
-    snapshot=origin21_state._source_snapshot()
-    root=origin21_profile.ROOT/'.local-mvp'
-    credentials=origin21_credentials.Credentials(origin21_profile.PROFILE,root/'ca.crt',root/'ca.key')
-    origin21_state.run(origin21_profile.PROFILE,{'credentials':credentials},snapshot=snapshot,identities_only=True)
+    origin21_profile.require_context(selected)
+    snapshot=origin21_state._source_snapshot() if selected is origin21_profile.STATIC else origin21_state._source_snapshot(selected)
+    root=selected.profile.state.parent
+    credentials=origin21_credentials.Credentials(selected.profile,root/'ca.crt',root/'ca.key')
+    origin21_state.run(selected.profile,{'credentials':credentials},snapshot=snapshot,identities_only=True)
     return {'identities_reconciled':True,'enrolled':False,'pilot_ready':False}
 
 
-def prepare(*, psql, sensitive_execute, authenticate, inspect_slot, expected_evidence, renew=False, check_only=False):
+def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slot=None, expected_evidence, renew=False, check_only=False, selected=origin21_profile.STATIC, transport=None):
     """Reconcile the fixed journal. Never returns a runtime readiness claim."""
+    origin21_profile.require_context(selected)
+    if selected is origin21_profile.MANAGED:
+        from deploy.local import origin21_transport
+        if type(transport) is not origin21_transport.ManagedTransport or inspect_slot is not None or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
+        from deploy.local import origin21_products
+        inspect_slot=lambda index:origin21_products.inspect_slot(index,selected=origin21_profile.MANAGED,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
+        transport.verify()
+        psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
+    elif transport is not None: raise ValueError('unexpected managed transport')
     if not all(callable(x) for x in (psql,sensitive_execute,authenticate,inspect_slot)) or sensitive_execute is psql or type(renew) is not bool or type(check_only) is not bool or (renew and check_only) or type(expected_evidence) is not tuple or len(expected_evidence)!=2 or any(type(x) is not bytes or len(x)!=32 for x in expected_evidence):
         raise ValueError('separate trusted callbacks required')
     # All references must be installed before database calls, state or credentials.
@@ -119,9 +133,9 @@ def prepare(*, psql, sensitive_execute, authenticate, inspect_slot, expected_evi
         return execute
     psql=checked_callback(psql); sensitive_execute=checked_callback(sensitive_execute)
     if psql('SELECT pg_catalog.current_database()::text;')!='contour_local': raise RuntimeError('wrong local database')
-    snapshot=origin21_state._source_snapshot()
-    profile=origin21_profile.PROFILE; bound=origin21_profile.BOUND; context={'login':False}
-    root=origin21_profile.ROOT/'.local-mvp'
+    snapshot=origin21_state._source_snapshot() if selected is origin21_profile.STATIC else origin21_state._source_snapshot(selected)
+    profile=selected.profile; bound=selected.bound; context={'login':False}
+    root=profile.state.parent
     credential=origin21_credentials.Credentials(profile,root/'ca.crt',root/'ca.key')
     login=VerifiedLogins(profile,psql,sensitive_execute,authenticate,context)
     observer=origin21_enrollment.Observer(bound,sensitive_execute)
@@ -153,6 +167,7 @@ def prepare(*, psql, sensitive_execute, authenticate, inspect_slot, expected_evi
             elif status!=origin21_state.ABSENT or n>origin21_state.PHASES.index('logins'): raise ValueError('login context drift')
     def completed(check_source):
         if not renew: return None
-        return origin21_renewal.renew_locked(bound,sensitive_execute,check_source=check_source)
+        executor=transport.sensitive if selected is origin21_profile.MANAGED else sensitive_execute
+        return origin21_renewal.renew_locked(bound,executor,check_source=check_source)
     origin21_state.run(profile,operations,snapshot=snapshot,set_context=set_context,after_complete=completed,require_complete=(renew or check_only))
     return {'setup_reconciled':True,'pilot_ready':False}

@@ -4,8 +4,9 @@ import time
 from deploy.local import origin21_evidence, origin21_products, origin21_profile, origin21_setup, origin21_transport, provision
 
 
-def snapshot(psql):
-    t=provision.sql_quote(provision.IDS[0]); c=provision.sql_quote(origin21_profile.PROFILE.collector)
+def snapshot(psql,*,selected=origin21_profile.STATIC):
+    origin21_profile.require_context(selected)
+    t=provision.sql_quote(provision.IDS[0]); c=provision.sql_quote(selected.profile.collector)
     sql=f"""SELECT coalesce(json_agg(json_build_array(m.record_id::text,m.source_id::text,m.project_id::text,m.service_id::text,m.environment_id::text,m.deployment_id::text,
  r.value->'record'->>'direction',r.value->'record'->>'status_code',r.value->'record'->'structure',
  encode(p.leaf_sha256,'hex'),p.instance_id::text,p.lifecycle_id::text,p.credential_id::text,p.grant_id::text,encode(p.platform_evidence_sha256,'hex'),
@@ -31,11 +32,12 @@ WHERE m.tenant_id={t} AND m.collector_id={c} AND r.value->'record'->>'record_id'
     return value
 
 
-def validate_fresh(rows,before,index,leaf,evidence,revision):
+def validate_fresh(rows,before,index,leaf,evidence,revision,*,selected=origin21_profile.STATIC):
+    origin21_profile.require_context(selected)
     fresh=[row for row in rows if row[0] not in before]
     if len(fresh)>2: raise RuntimeError('unexpected concurrent observations')
     if len(fresh)<2 or any(row[15] is None for row in fresh): return False
-    profile=origin21_profile.PROFILE; slot=profile.origins[index-1]
+    profile=selected.profile; slot=profile.origins[index-1]
     shapes={'request':{'kind':'object','fields':{'probe':{'kind':'boolean'}},'additional':None},
             'response':{'kind':'object','fields':{'result':{'kind':'string'}},'additional':None}}
     if {row[6] for row in fresh}!={'request','response'}: raise RuntimeError('catalog direction mismatch')
@@ -53,24 +55,35 @@ def validate_fresh(rows,before,index,leaf,evidence,revision):
     return True
 
 
-def check(expected, *, psql, sensitive_execute, authenticate):
+def check(expected, *, psql=None, sensitive_execute=None, authenticate=None, selected=origin21_profile.STATIC, transport=None):
+    origin21_profile.require_context(selected)
+    if selected is origin21_profile.MANAGED:
+        if type(transport) is not origin21_transport.ManagedTransport or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
+        transport.verify(); psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
+        inspect_slot=lambda i:origin21_products.inspect_slot(i,selected=selected,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
+    else:
+        if transport is not None: raise ValueError('unexpected managed transport')
+        inspect_slot=origin21_products.inspect_slot
+    def context_call(func,*args):
+        return func(*args) if selected is origin21_profile.STATIC else func(*args,selected=selected)
     if type(expected) is not tuple or len(expected)!=2 or any(type(x) is not bytes or len(x)!=32 for x in expected): raise ValueError('fixed operator evidence required')
     if not all(callable(x) for x in (psql,sensitive_execute,authenticate)) or psql is sensitive_execute: raise ValueError('trusted callbacks required')
-    origin21_setup.prepare(psql=psql,sensitive_execute=sensitive_execute,
-        authenticate=authenticate,inspect_slot=origin21_products.inspect_slot,
-        expected_evidence=expected,check_only=True)
-    revision=origin21_products.require_current_policy(psql,sensitive_execute)
+    if selected is origin21_profile.STATIC:
+        origin21_setup.prepare(psql=psql,sensitive_execute=sensitive_execute,authenticate=authenticate,inspect_slot=inspect_slot,expected_evidence=expected,check_only=True)
+    else:
+        origin21_setup.prepare(transport=transport,expected_evidence=expected,check_only=True,selected=selected)
+    revision=context_call(origin21_products.require_current_policy,psql,sensitive_execute)
     # The inspector rechecks all fixed companion/product ownership and generation.
-    descriptors=[origin21_products.inspect_slot(i) for i in (1,2)]
+    descriptors=[inspect_slot(i) for i in (1,2)]
     if any(origin21_evidence.digest(v)!=expected[i] for i,v in enumerate(descriptors)): raise ValueError('operator evidence drift')
-    record=origin21_products._read_record('companions.json')
+    record=context_call(origin21_products._read_record,'companions.json')
     worker=record['services']['origin21-capture-worker']['id']
     origin21_products._command(['docker','exec',worker,'/usr/local/bin/local_capture','check','/run/capture/worker.json'],20)
     for index,desc in enumerate(descriptors,1):
         # Quiesce existing asynchronous projections before selecting fresh IDs.
-        previous={row[0] for row in snapshot(psql)}; stable=time.monotonic(); deadline=stable+15
+        previous={row[0] for row in context_call(snapshot,psql)}; stable=time.monotonic(); deadline=stable+15
         while time.monotonic()<deadline:
-            time.sleep(.25); now={row[0] for row in snapshot(psql)}
+            time.sleep(.25); now={row[0] for row in context_call(snapshot,psql)}
             if now!=previous: previous,stable=now,time.monotonic()
             if time.monotonic()-stable>=2: break
         else: raise RuntimeError('catalog did not quiesce')
@@ -80,9 +93,9 @@ def check(expected, *, psql, sensitive_execute, authenticate):
         if not isinstance(result,dict) or set(result)!={'status','expected_body','exception','admin_status','admin_exception'} or result['status']!=200 or result['expected_body'] is not True or result['exception']!='none' or result['admin_status'] not in (400,404) or result['admin_exception']!='none': raise RuntimeError('product probe failed')
         until=time.monotonic()+30
         while time.monotonic()<until:
-            if validate_fresh(snapshot(psql),previous,index,desc['leaf_sha256'],expected[index-1],revision): break
+            if context_call(validate_fresh,context_call(snapshot,psql),previous,index,desc['leaf_sha256'],expected[index-1],revision): break
             time.sleep(.25)
         else: raise RuntimeError('catalog projection deadline')
-        origin21_products.inspect_slot(index)
-    if origin21_products.require_current_policy(psql,sensitive_execute)!=revision: raise RuntimeError('policy changed during verification')
+        inspect_slot(index)
+    if context_call(origin21_products.require_current_policy,psql,sensitive_execute)!=revision: raise RuntimeError('policy changed during verification')
     return {'product_tls_and_catalog_verified':True,'ui_verified':False}

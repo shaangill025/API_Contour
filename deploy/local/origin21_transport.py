@@ -87,3 +87,70 @@ def authenticate(role,password):
     if not isinstance(password,str) or not re.fullmatch('[A-Za-z0-9_-]{32,4096}',password): raise ValueError('invalid credential')
     from deploy.local import origin21_sql_runner
     return origin21_sql_runner.production().run(password.encode('ascii'),'auth',role)==role
+
+
+_MANAGED_SEAL=object()
+
+
+class ManagedTransport:
+    """Context-bound local SQL transport; not an attestation against the host."""
+    __slots__=('_runner','_deployment','_image','_head','_receipt','_digest','_sealed','_qualification')
+    def __init__(self,seal,runner,deployment,image,head,receipt,digest,qualification=None):
+        if seal is not _MANAGED_SEAL: raise ValueError('managed transport factory required')
+        object.__setattr__(self,'_runner',runner); object.__setattr__(self,'_deployment',tuple(sorted(deployment.items())))
+        object.__setattr__(self,'_image',image); object.__setattr__(self,'_head',head)
+        object.__setattr__(self,'_receipt',receipt); object.__setattr__(self,'_digest',digest); object.__setattr__(self,'_qualification',qualification); object.__setattr__(self,'_sealed',True)
+    def __setattr__(self,name,value): raise AttributeError('managed transport is immutable')
+    @property
+    def qualification(self): return self._qualification
+    def verify(self):
+        from deploy.local.origin21_managed_qualification import require_matching
+        require_matching(self._qualification)
+        owner=origin21_profile.MANAGED.owner
+        if self._qualification is not None: self._qualification.verify_owner(owner)
+        elif os.path.lexists(owner/'qualification.intent'): raise ValueError('qualification proof required')
+        from deploy.local import origin21_products
+        deployment=origin21_products._build_receipt(self._image,self._head,self._receipt,self._digest,selected=origin21_profile.MANAGED)
+        if tuple(sorted(deployment.items()))!=self._deployment: raise RuntimeError('managed deployment receipt changed')
+        record=origin21_products._read_record('intent.json',selected=origin21_profile.MANAGED)
+        if record.get('deployment')!=deployment or (record.get('app_image_id'),record.get('build_head'),record.get('build_receipt_sha256'))!=(self._image,self._head,self._digest): raise RuntimeError('managed owner record changed')
+        self._runner.verify_target(self._runner.target)
+    def admin(self,sql):
+        if not isinstance(sql,str): raise ValueError('invalid SQL')
+        self.verify(); return self._runner.run((GUARD+sql).encode('utf-8'),'sql','postgres')
+    def sensitive(self,sql):
+        if not isinstance(sql,str): raise ValueError('invalid SQL')
+        self.verify(); return self._runner.run((GUARD+sql).encode('utf-8'),'sql','postgres')
+    def authenticate(self,role,password):
+        profile=origin21_profile.MANAGED.profile
+        if role not in (profile.ingress_login,profile.worker_login) or not isinstance(password,str) or not re.fullmatch('[A-Za-z0-9_-]{32,4096}',password): raise ValueError('invalid credential')
+        self.verify(); return self._runner.run(password.encode('ascii'),'auth',role)==role
+
+
+def managed_transport(*,image_id,head,receipt,digest,qualification=None):
+    """Bind only the complete managed receipt and its verified private owner."""
+    from deploy.local import capture_renew,origin21_products,origin21_sql_runner
+    selected=origin21_profile.MANAGED
+    from deploy.local.origin21_managed_qualification import require_matching
+    require_matching(qualification)
+    if qualification is not None:
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        if type(qualification) is not OwnedManagedQualification: raise ValueError('qualification proof required')
+        qualification.verify_owner(selected.owner)
+    elif os.path.lexists(selected.owner/'qualification.intent'): raise ValueError('qualification proof required')
+    deployment=origin21_products._build_receipt(image_id,head,receipt,digest,selected=selected)
+    record=origin21_products._read_record('intent.json',selected=selected)
+    if record.get('deployment')!=deployment or (record.get('app_image_id'),record.get('build_head'),record.get('build_receipt_sha256'))!=(image_id,head,digest): raise RuntimeError('managed owner record changed')
+    origin21_products._capture_network(deployment,selected=selected)
+    parent=selected.profile.state.parent; capture_renew.safe_dir(parent)
+    directory=parent/'origin21-transport'
+    try: os.mkdir(directory,0o700)
+    except FileExistsError: pass
+    else:
+        fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    runner=origin21_sql_runner.for_deployment(directory,deployment,selected=selected,qualification=qualification)
+    transport=ManagedTransport(_MANAGED_SEAL,runner,deployment,image_id,head,receipt,digest,qualification)
+    transport.verify()
+    return transport

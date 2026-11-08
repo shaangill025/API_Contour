@@ -60,3 +60,52 @@ _CAPTURE = _legacy_profiles.Profile(PROFILE.name, PROFILE.capture, PROFILE.colle
     PROFILE.deployment, PROFILE.instance, PROFILE.nonce, PROFILE.approved_names, PROFILE.approved_route_segments)
 BOUND = _legacy_profiles.OriginPilot(_CAPTURE, PROFILE.state, PROFILE.ingress_login, PROFILE.worker_login,
     'contour_origin_ingress', 'contour_catalog_worker', PROFILE.origins)
+
+# Only these two fixed contexts are authorities; equal reconstructed tuples are not.
+class Context(NamedTuple):
+    profile: Profile
+    bound: _legacy_profiles.OriginPilot
+    project: str
+    network: str
+    owner: Path
+    compose: Path
+    edge: Path
+
+
+MANAGED_STATE = ROOT / '.local-mvp-managed' / 'origin21-pilot'
+MANAGED_PROFILE = PROFILE._replace(
+    name='origin21-managed-pilot', state=MANAGED_STATE, capture=MANAGED_STATE/'capture',
+    origins=tuple(slot._replace(leaf_der=MANAGED_STATE/('replica'+str(i))/'client.crt.der')
+                  for i,slot in enumerate(PROFILE.origins,1)))
+_MANAGED_CAPTURE = _legacy_profiles.Profile(MANAGED_PROFILE.name,MANAGED_PROFILE.capture,MANAGED_PROFILE.collector,
+    MANAGED_PROFILE.source,MANAGED_PROFILE.deployment,MANAGED_PROFILE.instance,MANAGED_PROFILE.nonce,
+    MANAGED_PROFILE.approved_names,MANAGED_PROFILE.approved_route_segments)
+MANAGED_BOUND = _legacy_profiles.OriginPilot(_MANAGED_CAPTURE,MANAGED_PROFILE.state,MANAGED_PROFILE.ingress_login,
+    MANAGED_PROFILE.worker_login,'contour_origin_ingress','contour_catalog_worker',MANAGED_PROFILE.origins)
+STATIC = Context(PROFILE,BOUND,'apicontour-origin21','apicontour-origin21_default',STATE.parent/'origin21-products',
+                 ROOT/'deploy/local/origin21-compose.yaml',STATE.parent/'unused-static-edge')
+MANAGED = Context(MANAGED_PROFILE,MANAGED_BOUND,'apicontour-origin21-managed','apicontour-origin21-managed_default',
+                  MANAGED_STATE.parent/'origin21-products',ROOT/'deploy/local/origin21-managed-compose.yaml',MANAGED_STATE.parent/'managed-edge')
+
+
+def require_context(context):
+    if context is not STATIC and context is not MANAGED: raise ValueError('unsupported origin21 context')
+    return context
+
+
+def context_for_profile(profile):
+    if profile is PROFILE: return STATIC
+    if profile is MANAGED_PROFILE: return MANAGED
+    raise ValueError('unsupported origin21 profile')
+
+
+def context_for_bound(profile):
+    if profile is BOUND: return STATIC
+    if profile is MANAGED_BOUND: return MANAGED
+    raise ValueError('unsupported origin21 bound profile')
+
+
+def context_for_capture(profile):
+    if profile is BOUND.capture: return STATIC
+    if profile is MANAGED_BOUND.capture: return MANAGED
+    raise ValueError('unsupported origin21 capture profile')

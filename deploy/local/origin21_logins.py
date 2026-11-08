@@ -33,7 +33,7 @@ def scram_verifier(password, salt):
 
 class Logins:
     def __init__(self, profile, psql, sensitive_execute, authenticate):
-        if profile is not origin21_profile.PROFILE or not callable(authenticate) or not callable(sensitive_execute) or sensitive_execute is psql:
+        if (profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE) or not callable(authenticate) or not callable(sensitive_execute) or sensitive_execute is psql:
             raise ValueError('closed profile and authentication callback required')
         self.profile, self.psql, self.sensitive_execute, self.authenticate = profile, psql, sensitive_execute, authenticate
 

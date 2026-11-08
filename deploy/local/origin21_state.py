@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+from pathlib import Path
 import stat
 
 from deploy.local import capture_renew, origin21_profile, origin21_schema
@@ -43,6 +44,22 @@ SOURCE_FILES = ('deploy/local/origin21_profile.py', 'deploy/local/origin21_schem
                 'db/opt-in-migrations/0019_causal_sessions.sql',
                 'db/opt-in-migrations/0020_causal_inbox.sql',
                 'db/opt-in-migrations/0021_origin_admission.sql')
+MANAGED_SOURCE_FILES = SOURCE_FILES + ('deploy/gateway/managed_edge.py','deploy/gateway/certificates.py',
+    'deploy/pilot/native_edge_probe.js','deploy/pilot/managed_edge_controller.py',
+    'deploy/pilot/flows-wrong-name.json','deploy/pilot/flows-wrong-ca.json',
+    'deploy/local/origin21-managed-compose.yaml','deploy/local/origin21_managed_controller.py',
+    'deploy/local/origin21_managed_cli.py','deploy/local/origin21_managed_init.py',
+    'deploy/local/origin21_managed_bootstrap.py','deploy/local/origin21_managed_cleanup.py',
+    'deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py',
+    'scripts/test-managed-origin-qualification.py','scripts/qualify-managed-origin.py',
+    'scripts/qualify-origin21-onboarding.py','scripts/test-managed-native-edge.py',
+    'tests/fixtures/managed-origin/test_controller.py','tests/fixtures/managed-origin/test_cli.py',
+    'tests/fixtures/managed-origin/test_initializer.py','tests/fixtures/managed-origin/test_bootstrap.py',
+    'tests/fixtures/managed-origin/test_cleanup.py','tests/fixtures/managed-origin/test_qualification_cleanup.py',
+    'tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js',
+    'tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/publisher.js',
+    'tests/fixtures/managed-origin-qualification/test_driver.py','tests/fixtures/managed-origin-qualification/test_fixture.py',
+    'tests/fixtures/managed-origin-qualification/test_proof.py','tests/fixtures/managed-origin-qualification/test_wrapper.py')
 MAX_JOURNAL = 4096
 
 
@@ -58,14 +75,25 @@ def _identity(profile):
     return hashlib.sha256(_encode(value)).hexdigest()
 
 
-def _source_snapshot():
-    return {name:(origin21_profile.ROOT/name).read_bytes() for name in SOURCE_FILES}
+def _source_snapshot(context=origin21_profile.STATIC):
+    origin21_profile.require_context(context)
+    files=SOURCE_FILES if context is origin21_profile.STATIC else MANAGED_SOURCE_FILES
+    if context is origin21_profile.STATIC: return {name:(origin21_profile.ROOT/name).read_bytes() for name in files}
+    result={}
+    for name in files:
+        path=origin21_profile.ROOT/name
+        if not path.is_file() or any(part.is_symlink() for part in (path,*list(path.parents)[:len(Path(name).parts)-1])): raise ValueError('managed source unavailable')
+        result[name]=path.read_bytes()
+    return result
 
 
-def _source_identity(snapshot=None):
-    snapshot=_source_snapshot() if snapshot is None else snapshot
+def _source_identity(snapshot=None, context=origin21_profile.STATIC):
+    origin21_profile.require_context(context)
+    files=SOURCE_FILES if context is origin21_profile.STATIC else MANAGED_SOURCE_FILES
+    snapshot=_source_snapshot(context) if snapshot is None else snapshot
+    if set(snapshot)!=set(files): raise ValueError('source closure mismatch')
     digest=hashlib.sha256()
-    for name in SOURCE_FILES:
+    for name in files:
         digest.update(name.encode()+b'\0'+hashlib.sha256(snapshot[name]).digest())
     return digest.hexdigest()
 
@@ -112,7 +140,7 @@ def run(profile, operations, *, snapshot=None, set_context=None, after_complete=
     Partial initial writes and drift fail closed; an unplanned exact state is
     never adopted. A completed phase is rechecked before any new mutation.
     """
-    if profile is not origin21_profile.PROFILE: raise ValueError('unsupported profile')
+    selected=origin21_profile.context_for_profile(profile)
     if type(identities_only) is not bool or type(require_complete) is not bool or (identities_only and require_complete): raise ValueError('invalid setup mode')
     phases=PHASES[:1] if identities_only else PHASES
     if type(operations) is not dict or set(operations)!=set(phases): raise ValueError('invalid operations')
@@ -136,14 +164,17 @@ def run(profile, operations, *, snapshot=None, set_context=None, after_complete=
         info=os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1: raise ValueError('unsafe lock')
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        source=_source_identity(snapshot)
-        if _source_identity()!=source: raise ValueError('source snapshot drift')
-        return _reconcile(profile.state/'setup.json',_identity(profile),source,operations,set_context=set_context,after_complete=after_complete,require_complete=require_complete,phases=phases)
+        source=_source_identity(snapshot,selected)
+        if _source_identity(context=selected)!=source: raise ValueError('source snapshot drift')
+        return _reconcile(profile.state/'setup.json',_identity(profile),source,operations,set_context=set_context,after_complete=after_complete,require_complete=require_complete,phases=phases,selected=selected)
     finally:
         os.close(fd)
 
 
-def _reconcile(path, identity, source, operations, *, set_context=None, after_complete=None, require_complete=False, phases=PHASES):
+def _reconcile(path, identity, source, operations, *, set_context=None, after_complete=None, require_complete=False, phases=PHASES, selected=origin21_profile.STATIC):
+    origin21_profile.require_context(selected)
+    def source_now():
+        return _source_identity() if selected is origin21_profile.STATIC else _source_identity(context=selected)
     if os.path.lexists(path): state=_read(path,identity,source)
     else:
         if require_complete: raise ValueError('committed setup required')
@@ -164,14 +195,14 @@ def _reconcile(path, identity, source, operations, *, set_context=None, after_co
         status=_status(op)
         if status==DRIFT: raise ValueError('pending phase drift')
         if status==ABSENT:
-            if _source_identity()!=source: raise ValueError('source changed')
+            if source_now()!=source: raise ValueError('source changed')
             op.apply()
-            if _source_identity()!=source or _status(op)!=EXACT: raise ValueError('phase postcondition failed')
-        if _source_identity()!=source: raise ValueError('source changed')
+            if source_now()!=source or _status(op)!=EXACT: raise ValueError('phase postcondition failed')
+        if source_now()!=source: raise ValueError('source changed')
         if phase in ('credentials','operator_evidence'):
             commitment=op.commitment()
             if not isinstance(commitment,str) or len(commitment)!=64 or any(c not in '0123456789abcdef' for c in commitment): raise ValueError('credential commitment invalid')
             state['credential_digest' if phase=='credentials' else 'evidence_digest']=commitment
         state['completed']+=1; state['pending']=None
         capture_renew.replace_durable(path,_encode(state))
-    if after_complete is not None: return after_complete(lambda: _source_identity()==source)
+    if after_complete is not None: return after_complete(lambda: source_now()==source)

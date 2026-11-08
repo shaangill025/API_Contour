@@ -46,7 +46,7 @@ def _local_timestamp(value):
 
 class Observer:
     def __init__(self, profile, psql):
-        if profile is not origin21_profile.BOUND: raise ValueError('unsupported origin profile')
+        if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND: raise ValueError('unsupported origin profile')
         self.profile, self.psql = profile, psql
         self.path=profile.state/POLICY
 
@@ -139,7 +139,7 @@ class Observer:
 
 class Target:
     def __init__(self, profile, psql, slot):
-        if profile is not origin21_profile.BOUND or not any(slot is item for item in profile.origins): raise ValueError('unsupported origin slot')
+        if (profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND) or not any(slot is item for item in profile.origins): raise ValueError('unsupported origin slot')
         self.profile,self.psql,self.slot=profile,psql,slot
     def inspect(self):
         t,p,s,e,*_=_scope(self.profile);d,i=map(Q,(self.slot.deployment,self.slot.instance))
@@ -160,7 +160,7 @@ class Target:
 
 class Fact:
     def __init__(self, profile, psql, slot, kind, evidence):
-        if profile is not origin21_profile.BOUND or not any(slot is item for item in profile.origins): raise ValueError('unsupported origin slot')
+        if (profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND) or not any(slot is item for item in profile.origins): raise ValueError('unsupported origin slot')
         if kind not in ('lifecycle','credential','grant') or not callable(evidence): raise ValueError('unknown origin fact')
         self.profile,self.psql,self.slot,self.kind,self.evidence=profile,psql,slot,kind,evidence
     def _leaf(self):

@@ -9,8 +9,12 @@ from deploy.pilot import origin_credentials
 
 class Credentials(origin_credentials.Credentials):
     def __init__(self, profile, ca_cert, ca_key):
-        if profile is not origin21_profile.PROFILE: raise ValueError('unsupported origin21 profile')
-        self.profile, self.ca_cert, self.ca_key = profile, Path(ca_cert), Path(ca_key)
+        if profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE: raise ValueError('unsupported origin21 profile')
+        cert,key=Path(ca_cert),Path(ca_key)
+        if profile is origin21_profile.MANAGED_PROFILE:
+            root=origin21_profile.MANAGED.profile.state.parent
+            if not cert.is_absolute() or not key.is_absolute() or cert!=root/'ca.crt' or key!=root/'ca.key': raise ValueError('managed CA paths required')
+        self.profile, self.ca_cert, self.ca_key = profile, cert, key
         self.allow_observer_policy = False
         self.allow_renewal_artifacts = frozenset()
         self.allow_runtime_configs = False
@@ -26,7 +30,7 @@ class Credentials(origin_credentials.Credentials):
             if self.allow_operator_evidence: entries.discard('operator-evidence.json')
             if self.allow_runtime_configs:
                 if origin21_configs.Configs(self.profile).inspect()!=origin21_state.EXACT: return origin21_state.DRIFT
-                entries-=set(origin21_configs.expected())
+                entries-=set(origin21_configs.expected(self.profile))
             if not entries: return origin21_state.ABSENT
             if entries!=origin_credentials._expected(): return origin21_state.DRIFT
             self._verify()

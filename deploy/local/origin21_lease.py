@@ -8,7 +8,13 @@ p = capture_renew.p
 
 def locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issued,expires,preflight,profile=None, *, executor=None):
     q=p.base.sql_quote
-    if profile is not origin21_profile.BOUND.capture: raise ValueError('unsupported origin21 profile')
+    selected=origin21_profile.context_for_capture(profile)
+    if selected is origin21_profile.MANAGED:
+        from deploy.local import origin21_transport
+        owner=getattr(executor,'__self__',None)
+        if type(owner) is not origin21_transport.ManagedTransport or getattr(executor,'__func__',None) is not origin21_transport.ManagedTransport.sensitive:
+            raise ValueError('managed sensitive transport required')
+        owner.verify()
     t,c,src,project,service,env,dep,instance,nonce=map(q,[p.TENANT,profile.collector,profile.source,p.PROJECT,p.SERVICE,p.ENVIRONMENT,profile.deployment,profile.instance,profile.nonce])
     # Preflight runs under the same collector lock and authorization checks as
     # commit. It emits only a closed state token, never envelope contents.
@@ -28,14 +34,14 @@ def locked_transaction(base_bytes,base_revision,proposal,proposal_revision,issue
         result_query=""
     # Origin history must remain contiguous at both possible heads while C is held.
     # Existing DEFAULT/PILOT SQL remains unchanged.
-    if profile is origin21_profile.BOUND.capture:
+    if profile is origin21_profile.BOUND.capture or profile is origin21_profile.MANAGED_BOUND.capture:
         def history_guard(revision):
             return f"IF (SELECT count(*) FROM contour.policy_revisions WHERE tenant_id={t} AND collector_id={c}) <> {revision} OR EXISTS (SELECT 1 FROM contour.policy_revisions WHERE tenant_id={t} AND collector_id={c} AND revision>{revision}) THEN RAISE EXCEPTION 'policy history drift'; END IF;\n"
         base_action=history_guard(base_revision)+base_action
         committed_action=history_guard(proposal_revision)+committed_action
     # All identity checks and both head comparisons execute after collector lock,
     # through one transaction. No dynamic values are used as SQL identifiers.
-    database_guard = "DO $$ BEGIN IF pg_catalog.current_database()<>'contour_local' THEN RAISE EXCEPTION 'wrong local database'; END IF; END $$;" if profile is origin21_profile.BOUND.capture else ''
+    database_guard = "DO $$ BEGIN IF pg_catalog.current_database()<>'contour_local' THEN RAISE EXCEPTION 'wrong local database'; END IF; END $$;" if (profile is origin21_profile.BOUND.capture or profile is origin21_profile.MANAGED_BOUND.capture) else ''
     sql=f'''BEGIN;
 {database_guard}
 SELECT set_config('apicontour.tenant_id',{t},true),set_config('statement_timeout','15s',true),set_config('lock_timeout','5s',true),set_config('idle_in_transaction_session_timeout','15s',true);
