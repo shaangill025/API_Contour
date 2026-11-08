@@ -88,6 +88,16 @@ def public_failure_locations(error,depth=0):
     return result[-8:]
 
 
+class ProcessRuntimeUnavailable(RuntimeError):
+    pass
+
+
+def require_process_primitives():
+    required=('P_PID','WEXITED','WNOHANG','WNOWAIT','CLD_EXITED','CLD_KILLED','CLD_DUMPED')
+    if os.name!='posix' or not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in required):
+        raise ProcessRuntimeUnavailable('configured qualification interpreter required')
+
+
 def observe_exit(process):
     # WNOWAIT retains our child identity through the one group-stop attempt.
     return os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
@@ -160,7 +170,8 @@ def group_members(group,deadline):
 
 
 class Runner:
-    def __init__(self,deadline,owner=None): self.deadline=deadline; self.owner=owner
+    def __init__(self,deadline,owner=None):
+        require_process_primitives(); self.deadline=deadline; self.owner=owner
     def __call__(self,args,*,cwd,timeout,log=None):
         remaining=self.deadline-time.monotonic()
         if remaining<=0: raise TimeoutError('absolute deadline')
@@ -318,6 +329,7 @@ def qualify(run,root,owner,token):
 
 def main():
     if len(sys.argv)!=1: raise ValueError('no arguments accepted')
+    require_process_primitives()
     os.umask(0o077)
     folder=Path(tempfile.mkdtemp(prefix='contour-origin21-qualification-')).resolve(); folder.chmod(0o700)
     owner=OwnedDirectory(folder)
@@ -337,6 +349,9 @@ def main():
 if __name__=='__main__':
     try: main(); print('PASS: Origin21 full owned qualification')
     except BaseException as error:
-        for line in public_failure_locations(error): print(line,file=sys.stderr)
-        print('FAIL: Origin21 qualification; private state retained',file=sys.stderr)
+        if type(error) is ProcessRuntimeUnavailable:
+            print('FAIL: interpreter lacks POSIX waitid/WNOWAIT; use configured Python 3.13',file=sys.stderr)
+        else:
+            for line in public_failure_locations(error): print(line,file=sys.stderr)
+            print('FAIL: Origin21 qualification; private state retained',file=sys.stderr)
         raise SystemExit(1) from None

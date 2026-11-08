@@ -117,6 +117,12 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.owned.remove()
         self.assertEqual(sentinel.read_text(),'foreign'); self.assertFalse((self.owner/'intent.json').exists())
 
+    def test_unsupported_interpreter_refuses_before_process_or_owner_creation(self):
+        with mock.patch.object(w.os,'waitid',None,create=True),mock.patch.object(w.subprocess,'Popen') as spawn,mock.patch.object(w.tempfile,'mkdtemp') as create,mock.patch.object(w.sys,'argv',['qualifier']):
+            with self.assertRaises(w.ProcessRuntimeUnavailable):w.Runner(time.monotonic()+5,self.owned)
+            with self.assertRaises(w.ProcessRuntimeUnavailable):w.main()
+            spawn.assert_not_called();create.assert_not_called()
+
     def test_wait_exit_rejects_already_exited_after_deadline(self):
         observed=type('Exit',(),{'si_code':os.CLD_EXITED,'si_status':0})()
         with mock.patch.object(w,'observe_exit',return_value=observed) as inspect,mock.patch.object(w.time,'monotonic',return_value=2):
