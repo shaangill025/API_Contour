@@ -164,7 +164,10 @@ impl VerifiedCausalGrant {
             ]
             .iter()
             .any(|id| !policy::uuid(id))
-            || p.causal_profile != "nodered_5_0_9_v1"
+            || !(p.causal_profile == "nodered_5_0_9_v1"
+                || (p.causal_profile == "nodered_5_0_9_wire_v1"
+                    && p.profile_sha256
+                        == "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"))
             || p.profile_sha256.len() != 64
             || !p
                 .profile_sha256

@@ -24,6 +24,16 @@ use tokio_postgres::{Client, Error, Row};
 
 const PROFILE: &str = "nodered_5_0_9_v1";
 const ARTIFACT: &str = "b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510";
+const WIRE_PROFILE: &str = "nodered_5_0_9_wire_v1";
+const WIRE_ARTIFACT: &str = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
+
+fn authorized_profile(name: &str, hash: &str) -> bool {
+    matches!(
+        (name, hash),
+        (PROFILE, ARTIFACT) | (WIRE_PROFILE, WIRE_ARTIFACT)
+    )
+}
+
 const ROLE_QUERY: &str = "SELECT current_user=session_user, COALESCE(session_user=(SELECT a.usename FROM pg_catalog.pg_stat_activity a WHERE a.pid=pg_catalog.pg_backend_pid()),false), EXISTS (SELECT 1 FROM pg_catalog.pg_roles u WHERE u.rolname=current_user AND NOT u.rolsuper AND NOT u.rolbypassrls), EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname='contour_causal_issuer'), EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname='contour_causal_inbox_writer'), EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname=$1 AND pg_catalog.pg_has_role(current_user,r.oid,'USAGE')), NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname<>current_user AND r.rolname<>$1 AND pg_catalog.pg_has_role(current_user,r.oid,'MEMBER'))";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,8 +370,7 @@ fn verify(
         ids[3].as_str(),
         ids[8].as_str(),
         ids[9].as_str(),
-    ] || grant.causal_profile() != PROFILE
-        || grant.profile_sha256() != ARTIFACT
+    ] || !authorized_profile(grant.causal_profile(), grant.profile_sha256())
     {
         return Err(CausalError::Identity);
     }
@@ -562,6 +571,7 @@ fn receipt(row: &Row) -> Result<CausalReceipt, CausalError> {
 }
 
 const ISSUE_SQL: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_v1',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
+const ISSUE_SQL_WIRE: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_wire_v1',decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
 const ACCEPT_SQL: &str = "SELECT receipt_id::text,floor(extract(epoch FROM accepted_at)*1000000)::bigint,duplicate FROM contour.accept_causal_batch($1::text::uuid,$2::text::uuid,$3::text::numeric,$4::bytea,$5::bytea,$6::bytea)";
 
 fn check_marker_inputs(
@@ -1035,7 +1045,14 @@ impl CausalIssuer {
                 .await?;
                 check_deadline(deadline)?;
                 let row = tx
-                    .query_one(ISSUE_SQL, &params)
+                    .query_one(
+                        if grant.causal_profile() == PROFILE {
+                            ISSUE_SQL
+                        } else {
+                            ISSUE_SQL_WIRE
+                        },
+                        &params,
+                    )
                     .await
                     .map_err(issuer_sql_error)?;
                 let mut result = parse_session(&row, request, digest)?;
@@ -1409,6 +1426,98 @@ mod tests {
         let mut bad = original.clone();
         bad[440..444].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(CausalIssue::from_original_bytes(&bad).is_err());
+    }
+    #[test]
+    fn profile_authority_is_a_closed_pair_mapping() {
+        assert!(authorized_profile(PROFILE, ARTIFACT));
+        assert!(authorized_profile(WIRE_PROFILE, WIRE_ARTIFACT));
+        assert!(!authorized_profile(PROFILE, WIRE_ARTIFACT));
+        assert!(!authorized_profile(WIRE_PROFILE, ARTIFACT));
+        assert!(!authorized_profile("nodered_5_0_9_v2", WIRE_ARTIFACT));
+        assert!(!authorized_profile(WIRE_PROFILE, &"0".repeat(64)));
+    }
+    #[test]
+    fn signed_candidate_passes_full_verification_and_rejects_scope_and_time_failures() {
+        let legacy = fixture();
+        let candidate: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/causal_candidate_503.json"))
+                .unwrap();
+        let grant_keys = CausalGrantKeys::new(&[
+            (
+                "candidate-test",
+                hex32(candidate["test_public_hex"].as_str().unwrap()),
+            ),
+            ("fixture", hex32(legacy["grant_public"].as_str().unwrap())),
+        ])
+        .unwrap();
+        let (_, policy_keys) = keys(&legacy);
+        let make_request = |name: &str| {
+            CausalIssue::new(
+                binding(),
+                ID,
+                Duration::from_secs(60),
+                &bytes(&candidate, name),
+                &bytes(&legacy, "policy"),
+            )
+            .unwrap()
+        };
+        let good = make_request("candidate");
+        let (grant, _) = verify(&good, &[3; 32], &grant_keys, &policy_keys, now()).unwrap();
+        assert_eq!(
+            (grant.causal_profile(), grant.profile_sha256()),
+            (WIRE_PROFILE, WIRE_ARTIFACT)
+        );
+        for (name, error) in [
+            ("wrong_tenant", CausalError::Identity),
+            ("corrupt_scope", CausalError::Scope),
+            ("disabled", CausalError::Scope),
+            ("unknown_502", CausalError::Scope),
+            ("cross_hash", CausalError::Scope),
+            ("legacy_name_candidate_hash", CausalError::Identity),
+        ] {
+            assert_eq!(
+                verify(
+                    &make_request(name),
+                    &[3; 32],
+                    &grant_keys,
+                    &policy_keys,
+                    now()
+                )
+                .unwrap_err(),
+                error,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            verify(&good, &[4; 32], &grant_keys, &policy_keys, now()).unwrap_err(),
+            CausalError::Identity
+        );
+        for at in ["2026-10-07T12:00:00Z", "2026-10-07T12:10:00.000000999Z"] {
+            assert_eq!(
+                verify(
+                    &good,
+                    &[3; 32],
+                    &grant_keys,
+                    &policy_keys,
+                    Timestamp::parse(at).unwrap().instant()
+                )
+                .unwrap_err(),
+                CausalError::Expired
+            );
+        }
+        let (legacy_only, _) = keys(&legacy);
+        assert_eq!(
+            verify(&good, &[3; 32], &legacy_only, &policy_keys, now()).unwrap_err(),
+            CausalError::Signature
+        );
+        let mut disabled_policy = good.clone();
+        disabled_policy.policy = bytes(&legacy, "disabled_policy");
+        assert_eq!(
+            verify(&disabled_policy, &[3; 32], &grant_keys, &policy_keys, now()).unwrap_err(),
+            CausalError::Scope
+        );
+        let old = request(&legacy, "grant", "policy");
+        assert!(verify(&old, &[3; 32], &grant_keys, &policy_keys, now()).is_ok());
     }
     #[test]
     fn signed_grant_policy_and_fixed_point_positive_control() {
