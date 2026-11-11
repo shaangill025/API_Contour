@@ -294,4 +294,8 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     catalog_recovery = runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    if environment.get('CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE') == '1':
+        receipt=directory/'human-observation-history.done'
+        if receipt.is_symlink() or not receipt.is_file() or receipt.read_bytes()!=b'history-fixture-complete\n': raise AssertionError('mandatory history cases did not complete')
+        return
     runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment, catalog_recovery)

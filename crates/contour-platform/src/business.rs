@@ -7,9 +7,10 @@ use contour_core::{
 };
 use contour_postgres::{
     ComparisonInput, ComparisonRequest, ComparisonStoreError, ComparisonStored, DatabaseSettings,
-    DeclaredScope, HumanCatalogError, HumanCatalogOperation, HumanCatalogResource, HumanOrigin,
-    HumanReviewDecisionRequest, HumanReviewRequest, ReviewStatus, ReviewStoreError, ReviewStored,
-    ServiceImportError, ServiceImportScope, TrustedCa,
+    DeclaredScope, HumanCatalogError, HumanCatalogOperation, HumanCatalogResource,
+    HumanObservationError, HumanOrigin, HumanReviewDecisionRequest, HumanReviewRequest,
+    ReviewStatus, ReviewStoreError, ReviewStored, ServiceImportError, ServiceImportScope,
+    TrustedCa,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
@@ -163,6 +164,29 @@ impl Business {
             .connect_single_until(&self.ca, deadline)
             .await
             .map_err(|_| 503u16)?;
+        if method == "GET" && path == "/v1/observations" {
+            let (operation, limit, cursor) = observation_query(request.uri().query(), false)?;
+            let page = db
+                .list_observations_as_human_until(
+                    identity,
+                    &scope,
+                    &operation,
+                    limit,
+                    cursor.as_deref(),
+                    deadline,
+                )
+                .await
+                .map_err(observation_error)?;
+            return Ok(json!({"items":page.items,"next_cursor":page.next_cursor}));
+        }
+        if method == "GET" && path.starts_with("/v1/observations/") {
+            let (operation, _, _) = observation_query(request.uri().query(), true)?;
+            let id = segment(path, "/v1/observations/")?;
+            return db
+                .read_observation_as_human_until(identity, &scope, &operation, id, deadline)
+                .await
+                .map_err(observation_error);
+        }
         if method == "GET" && path == "/v1/operations" {
             let (limit, cursor, origin, include_origin) = query(request.uri().query())?;
             let page = if let Some(origin) = origin {
@@ -503,6 +527,39 @@ fn query(q: Option<&str>) -> Result<(u16, Option<String>, Option<OriginFilter>, 
     }
     Ok((limit, cursor, origin, include_origin))
 }
+fn observation_query(q: Option<&str>, detail: bool) -> Result<(String, u16, Option<String>), u16> {
+    let mut operation = None;
+    let mut limit = None;
+    let mut cursor = None;
+    for item in q.ok_or(400u16)?.split('&') {
+        let (key, value) = item.split_once('=').ok_or(400u16)?;
+        match key {
+            "operation_id" if operation.is_none() && canonical_uuid(value) => {
+                operation = Some(value.to_owned())
+            }
+            "limit" if !detail && limit.is_none() => {
+                let n = value.parse::<u16>().map_err(|_| 400u16)?;
+                if !(1..=50).contains(&n) {
+                    return Err(400);
+                }
+                limit = Some(n)
+            }
+            "cursor" if !detail && cursor.is_none() && canonical_uuid(value) => {
+                cursor = Some(value.to_owned())
+            }
+            _ => return Err(400),
+        }
+    }
+    Ok((operation.ok_or(400u16)?, limit.unwrap_or(50), cursor))
+}
+fn observation_error(e: HumanObservationError) -> u16 {
+    match e {
+        HumanObservationError::Scope | HumanObservationError::Limit => 400,
+        HumanObservationError::Forbidden => 403,
+        HumanObservationError::NotFound => 404,
+        _ => 503,
+    }
+}
 fn canonical_uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, c)| {
@@ -672,6 +729,40 @@ fn error(status: u16) -> PlatformResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observation_queries_are_scoped_bounded_and_unambiguous() {
+        let id = "12345678-1234-4234-8234-123456789abc";
+        assert_eq!(
+            observation_query(Some(&format!("operation_id={id}")), false),
+            Ok((id.to_owned(), 50, None))
+        );
+        assert_eq!(
+            observation_query(
+                Some(&format!("operation_id={id}&limit=1&cursor={id}")),
+                false
+            ),
+            Ok((id.to_owned(), 1, Some(id.to_owned())))
+        );
+        for q in [
+            format!("operation_id={id}&operation_id={id}"),
+            format!("operation_id={id}&limit=51"),
+            format!("operation_id={id}&limit=0"),
+            format!("operation_id={id}&cursor=bad"),
+            format!("operation_id={id}&tenant={id}"),
+            format!("operation_id={id}&limit=1&limit=2"),
+        ] {
+            assert_eq!(observation_query(Some(&q), false), Err(400));
+        }
+        assert_eq!(
+            observation_query(Some(&format!("operation_id={id}&limit=1")), true),
+            Err(400)
+        );
+        assert_eq!(
+            observation_query(Some(&format!("operation_id={id}&cursor={id}")), true),
+            Err(400)
+        );
+        assert_eq!(observation_query(None, false), Err(400));
+    }
     #[test]
     fn queries_are_bounded_and_unambiguous() {
         assert_eq!(query(None), Ok((50, None, None, false)));

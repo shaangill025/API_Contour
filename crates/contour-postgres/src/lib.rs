@@ -10,6 +10,8 @@ mod causal;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
+mod human_observations;
+pub use human_observations::{HumanObservationError, HumanObservationPage};
 mod human_catalog;
 pub use human_catalog::{
     HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource, HumanOrigin,

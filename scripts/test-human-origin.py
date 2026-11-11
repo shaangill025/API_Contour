@@ -205,4 +205,17 @@ def run_business_cases(execute, port, directory, environment, normal, unknown, s
     if path:
         fd = os.open(path,os.O_WRONLY | os.O_CREAT | os.O_EXCL,0o600)
         with os.fdopen(fd,'w') as output: json.dump(evidence,output,sort_keys=True,indent=2)
+    if environment.get('CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE') == '1':
+        # Two independent fixed configurations exercise denial without changing
+        # the existing reader credentials or the original positive scope.
+        config=json.loads(config_path.read_text()); other=dict(config); other['service_id']='ffffffff-ffff-4fff-8fff-ffffffffffff'
+        other_env=dict(config); other_env['environment_id']='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+        other_path=directory/'history-other-scope.json'; other_env_path=directory/'history-other-environment.json'
+        other_path.write_text(json.dumps(other)); other_env_path.write_text(json.dumps(other_env))
+        result=runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['checked_history_loader']()['run_cases'](execute,config_path,other_path,other_env_path,normal,unknown,scope,operation_id,target_dir,environment)
+        if type(result) is not dict or set(result)!={'stored_observations','handler_authorization','historical_origin'} or type(result['stored_observations']) is not int or result['stored_observations']<1 or result['handler_authorization'] is not True or result['historical_origin']!='unavailable': raise AssertionError('history fixture did not complete')
+        receipt=directory/'human-observation-history.done'
+        fd=os.open(receipt,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as out: out.write('history-fixture-complete\n'); out.flush(); os.fsync(out.fileno())
+        print('Real Business handler stored observation history and human authorization passed (not HTTP/session evidence).',flush=True)
     print('Real Business handler synthetic catalog/filter/authorization assertions passed (not HTTP/session evidence).',flush=True)

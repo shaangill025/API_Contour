@@ -14,7 +14,7 @@ use tokio_postgres::{IsolationLevel, Row, Statement, Transaction};
 const MAX_PAGE: usize = 1_048_576;
 // Includes all eight UUID strings in the private cursor and conservative metadata.
 const CURSOR_BUDGET: usize = 512;
-const EVIDENCE_SQL: &str = "SELECT row_to_json(w)::text,v.parser_profile,v.policy_revision::text,v.canonical_structure,v.structure_wire,encode(v.structure_hash,'hex') FROM contour.observation_windows w JOIN contour.variants v USING(tenant_id,variant_id,operation_id,collector_id) WHERE w.tenant_id=$1::text::uuid AND w.project_id=$2::text::uuid AND w.service_id=$3::text::uuid AND w.operation_id=$4::text::uuid AND w.variant_id=$5::text::uuid AND w.source_id=$6::text::uuid AND w.batch_id=$7::text::uuid AND w.record_id=$8::text::uuid";
+pub(crate) const EVIDENCE_SQL: &str = "SELECT row_to_json(w)::text,v.parser_profile,v.policy_revision::text,v.canonical_structure,v.structure_wire,encode(v.structure_hash,'hex') FROM contour.observation_windows w JOIN contour.variants v USING(tenant_id,variant_id,operation_id,collector_id) WHERE w.tenant_id=$1::text::uuid AND w.project_id=$2::text::uuid AND w.service_id=$3::text::uuid AND w.operation_id=$4::text::uuid AND w.variant_id=$5::text::uuid AND w.source_id=$6::text::uuid AND w.batch_id=$7::text::uuid AND w.record_id=$8::text::uuid";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogReadError {
     Scope,
@@ -181,7 +181,7 @@ fn encode(value: &Value) -> Result<Vec<u8>, CatalogReadError> {
     serde_json::to_writer(&mut writer, value).map_err(corrupt)?;
     Ok(writer.0)
 }
-async fn operation(
+pub(crate) async fn operation(
     transaction: &Transaction<'_>,
     scope: &CatalogReadScope,
 ) -> Result<[String; 8], CatalogReadError> {
@@ -299,7 +299,7 @@ async fn page(
     };
     Ok(CatalogPage { bytes, next })
 }
-async fn evidence(
+pub(crate) async fn evidence(
     transaction: &Transaction<'_>,
     statement: &Statement,
     scope: &CatalogReadScope,
@@ -323,14 +323,11 @@ async fn evidence(
         .map_err(database_error)?;
     let stored: Value = serde_json::from_str(row.try_get(0).map_err(corrupt)?).map_err(corrupt)?;
     let wire: &[u8] = row.try_get(4).map_err(corrupt)?;
-    let shape = Shape::from_wire_json(wire).map_err(corrupt)?;
-    if shape.to_wire_json().map_err(corrupt)? != wire
-        || shape.canonical_bytes().map_err(corrupt)?
-            != row.try_get::<_, &[u8]>(3).map_err(corrupt)?
-        || shape.fingerprint().map_err(corrupt)? != row.try_get::<_, &str>(5).map_err(corrupt)?
-    {
-        return Err(CatalogReadError::Corrupt);
-    }
+    let shape = checked_shape(
+        wire,
+        row.try_get(3).map_err(corrupt)?,
+        row.try_get(5).map_err(corrupt)?,
+    )?;
     let mut record_value = json!({"protocol":parts[4],"direction":parts[5],"operation":parts[6],"route_template":parts[7],"parser_profile":row.try_get::<_,&str>(1).map_err(corrupt)?,"policy_revision":row.try_get::<_,&str>(2).map_err(corrupt)?.parse::<u64>().map_err(corrupt)?,"structure":serde_json::from_slice::<Value>(wire).map_err(corrupt)?});
     for field in [
         "record_id",
@@ -388,4 +385,36 @@ async fn evidence(
     Ok(
         json!({"variant_id":variant,"collector_id":collector,"batch_id":batch,"canonicalization_version":observation.canonicalization_version,"structure_fingerprint":shape.fingerprint().map_err(corrupt)?,"record":envelope["records"][0]}),
     )
+}
+
+fn checked_shape(
+    wire: &[u8],
+    canonical: &[u8],
+    fingerprint: &str,
+) -> Result<Shape, CatalogReadError> {
+    let shape = Shape::from_wire_json(wire).map_err(corrupt)?;
+    if shape.to_wire_json().map_err(corrupt)? != wire
+        || shape.canonical_bytes().map_err(corrupt)? != canonical
+        || shape.fingerprint().map_err(corrupt)? != fingerprint
+    {
+        return Err(CatalogReadError::Corrupt);
+    }
+    Ok(shape)
+}
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    #[test]
+    fn shape_requires_exact_wire_canonical_and_hash() {
+        let shape = Shape::primitive(contour_core::Kind::String).unwrap();
+        let wire = shape.to_wire_json().unwrap();
+        let canonical = shape.canonical_bytes().unwrap();
+        let fingerprint = shape.fingerprint().unwrap();
+        assert!(checked_shape(&wire, &canonical, &fingerprint).is_ok());
+        assert!(checked_shape(&wire, b"wrong", &fingerprint).is_err());
+        assert!(checked_shape(&wire, &canonical, &"0".repeat(64)).is_err());
+        let mut changed = wire.clone();
+        changed.push(b' ');
+        assert!(checked_shape(&changed, &canonical, &fingerprint).is_err());
+    }
 }
