@@ -87,7 +87,7 @@ export function acknowledgeRecovery(id: string) {
 }
 // Authentication belongs to the same-origin server. No browser-supplied identity headers,
 // token persistence, remote URL configuration, or automatic retries.
-export async function request<T>(path: string, body?: unknown, deadlineMs = 30_000, validateResult?: (value: unknown) => T): Promise<T> {
+export async function request<T>(path: string, body?: unknown, deadlineMs = 30_000, validateResult?: (value: unknown) => T, responseLimit?: number): Promise<T> {
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), deadlineMs);
   let entry: Pending | undefined;
@@ -106,7 +106,19 @@ export async function request<T>(path: string, body?: unknown, deadlineMs = 30_0
           [400, 401, 403, 404, 409, 413, 422, 429].includes(response.status)) releaseCreate(entry);
       throw new ApiError(response.status);
     }
-    const responseBody: unknown = await response.json();
+    let responseBody: unknown;
+    if (responseLimit !== undefined) {
+      const length=response.headers.get('content-length');
+      if (length !== null && (!/^[0-9]+$/.test(length) || Number(length)>responseLimit)) throw new ApiError(0);
+      if (!response.body) throw new ApiError(0);
+      const reader=response.body.getReader(); const chunks: Uint8Array[]=[]; let total=0;
+      try {
+        while (true) { const part=await reader.read(); if (part.done) break; total+=part.value.length; if (total>responseLimit) throw new ApiError(0); chunks.push(part.value); }
+      } catch (error) { controller.abort(); throw error; }
+      finally { reader.releaseLock(); }
+      const bytes=new Uint8Array(total); let offset=0; for (const chunk of chunks) {bytes.set(chunk,offset); offset+=chunk.length;}
+      responseBody=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+    } else responseBody = await response.json();
     const result = validateResult ? validateResult(responseBody) : responseBody as T;
     if (entry) {
       if (!responseBody || typeof responseBody !== 'object' || !('id' in responseBody) || responseBody.id !== entry.key) throw new ApiError(0);
@@ -124,6 +136,21 @@ export const api = {
     return request<unknown>(`operations?${params}`).then(validate.catalog);
   },
   operation: (id: string) => request<unknown>(`operations/${encodeURIComponent(id)}?include_origin=true`).then(validate.operation),
+  observations: (operationId: string, cursor?: string) => {
+    if (!validUuid(operationId) || (cursor !== undefined && !validUuid(cursor))) throw new ApiError(400);
+    const params=new URLSearchParams({operation_id:operationId,limit:'50'});
+    if (cursor !== undefined) params.set('cursor',cursor);
+    return request(`observations?${params}`,undefined,30_000,value=>validate.observations(value,operationId),4_000_000);
+  },
+  observation: (operationId: string, id: string) => {
+    if (!validUuid(operationId) || !validUuid(id)) throw new ApiError(400);
+    const params=new URLSearchParams({operation_id:operationId});
+    return request(`observations/${encodeURIComponent(id)}?${params}`,undefined,30_000,value=>{
+      const item=validate.observation(value);
+      if (item.id!==id || item.operation_id!==operationId) throw new Error('Invalid response');
+      return item;
+    },131072);
+  },
   import: (body: ImportRequest) => request('contracts/import', body, 30_000, validate.contract),
   compare: (body: ComparisonRequest) => request('comparisons', body, 30_000, validate.comparison),
   comparison: (id: string) => request<unknown>(`comparisons/${encodeURIComponent(id)}`).then(validate.comparison),

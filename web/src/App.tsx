@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {api, ApiError, pendingRecovery, acknowledgeRecovery} from './api.ts';
 import {comparisonMatches, reviewMatches, reviewEligibility, failureStale, uuidPattern, validUuid} from './domain.ts';
 import type {Comparison, Contract, ImportFormat, Kind, Operation, Origin, Review} from './domain.ts';
+import {History} from './History.tsx';
 
 export function App() {
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -181,6 +182,7 @@ export function App() {
           {imported && <div className="import-result"><p><strong>Declared contract</strong> · revision {imported.revision}</p><code>{imported.id}</code><p>Warnings: {imported.warnings.length ? imported.warnings.join(', ') : 'None reported'}</p><div className="actions"><button className="secondary" disabled={locked || !!review} onClick={() => {setLeft(imported.id); setLeftKind('declared'); resetComparison();}}>Use as left baseline</button><button className="secondary" disabled={locked || !!review} onClick={() => {setRight(imported.id); resetComparison();}}>Use as right candidate</button></div></div>}
         </section>
       </div>
+      {operation && <History key={operation.id} operationId={operation.id} />}
       <section className="panel" aria-labelledby="compare-title"><p className="step">03 / EXACT COMPARISON</p><h2 id="compare-title">Compare baseline → candidate</h2><p>Enter exact public contract IDs. A declared baseline does not become approved by importing it.</p>
         <form onSubmit={e => void compare(e)}><fieldset disabled={locked || !!review}><div className="grid inputs"><div><label htmlFor="left-kind">Left baseline kind</label><select id="left-kind" value={leftKind} onChange={e => {setLeftKind(e.target.value as Kind); resetComparison();}}><option value="declared">Declared</option><option value="approved">Approved</option><option value="observed">Observed</option></select><label htmlFor="left">Left immutable version UUID</label><input id="left" required pattern={uuidPattern} value={left} onChange={e => {setLeft(e.target.value); resetComparison();}} /></div><div><label htmlFor="right">Right declared candidate UUID</label><input id="right" required pattern={uuidPattern} value={right} onChange={e => {setRight(e.target.value); resetComparison();}} /><p className="hint">The right version is the candidate submitted for approval.</p></div></div><button disabled={!canCompare || stale}>Compare exact versions</button></fieldset></form>
         {comparison && <div className="result"><h3 ref={heading} tabIndex={-1}>Result: <span className={`badge ${comparison.result}`}>{comparison.result}</span></h3><p>Direction: <strong>{comparison.direction}</strong> · comparison <code>{comparison.id}</code></p><p><strong>{comparison.left_kind}</strong> <code>{comparison.left_id}</code> → <strong>{comparison.right_kind}</strong> <code>{comparison.right_id}</code></p>
