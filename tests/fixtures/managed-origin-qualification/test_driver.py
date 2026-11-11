@@ -82,7 +82,7 @@ class QualificationDriverTests(unittest.TestCase):
         import tempfile
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         proof=object.__new__(OwnedManagedQualification); owner=mock.Mock(); owner.renew.side_effect=ValueError('primary')
-        context=mock.MagicMock(); context.__enter__.return_value=owner
+        context=owner
         with tempfile.TemporaryDirectory() as directory:
             owner.state=Path(directory)
             with mock.patch.object(OwnedManagedQualification,'verify',return_value=proof),mock.patch.object(OwnedManagedQualification,'bind_topology'),mock.patch.object(OwnedManagedQualification,'arm_ack_loss'),mock.patch.object(driver,'_source_guard',return_value='source'),mock.patch.object(driver.controller,'open_edge',return_value=context),mock.patch.object(driver,'_wait_publication_intent',side_effect=RuntimeError('watcher')):
@@ -95,7 +95,7 @@ class QualificationDriverTests(unittest.TestCase):
         from deploy.local import origin21_managed_cleanup
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         proof=object.__new__(OwnedManagedQualification); owner=mock.Mock(); owner.renew.side_effect=TimeoutError('expected')
-        context=mock.MagicMock(); context.__enter__.return_value=owner
+        context=owner
         watcher=mock.Mock(); watcher.is_alive.return_value=True
         with tempfile.TemporaryDirectory() as directory:
             owner.state=Path(directory)
@@ -103,10 +103,32 @@ class QualificationDriverTests(unittest.TestCase):
                 with self.assertRaises(BaseExceptionGroup): driver.qualify_lost_publication_ack(proof)
                 cleanup.assert_not_called()
         watcher.join.assert_called_once_with(45)
+        owner.close.assert_not_called()
+        driver._RETAINED[:]=[item for item in driver._RETAINED if item[0] is not owner]
+
+    def test_lost_ack_join_exception_retains_owner_and_proof_in_main(self):
+        import tempfile
+        from deploy.local import origin21_managed_qualification as q,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
+        proof=object.__new__(q.OwnedManagedQualification); owner=mock.Mock(); watcher=mock.Mock()
+        watcher.join.side_effect=KeyboardInterrupt('join'); owner.renew.side_effect=TimeoutError('expected')
+        try:
+            with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                owner.state=Path(directory)
+                for obj,name,value in ((driver,'_source_guard','source'),(q,'begin',proof),(init,'initialize',(Path('/receipt'),'digest')),(cli,'main',None),(driver.origin21_transport,'managed_transport',object()),(driver,'qualify_positive_streams',{}),(driver,'qualify_wrong_name_and_pending',{}),(driver.controller,'open_edge',owner),(driver.threading,'Thread',watcher),(disposal,'dispose_synthetic_volume',None)):
+                    stack.enter_context(mock.patch.object(obj,name,return_value=value))
+                stack.enter_context(mock.patch.object(q.OwnedManagedQualification,'verify',return_value=proof))
+                stack.enter_context(mock.patch.object(q.OwnedManagedQualification,'bind_topology'))
+                stack.enter_context(mock.patch.object(q.OwnedManagedQualification,'arm_ack_loss'))
+                close=stack.enter_context(mock.patch.object(q.OwnedManagedQualification,'close'))
+                with self.assertRaises(BaseExceptionGroup): driver.main(['image','head','receipt','digest'])
+                owner.close.assert_not_called(); close.assert_not_called(); disposal.dispose_synthetic_volume.assert_not_called()
+                self.assertTrue(any(item[0] is owner for item in driver._RETAINED))
+        finally:
+            driver._RETAINED[:]=[item for item in driver._RETAINED if item[0] is not owner and item[0] is not proof]
 
     def test_main_orders_real_boundaries_and_stops_before_cleanup_on_unknown_failure(self):
         from deploy.local import origin21_managed_qualification as q,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_cleanup as cleanup,origin21_managed_qualification_cleanup as disposal
-        proof=mock.MagicMock(); context=mock.MagicMock(); context.__enter__.return_value=proof; order=[]
+        proof=mock.MagicMock(); context=proof; order=[]
         def call(name,result=None,fail=False):
             def invoke(*args,**kwargs):
                 order.append(name)
@@ -135,32 +157,149 @@ class QualificationDriverTests(unittest.TestCase):
 
 class StreamOwnerSetupTests(unittest.TestCase):
     def test_owner_validation_precedes_starting_idle_bounded_request(self):
-        from contextlib import contextmanager
         events=[]; current=['a'*64]
         owner=mock.Mock()
         owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
-        owner.renew.side_effect=lambda:(events.append('renew'),current.__setitem__(0,'b'*64))
-        @contextmanager
-        def opened(**kwargs):
-            events.append('owner-enter')
-            try: yield owner
-            finally: events.append('owner-exit')
+        owner._confirm.side_effect=lambda:events.append('confirm')
+        def publish():
+            events.append('publish'); owner._confirm(); current[0]='b'*64
+        owner._publish_and_confirm.side_effect=publish
+        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        owner.close.side_effect=lambda:events.append('owner-exit')
         class Monitor:
             def __init__(self,args): events.append('client'); self.proc=mock.Mock()
             def lines(self): return [b'PID 7']
-            def wait(self,value): events.append('prefix' if value==b'CLIENT_WRITTEN' else 'pass')
+            def wait(self,value,**kwargs): events.append('prefix' if value==b'CLIENT_WRITTEN' else 'pass')
             def send(self,value): events.append('release')
             def finish(self,expected): events.append('finish')
             def reap(self): events.append('reap')
         helper={'Monitor':Monitor,'remote_absent':lambda *a:events.append('remote-absent')}
-        with mock.patch.object(driver.controller,'open_edge',side_effect=opened),mock.patch.object(driver,'_wait_status'):
+        with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'):
             self.assertEqual(driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object()),('a'*64,'b'*64))
-        self.assertLess(events.index('owner-enter'),events.index('client'))
-        self.assertLess(events.index('prefix'),events.index('renew'))
-        self.assertLess(events.index('renew'),events.index('release'))
+        self.assertLess(events.index('prefix'),events.index('publish'))
+        self.assertLess(events.index('confirm'),events.index('release'))
         self.assertLess(events.index('reap'),events.index('owner-exit'))
 
 class StreamOwnerFailureTests(unittest.TestCase):
+    def test_deadline_crossed_during_finish_or_absence_fails(self):
+        import time
+        for slow in ('finish','absence'):
+            with self.subTest(slow=slow):
+                owner=mock.Mock(); current=['a'*64]
+                owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
+                def publish(): owner._confirm(); current[0]='b'*64
+                owner._publish_and_confirm.side_effect=publish; owner.renew.side_effect=lambda:owner._publish_and_confirm()
+                monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
+                absent=mock.Mock()
+                if slow=='finish': monitor.finish.side_effect=lambda *a:time.sleep(.12)
+                else: absent.side_effect=lambda *a:time.sleep(.12)
+                with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'),mock.patch.object(driver,'_STREAM_DEADLINE',.08):
+                    with self.assertRaises(BaseExceptionGroup): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},{'Monitor':lambda _:monitor,'remote_absent':absent},object())
+                owner.close.assert_called_once()
+
+    def test_already_set_prefix_cannot_publish_after_deadline(self):
+        import threading,time
+        real_event=threading.Event; count=[0]; published=[]
+        class DelayedEvent:
+            def __init__(self): self.event=real_event()
+            def set(self): self.event.set()
+            def is_set(self): return self.event.is_set()
+            def wait(self,timeout=None):
+                result=self.event.wait(timeout)
+                if result: time.sleep(.12)
+                return result
+        def event():
+            count[0]+=1
+            return DelayedEvent() if count[0]==2 else real_event()
+        owner=mock.Mock(); owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
+        owner._publish_and_confirm.side_effect=lambda:published.append(True)
+        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
+        with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'),mock.patch.object(driver,'_STREAM_DEADLINE',.08),mock.patch.object(driver.threading,'Event',side_effect=event):
+            with self.assertRaises(BaseExceptionGroup): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},{'Monitor':lambda _:monitor,'remote_absent':mock.Mock()},object())
+        self.assertFalse(published)
+        for item in list(driver._RETAINED):
+            if item[0] is owner: item[1].join(2); driver._RETAINED.remove(item); owner.close()
+
+    def test_launch_and_join_exceptions_retain_owner_and_proof(self):
+        import threading
+        from deploy.local import origin21_managed_qualification as q,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
+        real_thread=threading.Thread
+        for failure in ('start','join'):
+            with self.subTest(failure=failure):
+                release=threading.Event(); entered=threading.Event(); threads=[]
+                owner=mock.Mock(); proof=mock.Mock(); original_publish=owner._publish_and_confirm; original_confirm=owner._confirm
+                owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
+                def publish():
+                    owner._confirm(); entered.set(); release.wait(2)
+                original_publish.side_effect=publish
+                owner.renew.side_effect=lambda:owner._publish_and_confirm()
+                class ThreadProxy:
+                    def __init__(self,**kwargs): self.thread=real_thread(**kwargs); threads.append(self.thread)
+                    def start(self):
+                        self.thread.start()
+                        if failure=='start': raise KeyboardInterrupt('start interrupted')
+                    def join(self,timeout):
+                        if failure=='join': raise KeyboardInterrupt('join interrupted')
+                        self.thread.join(timeout)
+                    def is_alive(self): return self.thread.is_alive()
+                monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
+                helper={'Monitor':mock.Mock(return_value=monitor),'remote_absent':mock.Mock()}
+                def streams(*unused):
+                    return driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,proof)
+                try:
+                    with ExitStack() as stack:
+                        for obj,name,value in ((driver.threading,'Thread',ThreadProxy),(driver.controller,'open_edge',owner),(driver,'_wait_status',None),(driver,'_source_guard','source'),(q,'begin',proof),(init,'initialize',(Path('/receipt'),'digest')),(cli,'main',None),(driver.origin21_transport,'managed_transport',object()),(driver,'qualify_positive_streams',None),(disposal,'dispose_synthetic_volume',None)):
+                            if name=='Thread': stack.enter_context(mock.patch.object(obj,name,side_effect=ThreadProxy))
+                            elif name=='qualify_positive_streams': stack.enter_context(mock.patch.object(obj,name,side_effect=streams))
+                            else: stack.enter_context(mock.patch.object(obj,name,return_value=value))
+                        with self.assertRaises(BaseExceptionGroup) as raised: driver.main(['image','head','receipt','digest'])
+                        self.assertTrue(any(isinstance(e,KeyboardInterrupt) for e in raised.exception.exceptions),repr(raised.exception))
+                        owner.close.assert_not_called(); proof.close.assert_not_called(); disposal.dispose_synthetic_volume.assert_not_called()
+                        self.assertIsNot(owner._publish_and_confirm,original_publish); self.assertIsNot(owner._confirm,original_confirm)
+                        self.assertTrue(any(item[0] is owner for item in driver._RETAINED))
+                finally:
+                    release.set()
+                    for thread in threads: thread.join(2)
+                    driver._RETAINED[:]=[item for item in driver._RETAINED if item[0] is not owner and item[0] is not proof]
+
+    def exercise_failure(self,kind):
+        import threading,time
+        owner=mock.Mock(); current=['a'*64]; release=threading.Event(); published=[]
+        owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
+        def confirm():
+            if kind=='confirm': raise ValueError('confirm')
+        def publish():
+            published.append(True); owner._confirm()
+            if kind=='postgate': raise ValueError('postgate')
+            if kind=='live': release.wait(2)
+            current[0]='b'*64
+        owner._confirm.side_effect=confirm; owner._publish_and_confirm.side_effect=publish
+        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
+        if kind=='client': monitor.wait.side_effect=ValueError('client')
+        if kind=='barrier': monitor.wait.side_effect=lambda *a,**k:time.sleep(.15)
+        helper={'Monitor':mock.Mock(return_value=monitor),'remote_absent':mock.Mock()}
+        try:
+            with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'),mock.patch.object(driver,'_STREAM_DEADLINE',.1 if kind in ('live','barrier') else 2):
+                with self.assertRaises(BaseExceptionGroup): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object())
+            if kind in ('client','barrier'): self.assertFalse(published)
+            if kind=='confirm': monitor.send.assert_not_called()
+            if kind=='live':
+                owner.close.assert_not_called(); self.assertTrue(any(item[0] is owner for item in driver._RETAINED))
+            else: owner.close.assert_called_once()
+        finally:
+            release.set()
+            for item in list(driver._RETAINED):
+                if item[0] is owner:
+                    item[1].join(2); driver._RETAINED.remove(item); owner.close()
+
+    def test_confirmation_failure(self): self.exercise_failure('confirm')
+    def test_post_activation_gate_or_save_failure(self): self.exercise_failure('postgate')
+    def test_client_failure_before_prefix(self): self.exercise_failure('client')
+    def test_barrier_expiry(self): self.exercise_failure('barrier')
+    def test_live_writer_retains_owner(self): self.exercise_failure('live')
+
     def test_owner_failure_never_constructs_stream_client(self):
         helper={'Monitor':mock.Mock()}
         with mock.patch.object(driver.controller,'open_edge',side_effect=RuntimeError('owner unavailable')):
@@ -168,19 +307,16 @@ class StreamOwnerFailureTests(unittest.TestCase):
         helper['Monitor'].assert_not_called()
 
     def test_renewal_and_monitor_cleanup_failures_survive_owner_close(self):
-        from contextlib import contextmanager
-        events=[]; primary=RuntimeError('rotation failed'); cleanup=OSError('reap failed')
-        owner=mock.Mock();owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}};owner.renew.side_effect=primary
-        @contextmanager
-        def opened(**kwargs):
-            try: yield owner
-            finally: events.append('owner-closed')
+        primary=RuntimeError('rotation failed'); cleanup=OSError('reap failed')
+        owner=mock.Mock();owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
+        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        owner._publish_and_confirm.side_effect=primary
         monitor=mock.Mock();monitor.lines.return_value=[b'PID 7'];monitor.reap.side_effect=cleanup
         helper={'Monitor':mock.Mock(return_value=monitor),'remote_absent':mock.Mock()}
-        with mock.patch.object(driver.controller,'open_edge',side_effect=opened),mock.patch.object(driver,'_wait_status'):
+        with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'):
             with self.assertRaises(BaseExceptionGroup) as raised:
                 driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object())
         self.assertIn(primary,raised.exception.exceptions);self.assertIn(cleanup,raised.exception.exceptions)
-        self.assertEqual(events,['owner-closed']);helper['remote_absent'].assert_not_called()
+        owner.close.assert_called_once();helper['remote_absent'].assert_not_called()
 
 if __name__=='__main__': unittest.main()

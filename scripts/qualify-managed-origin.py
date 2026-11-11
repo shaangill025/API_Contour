@@ -66,7 +66,7 @@ def child_failure_lines(owner):
         if len(raw)>16777216: raise ValueError('child diagnostic log too large')
     finally: os.close(fd)
     phases='arguments|source-check|qualification-begin|initialize|topology-up|transport|positive-streams|initial-readiness|stream-capture-baseline|stream-setup|stream-client-start|stream-prefix|stream-transition|stream-release|stream-capture-wait|stream-readiness|negative-cases|lost-ack|volume-disposal'
-    kinds='ValueError|RuntimeError|TimeoutError|AssertionError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|OtherError'
+    kinds='ValueError|RuntimeError|TimeoutError|AssertionError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|HeldStatusError|HeldBodyLimitError|HeldPrefixError|HeldResponseError|HeldResponseAborted|HeldBodyMismatch|HeldRequestError|HeldTimeout|HeldControlError|OtherError'
     names='|'.join(re.escape(name) for name in sorted(_ALLOWED_FRAMES))
     location='(?:unavailable|(?:'+names+'):[1-9][0-9]{0,6}(?:,(?:'+names+'):[1-9][0-9]{0,6}){0,5})'
     pattern=re.compile(('managed-failure phase=(?:'+phases+') role=(?:primary|cleanup) type=(?:'+kinds+') location='+location).encode())

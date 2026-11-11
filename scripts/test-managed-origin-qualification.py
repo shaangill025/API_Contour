@@ -13,6 +13,7 @@ import re
 import runpy
 import secrets
 import sys
+import threading
 import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -37,6 +38,8 @@ _ALLOWED_FRAMES={
     'scripts/qualify-origin21-onboarding.py',
 }
 _ALLOWED_TYPES={ValueError,RuntimeError,TimeoutError,AssertionError,PermissionError,FileNotFoundError,OSError,KeyError,IndexError,TypeError,AttributeError}
+_RETAINED=[]
+_STREAM_DEADLINE=180
 
 _PROGRESS_PHASES=('initial-readiness', 'initialize', 'lost-ack', 'negative-cases', 'positive-streams', 'qualification-begin', 'source-check', 'stream-capture-baseline', 'stream-capture-wait', 'stream-client-start', 'stream-prefix', 'stream-readiness', 'stream-release', 'stream-setup', 'stream-transition', 'topology-up', 'transport', 'volume-disposal')
 
@@ -45,6 +48,16 @@ def _set_phase(phase):
     if phase not in _PROGRESS_PHASES: raise ValueError('invalid diagnostic phase')
     _PHASE=phase
     print('managed-progress phase='+phase,file=sys.stderr,flush=True)
+
+class _OwnerGuard:
+    def __init__(self,owner): self.owner=owner
+    def __enter__(self): return self.owner
+    def __exit__(self,kind,error,traceback):
+        if not any(item[0] is self.owner for item in _RETAINED):
+            try: self.owner.close()
+            except BaseException as cleanup:
+                if error is not None: raise BaseExceptionGroup('qualification and owner close failures',[error,cleanup]) from None
+                raise
 
 
 def failure_lines(error,phase):
@@ -133,19 +146,64 @@ def _stream(mode,index,transition,destination,descriptor,helper,proof):
     global _PHASE
     _set_phase('stream-setup')
     if (mode,index,transition) not in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')): raise ValueError('unsupported qualification stream')
-    with controller.open_edge(qualification=proof) as owner:
+    owner=controller.open_edge(qualification=proof)
+    try:
         return _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner)
+    finally:
+        primary=sys.exc_info()[1]
+        if not any(item[0] is owner for item in _RETAINED):
+            try: owner.close()
+            except BaseException as error:
+                if primary is not None: raise BaseExceptionGroup('stream and owner close failures',[primary,error]) from None
+                raise
 
 
 def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner):
     global _PHASE
     nonce=secrets.token_hex(16); source=(FIXTURE/'client.js').read_text(); replica=descriptor['container_id']
     args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',SHELL,'fixture',source,mode,nonce]
-    monitor=helper['Monitor'](args); pid=None; completed=False
+    for name in ('HeldStatusError','HeldBodyLimitError','HeldPrefixError','HeldResponseError','HeldResponseAborted','HeldBodyMismatch','HeldRequestError','HeldTimeout','HeldControlError'):
+        cls=helper.get(name)
+        if isinstance(cls,type) and issubclass(cls,RuntimeError): _ALLOWED_TYPES.add(cls)
+    ready=threading.Event(); prefix=threading.Event(); activated=threading.Event(); cancel=threading.Event(); done=threading.Event()
+    result=[]; writer_errors=[]; state={'publish':False,'confirm':False}
+    original_publish=owner._publish_and_confirm; original_confirm=owner._confirm
+    deadline=time.monotonic()+_STREAM_DEADLINE
+    def remaining(): return max(0,deadline-time.monotonic())
+    def publish(*args,**kwargs):
+        if state['publish'] or state['confirm']: raise RuntimeError('duplicate publication')
+        state['publish']=True; ready.set()
+        if not prefix.wait(remaining()) or cancel.is_set() or not remaining(): raise TimeoutError('publication barrier cancelled')
+        return original_publish(*args,**kwargs)
+    def confirm(*args,**kwargs):
+        if not state['publish'] or state['confirm'] or not prefix.is_set(): raise RuntimeError('confirmation out of order')
+        state['confirm']=True
+        value=original_confirm(*args,**kwargs)
+        activated.set()
+        return value
+    owner._publish_and_confirm=publish; owner._confirm=confirm
+    def write():
+        try:
+            before=owner._load()['current_commitment']['cert_sha256']
+            (owner.renew if transition=='renew' else owner.rollback)()
+            after=owner._load()['current_commitment']['cert_sha256']
+            if not activated.is_set() or before==after: raise RuntimeError('qualification fingerprint unchanged')
+            result.append((before,after))
+        except BaseException as error: writer_errors.append(error)
+        finally: done.set()
+    writer=threading.Thread(target=write,daemon=False)
+    retained=(owner,writer); _RETAINED.append(retained)
+    started=False
+    monitor=None; pid=None; completed=False; primary=None; errors=[]
     try:
-        deadline=time.monotonic()+15
+        writer.start(); started=True
+        while not ready.wait(min(.05,remaining())):
+            if done.is_set(): raise RuntimeError('writer ended before publication barrier')
+            if not remaining(): raise TimeoutError('publication setup deadline')
+        monitor=helper['Monitor'](args)
+        client_deadline=min(deadline,time.monotonic()+15)
         _set_phase('stream-client-start')
-        while time.monotonic()<deadline:
+        while time.monotonic()<client_deadline:
             lines=monitor.lines()
             if lines:
                 match=re.fullmatch(rb'PID ([1-9][0-9]{0,9})',lines[0])
@@ -155,31 +213,51 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
             time.sleep(.02)
         if pid is None: raise TimeoutError('qualification remote identity deadline')
         _set_phase('stream-prefix')
-        if mode=='request': monitor.wait(b'CLIENT_WRITTEN'); _wait_status(destination,nonce,b'REQUEST_PREFIX')
-        else: monitor.wait(b'RESPONSE_PREFIX'); _wait_status(destination,nonce,b'RESPONSE_PREFIX')
+        if mode=='request': monitor.wait(b'CLIENT_WRITTEN',timeout=remaining()); _wait_status(destination,nonce,b'REQUEST_PREFIX',timeout=remaining())
+        else: monitor.wait(b'RESPONSE_PREFIX',timeout=remaining()); _wait_status(destination,nonce,b'RESPONSE_PREFIX',timeout=remaining())
         _set_phase('stream-transition')
-        before=owner._load()['current_commitment']['cert_sha256']
-        if transition=='renew': owner.renew()
-        else: owner.rollback()
-        after=owner._load()['current_commitment']['cert_sha256']
-        if before==after: raise RuntimeError('qualification fingerprint unchanged')
+        prefix.set()
+        while not activated.wait(min(.05,remaining())):
+            if done.is_set(): raise RuntimeError('writer ended before activation')
+            if not remaining(): raise TimeoutError('activation deadline')
         _set_phase('stream-release')
         if mode=='request': monitor.send('RELEASE_REQUEST')
         else: _control(destination,nonce,'release')
-        monitor.wait(b'PASS')
+        monitor.wait(b'PASS',timeout=remaining())
         monitor.finish([b'PID '+pid,b'CLIENT_WRITTEN' if mode=='request' else b'RESPONSE_PREFIX',b'PASS'])
         helper['remote_absent'](lambda a,**k:products._command(a,k.get('timeout',30)),replica,pid)
+        if not remaining(): raise TimeoutError('qualification stream deadline')
         completed=True
-        return before,after
+    except BaseException as error:
+        primary=error
     finally:
-        primary=sys.exc_info()[1]; errors=[]
-        try: monitor.reap()
-        except BaseException as error: errors.append(error)
-        if not completed:
+        cancel.set(); prefix.set()
+        if monitor is not None:
+            try: monitor.reap()
+            except BaseException as error: errors.append(error)
+        if monitor is not None and not completed:
             # Local Docker CLI exit alone is not proof that its in-container
             # child exited. Caller must retain the entire owned topology.
             errors.append(RuntimeError('qualification remote completion uncertain'))
-        if errors: raise BaseExceptionGroup('qualification stream and cleanup failures',([primary] if primary is not None else [])+errors) from None
+        terminated=False
+        if started:
+            try:
+                writer.join(remaining())
+                terminated=not writer.is_alive()
+            except BaseException as error: errors.append(error)
+        if not terminated:
+            errors.append(TimeoutError('qualification writer remains'))
+        else:
+            errors.extend(writer_errors)
+            if not remaining(): errors.append(TimeoutError('qualification writer deadline'))
+            try:
+                owner._publish_and_confirm=original_publish; owner._confirm=original_confirm
+                _RETAINED.remove(retained)
+            except BaseException as error: errors.append(error)
+        failures=([primary] if primary is not None else [])+errors
+        if failures: raise BaseExceptionGroup('qualification stream and cleanup failures',failures) from None
+    if len(result)!=1 or not completed: raise RuntimeError('qualification writer result missing')
+    return result[0]
 
 
 def qualify_positive_streams(transport,proof):
@@ -232,7 +310,7 @@ def qualify_lost_publication_ack(proof):
     from deploy.local.origin21_managed_qualification import OwnedManagedQualification
     if type(proof) is not OwnedManagedQualification: raise ValueError('owned qualification required')
     proof.verify(); source=_source_guard(); observed=[]; observer_errors=[]
-    with controller.open_edge(qualification=proof) as owner:
+    with _OwnerGuard(controller.open_edge(qualification=proof)) as owner:
         owner._managed_gate(owner._load())
         proof.bind_topology(owner.peer,owner.publisher)
         publisher=owner.publisher; publisher.verify(); publisher_identity=publisher.identity()
@@ -264,9 +342,11 @@ def qualify_lost_publication_ack(proof):
                     time.sleep(.01)
                 raise TimeoutError('publication marker deadline')
             except BaseException as error: observer_errors.append(error)
-        proof.arm_ack_loss(); watcher=threading.Thread(target=observe,daemon=False); watcher.start()
+        proof.arm_ack_loss(); watcher=threading.Thread(target=observe,daemon=False)
+        retained=(owner,watcher); _RETAINED.append(retained); started=False
         failures=[]
         try:
+            watcher.start(); started=True
             try: owner.renew()
             except TimeoutError: pass
             else: raise AssertionError('unknown publication unexpectedly acknowledged')
@@ -274,12 +354,15 @@ def qualify_lost_publication_ack(proof):
         try:
             if proof.publication_exec_ready() is None: cancel.set()
         except BaseException as error: failures.append(error)
-        try: watcher.join(45)
-        except BaseException as error: failures.append(error)
-        try:
-            if watcher.is_alive(): failures.append(RuntimeError('publication observer remains'))
-        except BaseException as error: failures.append(error)
-        failures.extend(observer_errors)
+        terminated=False
+        if started:
+            try:
+                watcher.join(45)
+                terminated=not watcher.is_alive()
+            except BaseException as error: failures.append(error)
+        if terminated:
+            _RETAINED.remove(retained); failures.extend(observer_errors)
+        else: failures.append(RuntimeError('publication observer remains'))
         if len(observed)!=1 and not observer_errors: failures.append(RuntimeError('remote publication commit unproven'))
         if len(failures)==1: raise failures[0]
         if failures: raise BaseExceptionGroup('publication and observer failures',failures)
@@ -373,7 +456,8 @@ def main(argv):
     _set_phase('source-check')
     source=_source_guard()
     _set_phase('qualification-begin')
-    with qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest) as proof:
+    proof=qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest)
+    try:
         _set_phase('initialize')
         path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
         _set_phase('topology-up')
@@ -390,6 +474,14 @@ def main(argv):
         disposal.dispose_synthetic_volume(proof)
         if _source_guard()!=source: raise ValueError('qualification source changed')
         return {'positive':positive,'negative':negative,'unknown':unknown,'cleanup':True}
+    finally:
+        primary=sys.exc_info()[1]
+        if _RETAINED: _RETAINED.append((proof,None))
+        else:
+            try: proof.close()
+            except BaseException as error:
+                if primary is not None: raise BaseExceptionGroup('qualification and proof close failures',[primary,error]) from None
+                raise
 
 
 if __name__=='__main__':
