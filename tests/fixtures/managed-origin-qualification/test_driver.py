@@ -133,4 +133,54 @@ class QualificationDriverTests(unittest.TestCase):
         self.assertEqual(run(False),['begin','initialize','up','transport','streams','negative','unknown','volume'])
         self.assertEqual(run(True),['begin','initialize','up','transport','streams','negative','unknown'])
 
+class StreamOwnerSetupTests(unittest.TestCase):
+    def test_owner_validation_precedes_starting_idle_bounded_request(self):
+        from contextlib import contextmanager
+        events=[]; current=['a'*64]
+        owner=mock.Mock()
+        owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
+        owner.renew.side_effect=lambda:(events.append('renew'),current.__setitem__(0,'b'*64))
+        @contextmanager
+        def opened(**kwargs):
+            events.append('owner-enter')
+            try: yield owner
+            finally: events.append('owner-exit')
+        class Monitor:
+            def __init__(self,args): events.append('client'); self.proc=mock.Mock()
+            def lines(self): return [b'PID 7']
+            def wait(self,value): events.append('prefix' if value==b'CLIENT_WRITTEN' else 'pass')
+            def send(self,value): events.append('release')
+            def finish(self,expected): events.append('finish')
+            def reap(self): events.append('reap')
+        helper={'Monitor':Monitor,'remote_absent':lambda *a:events.append('remote-absent')}
+        with mock.patch.object(driver.controller,'open_edge',side_effect=opened),mock.patch.object(driver,'_wait_status'):
+            self.assertEqual(driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object()),('a'*64,'b'*64))
+        self.assertLess(events.index('owner-enter'),events.index('client'))
+        self.assertLess(events.index('prefix'),events.index('renew'))
+        self.assertLess(events.index('renew'),events.index('release'))
+        self.assertLess(events.index('reap'),events.index('owner-exit'))
+
+class StreamOwnerFailureTests(unittest.TestCase):
+    def test_owner_failure_never_constructs_stream_client(self):
+        helper={'Monitor':mock.Mock()}
+        with mock.patch.object(driver.controller,'open_edge',side_effect=RuntimeError('owner unavailable')):
+            with self.assertRaises(RuntimeError): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object())
+        helper['Monitor'].assert_not_called()
+
+    def test_renewal_and_monitor_cleanup_failures_survive_owner_close(self):
+        from contextlib import contextmanager
+        events=[]; primary=RuntimeError('rotation failed'); cleanup=OSError('reap failed')
+        owner=mock.Mock();owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}};owner.renew.side_effect=primary
+        @contextmanager
+        def opened(**kwargs):
+            try: yield owner
+            finally: events.append('owner-closed')
+        monitor=mock.Mock();monitor.lines.return_value=[b'PID 7'];monitor.reap.side_effect=cleanup
+        helper={'Monitor':mock.Mock(return_value=monitor),'remote_absent':mock.Mock()}
+        with mock.patch.object(driver.controller,'open_edge',side_effect=opened),mock.patch.object(driver,'_wait_status'):
+            with self.assertRaises(BaseExceptionGroup) as raised:
+                driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},helper,object())
+        self.assertIn(primary,raised.exception.exceptions);self.assertIn(cleanup,raised.exception.exceptions)
+        self.assertEqual(events,['owner-closed']);helper['remote_absent'].assert_not_called()
+
 if __name__=='__main__': unittest.main()

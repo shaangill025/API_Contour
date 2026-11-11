@@ -133,6 +133,12 @@ def _stream(mode,index,transition,destination,descriptor,helper,proof):
     global _PHASE
     _set_phase('stream-setup')
     if (mode,index,transition) not in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')): raise ValueError('unsupported qualification stream')
+    with controller.open_edge(qualification=proof) as owner:
+        return _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner)
+
+
+def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner):
+    global _PHASE
     nonce=secrets.token_hex(16); source=(FIXTURE/'client.js').read_text(); replica=descriptor['container_id']
     args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',SHELL,'fixture',source,mode,nonce]
     monitor=helper['Monitor'](args); pid=None; completed=False
@@ -152,17 +158,16 @@ def _stream(mode,index,transition,destination,descriptor,helper,proof):
         if mode=='request': monitor.wait(b'CLIENT_WRITTEN'); _wait_status(destination,nonce,b'REQUEST_PREFIX')
         else: monitor.wait(b'RESPONSE_PREFIX'); _wait_status(destination,nonce,b'RESPONSE_PREFIX')
         _set_phase('stream-transition')
-        with controller.open_edge(qualification=proof) as owner:
-            before=owner._load()['current_commitment']['cert_sha256']
-            if transition=='renew': owner.renew()
-            else: owner.rollback()
-            after=owner._load()['current_commitment']['cert_sha256']
-            if before==after: raise RuntimeError('qualification fingerprint unchanged')
-            _set_phase('stream-release')
-            if mode=='request': monitor.send('RELEASE_REQUEST')
-            else: _control(destination,nonce,'release')
-            monitor.wait(b'PASS')
-            monitor.finish([b'PID '+pid,b'CLIENT_WRITTEN' if mode=='request' else b'RESPONSE_PREFIX',b'PASS'])
+        before=owner._load()['current_commitment']['cert_sha256']
+        if transition=='renew': owner.renew()
+        else: owner.rollback()
+        after=owner._load()['current_commitment']['cert_sha256']
+        if before==after: raise RuntimeError('qualification fingerprint unchanged')
+        _set_phase('stream-release')
+        if mode=='request': monitor.send('RELEASE_REQUEST')
+        else: _control(destination,nonce,'release')
+        monitor.wait(b'PASS')
+        monitor.finish([b'PID '+pid,b'CLIENT_WRITTEN' if mode=='request' else b'RESPONSE_PREFIX',b'PASS'])
         helper['remote_absent'](lambda a,**k:products._command(a,k.get('timeout',30)),replica,pid)
         completed=True
         return before,after
