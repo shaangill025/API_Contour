@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -18,6 +19,45 @@ spec=importlib.util.spec_from_file_location('permit_driver',ROOT/'scripts/test-p
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class Driver(unittest.TestCase):
+    def test_revocation_retries_only_confirmed_busy_before_original_deadline(self):
+        now=[0.0]; outcomes=iter(['busy','committed']); attempts=[]
+        def attempt(remaining): attempts.append(remaining); return next(outcomes)
+        with mock.patch.object(driver.time,'monotonic',side_effect=lambda:now[0]),mock.patch.object(driver.time,'sleep',side_effect=lambda t:now.__setitem__(0,now[0]+t)):
+            driver.revoke_until(attempt,1.0)
+        self.assertEqual(len(attempts),2); self.assertLess(attempts[1],attempts[0])
+
+    def test_revocation_terminal_outcomes_and_deadline_do_not_retry(self):
+        for outcome in ('unknown','generic40001','transport','cleanup'):
+            calls=[]
+            def attempt(_): calls.append(True); raise RuntimeError(outcome)
+            with self.assertRaises(RuntimeError): driver.revoke_until(attempt,time.monotonic()+1)
+            self.assertEqual(len(calls),1)
+        now=[0.0]; calls=[]
+        with mock.patch.object(driver.time,'monotonic',side_effect=lambda:now[0]),mock.patch.object(driver.time,'sleep',side_effect=lambda t:now.__setitem__(0,now[0]+t)):
+            with self.assertRaises(TimeoutError): driver.revoke_until(lambda _:(calls.append(True) or 'busy'),.05)
+        self.assertTrue(calls); self.assertLessEqual(now[0],.05)
+
+    def test_revocation_attempt_requires_closed_ack_and_clean_session_exit(self):
+        tenant='11111111-1111-4111-8111-111111111111'; runtime='22222222-2222-4222-8222-222222222222'; calls=[]
+        def process(args,**kwargs):
+            calls.append((args,kwargs)); return SimpleNamespace(returncode=0,stdout=b'REVOCATION_ROLLED_BACK\n',stderr=b'')
+        bridge={'run_process':process}
+        self.assertEqual(driver.revocation_attempt(bridge,'container',tenant,runtime,.5),'busy')
+        script=calls[0][1]['data']; self.assertIn(b"detail NOT IN ('origin gate busy','credential gate busy','collector gate busy')",script)
+        self.assertIn(b'ROLLBACK;\n\\echo REVOCATION_ROLLED_BACK',script); self.assertIn(b'COMMIT;\n\\echo REVOCATION_COMMITTED',script)
+        self.assertEqual(calls[0][1]['timeout'],.5)
+        for value in (SimpleNamespace(returncode=1,stdout=b'REVOCATION_ROLLED_BACK\n',stderr=b''),SimpleNamespace(returncode=0,stdout=b'REVOCATION_ROLLED_BACK\n',stderr=b'error'),SimpleNamespace(returncode=0,stdout=b'40001\n',stderr=b''),SimpleNamespace(returncode=0,stdout=b'REVOCATION_ROLLED_BACK\nextra',stderr=b'')):
+            with self.subTest(value=value), self.assertRaises(RuntimeError): driver.revocation_attempt({'run_process':lambda *a,**k:value},'container',tenant,runtime,.5)
+        with self.assertRaises(TimeoutError): driver.revocation_attempt({'run_process':mock.Mock(side_effect=TimeoutError('uncertain'))},'container',tenant,runtime,.5)
+        cleanup=BaseExceptionGroup('cleanup',[RuntimeError('primary'),OSError('cleanup')])
+        with self.assertRaises(BaseExceptionGroup) as raised: driver.revocation_attempt({'run_process':mock.Mock(side_effect=cleanup)},'container',tenant,runtime,.5)
+        self.assertIs(raised.exception,cleanup)
+        self.assertEqual(driver.revocation_attempt({'run_process':lambda *a,**k:SimpleNamespace(returncode=0,stdout=b'REVOCATION_COMMITTED\n',stderr=b'')},'container',tenant,runtime,.5),'committed')
+
+    def test_committed_proof_is_required(self):
+        for result in ('0','2','unknown'):
+            with self.assertRaises(AssertionError): driver.require_revocation_proof(lambda _:result,'tenant','runtime')
+        driver.require_revocation_proof(lambda _:'1','tenant','runtime')
     def test_failure_lines_emit_only_exact_sanitized_sqlstate(self):
         error=RuntimeError('fixture command failed SQLSTATE 40001')
         group=BaseExceptionGroup('qualification',[BaseExceptionGroup('primary',[error])])
@@ -119,6 +159,7 @@ class Driver(unittest.TestCase):
             return SimpleNamespace(returncode=0,stdout=b'CLAIM_REJECTED\n',stderr=b'')
         def execute(sql):
             events.append(('sql',sql))
+            if 'causal_runtime_terminal_events' in sql: return '1'
             if 'count(*) FROM contour.causal_sessions' in sql: return next(counts)
             if 'count(*) FILTER (WHERE enabled=false)' in sql: return '1|0'
             if 'check_causal_session' in sql or 'expires_at>clock_timestamp()' in sql: return 'true'
@@ -128,7 +169,8 @@ class Driver(unittest.TestCase):
         bridge={'IDS':tuple('id'+str(i) for i in range(10)),'run_process':process}
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(driver,'line',side_effect=line), mock.patch.object(driver,'finish',side_effect=finish):
             base=['probe','localhost','5432','db','ca','causal_issuer_login','unused','grant.pub','policy.pub','grant.json','policy.json','batch','33'*32,*bridge['IDS'],'placeholder']
-            driver.exercise(base,Path(tmp),{'PATH':'/bin'},execute,bridge,{'ProbeProcess':Monitor},'owned')
+            def revoker(_): events.append(('sql','export_revoked')); return 'committed'
+            driver.exercise(base,Path(tmp),{'PATH':'/bin'},execute,bridge,{'ProbeProcess':Monitor},'owned',revoker)
         starts=[args for args in starts if len(args)>25]
         self.assertEqual([args[25] for args in starts],['eof','expiry','normal','claim-only','normal','normal','normal','claim-busy','normal'])
         dirs=[args[24] for args in starts]; self.assertEqual(len(set(dirs)),9)

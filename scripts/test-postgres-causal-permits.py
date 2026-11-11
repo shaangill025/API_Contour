@@ -99,6 +99,47 @@ def contention_diagnostics(log, code, message):
     return sum(b'causal_contention_login' in row and code in row and row.rstrip().endswith(message) for row in log.splitlines())
 
 
+def revoke_until(attempt,deadline):
+    """Retry only an explicitly rolled-back Busy within the original deadline."""
+    while True:
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError('revocation deadline')
+        result=attempt(remaining)
+        if time.monotonic()>=deadline: raise TimeoutError('revocation deadline')
+        if result=='committed': return
+        if result!='busy': raise RuntimeError('revocation outcome unknown')
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError('revocation deadline')
+        time.sleep(min(.01,remaining))
+
+
+def revocation_attempt(bridge,container,tenant,runtime,remaining):
+    """Return Busy only after exact gate error, explicit rollback and psql exit."""
+    if any(not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',value) for value in (tenant,runtime)):
+        raise ValueError('invalid fixture identity')
+    script=("BEGIN;\nDO $$ BEGIN PERFORM set_config('apicontour.tenant_id','"+tenant+"',true); END $$;\n"
+      "SET LOCAL ROLE contour_causal_provisioner;\n"
+      "DO $$ DECLARE state text; detail text; BEGIN BEGIN "
+      "PERFORM contour.end_causal_runtime('"+tenant+"','"+runtime+"','export_revoked'); "
+      "PERFORM set_config('apicontour.fixture_busy','false',true); "
+      "EXCEPTION WHEN SQLSTATE '40001' THEN GET STACKED DIAGNOSTICS state=RETURNED_SQLSTATE, detail=MESSAGE_TEXT; "
+      "IF state <> '40001' OR detail NOT IN ('origin gate busy','credential gate busy','collector gate busy') THEN RAISE; END IF; "
+      "PERFORM set_config('apicontour.fixture_busy','true',true); END; END $$;\n"
+      "SELECT current_setting('apicontour.fixture_busy') AS retry \\gset\n"
+      "\\if :retry\nROLLBACK;\n\\echo REVOCATION_ROLLED_BACK\n\\else\nCOMMIT;\n\\echo REVOCATION_COMMITTED\n\\endif\n")
+    args=['docker','exec','-i',container,'psql','-XqAt','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose','-U','postgres','-d','contour_fixture']
+    result=bridge['run_process'](args,data=script.encode(),timeout=remaining,limit=8192)
+    if result.returncode or result.stderr: raise RuntimeError('revocation outcome unknown')
+    if result.stdout==b'REVOCATION_ROLLED_BACK\n': return 'busy'
+    if result.stdout==b'REVOCATION_COMMITTED\n': return 'committed'
+    raise RuntimeError('revocation outcome unknown')
+
+
+def require_revocation_proof(execute,tenant,runtime):
+    if execute("SELECT count(*)::text FROM contour.causal_runtime_terminal_events WHERE tenant_id='"+tenant+"' AND runtime_id='"+runtime+"' AND event_kind='export_revoked';")!='1':
+        raise AssertionError('committed revocation unproven')
+
+
 def assert_active(monitor):
     # A previously buffered STOPPED cannot be attributed to a later mutation.
     with monitor.lock: out=bytes(monitor.buffers['out']); err=bytes(monitor.buffers['err']); overflow=monitor.overflow
@@ -157,7 +198,7 @@ def finish(monitor,expected):
     if monitor.child.returncode!=0 or overflow or err or out!=expected: raise RuntimeError('probe final output invalid')
 
 
-def exercise(base,work,env,execute,bridge,https,container):
+def exercise(base,work,env,execute,bridge,https,container,revoker=None):
     tenant=bridge['IDS'][0]; runtime=bridge['IDS'][1]; leaf='33'*32
     def journal(name):
         path=work/name; path.mkdir(mode=0o700); return str(path.resolve(strict=True))
@@ -289,11 +330,14 @@ def exercise(base,work,env,execute,bridge,https,container):
         if logs.returncode: raise RuntimeError('fixture logs unavailable')
         if any(b'causal_revocation_login' in row and b'23514' in row for row in (logs.stdout+logs.stderr).splitlines()): raise AssertionError('authority rejection preceded trigger')
         assert_active(monitor)
-        started=time.monotonic()
-        execute("BEGIN; SELECT set_config('apicontour.tenant_id','"+tenant+"',true); SET LOCAL ROLE contour_causal_provisioner; SELECT contour.end_causal_runtime('"+tenant+"','"+runtime+"','export_revoked'); COMMIT;")
-        line(monitor,1,b'STOPPED',1)
-        if time.monotonic()-started>=1: raise AssertionError('revocation response exceeded permit bound')
+        deadline=time.monotonic()+1
+        revoke_until(revoker if revoker is not None else lambda remaining:revocation_attempt(bridge,container,tenant,runtime,remaining),deadline)
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError('revocation deadline')
+        line(monitor,1,b'STOPPED',remaining)
+        if time.monotonic()>=deadline: raise AssertionError('revocation response exceeded permit bound')
         finish(monitor,b'ACTIVE\nSTOPPED\n')
+        require_revocation_proof(execute,tenant,runtime)
         logs=bridge['run_process'](['docker','logs','--tail','200',container],timeout=10,limit=1048576)
         if logs.returncode: raise RuntimeError('fixture logs unavailable')
         log=logs.stdout+logs.stderr
