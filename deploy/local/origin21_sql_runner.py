@@ -42,13 +42,13 @@ class Handshake:
         return self._payload
 
 
-def _validate_intent(value, target):
+def _validate_intent(value, target, *, selected=None):
     if (type(value) is not dict or set(value) != {'version', 'nonce', 'target', 'payload_sha256', 'identity', 'mode', 'role'}
             or value['version'] != 1 or value['target'] != target
             or not isinstance(value['nonce'], str) or not re.fullmatch('[0-9a-f]{32}', value['nonce'])
             or not isinstance(value['payload_sha256'], str) or not re.fullmatch('[0-9a-f]{64}', value['payload_sha256'])):
         raise ValueError('invalid SQL supervisor intent')
-    _validate_mode_role(value['mode'], value['role'])
+    _validate_mode_role(value['mode'], value['role'], selected=selected)
     identity = value['identity']
     if identity is not None:
         if (type(identity) is not dict or set(identity) != {'pid', 'pgid', 'starttime'}
@@ -58,16 +58,17 @@ def _validate_intent(value, target):
     return value
 
 
-def _validate_mode_role(mode, role):
+def _validate_mode_role(mode, role, *, selected=None):
     from deploy.local import origin21_profile
     if not ((mode == 'sql' and role == 'postgres') or
-            (mode == 'auth' and role in (origin21_profile.PROFILE.ingress_login, origin21_profile.PROFILE.worker_login))):
+            (mode == 'auth' and role in (origin21_profile.PROFILE.ingress_login, origin21_profile.PROFILE.worker_login)) or
+            (selected is origin21_profile.HUMAN and mode == 'auth' and role == 'contour_app')):
         raise ValueError('invalid SQL supervisor mode or role')
 
 
 class IntentStore:
     """One owner may reconcile or advance a single private pending intent."""
-    def __init__(self, directory, target):
+    def __init__(self, directory, target, *, selected=None):
         from pathlib import Path
         from deploy.local import capture_renew
         self.directory = Path(directory)
@@ -78,6 +79,7 @@ class IntentStore:
                 or not re.fullmatch('[0-9a-f]{64}', target.get('network_id', ''))):
             raise ValueError('invalid SQL target')
         self.target = dict(target)
+        self.selected = selected
         self.path = self.directory / 'pending.json'
         self._fd = None
 
@@ -116,7 +118,7 @@ class IntentStore:
             return None
         raw = capture_renew.read_file(self.path, 4096)
         value = capture_renew.exact_json(raw)
-        return _validate_intent(value, self.target)
+        return _validate_intent(value, self.target, selected=self.selected)
 
     def begin(self, handshake, mode, role):
         import json
@@ -124,7 +126,7 @@ class IntentStore:
         self._owned()
         if self.read() is not None:
             raise RuntimeError('unresolved SQL transport intent')
-        _validate_mode_role(mode, role)
+        _validate_mode_role(mode, role, selected=self.selected)
         value = {'version': 1, 'nonce': handshake.nonce, 'target': self.target, 'mode': mode, 'role': role,
                  'payload_sha256': handshake.payload_sha256, 'identity': None}
         raw = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
@@ -223,11 +225,12 @@ class Runner:
     and cleanup must return True only after the recorded remote group and all
     application-nonce backends are absent. No default adapters are provided.
     """
-    def __init__(self, directory, target, verify_target, cleanup, launch):
+    def __init__(self, directory, target, verify_target, cleanup, launch, *, selected=None):
         if not all(callable(value) for value in (verify_target, cleanup, launch)):
             raise ValueError('trusted SQL runner adapters required')
         self.directory, self.target = directory, dict(target)
         self.verify_target, self.cleanup, self.launch = verify_target, cleanup, launch
+        self.selected = selected
 
     def _reconcile(self, store):
         value = store.read()
@@ -246,11 +249,11 @@ class Runner:
         import select
         import signal
         import time
-        _validate_mode_role(mode, role)
+        _validate_mode_role(mode, role, selected=self.selected)
         if type(deadline) not in (int, float) or not 1 <= deadline <= 120:
             raise ValueError('invalid SQL supervisor deadline')
         gate = Handshake(secrets.token_hex(16), payload)
-        with IntentStore(self.directory, self.target) as store:
+        with IntentStore(self.directory, self.target, selected=self.selected) as store:
             self._reconcile(store)
             self.verify_target(self.target)
             store.begin(gate, mode, role)
@@ -351,7 +354,7 @@ case "$pid:$pgid:$started" in *[!0-9:]*|'') exit 91;; esac
 [ "$pid" = "$pgid" ] && [ "$pid" -gt 1 ] || exit 91
 case "$mode:$role" in
     sql:postgres) address='client_addr IS NULL';;
-    auth:contour_local_origin21_ingress|auth:contour_local_origin21_worker) address="client_addr IN ('127.0.0.1'::pg_catalog.inet,'::1'::pg_catalog.inet)";;
+    auth:contour_local_origin21_ingress|auth:contour_local_origin21_worker|auth:contour_app) address="client_addr IN ('127.0.0.1'::pg_catalog.inet,'::1'::pg_catalog.inet)";;
     *) exit 91;;
 esac
 group_absent() {
@@ -409,7 +412,9 @@ def for_deployment(directory, deployment, *, selected=None,qualification=None):
         if (deployment['name'],deployment['owner_token'])!=('apicontour-local_default','apicontour-local'): raise ValueError('invalid local network')
     elif deployment['owner_kind']=='managed-local' and selected is origin21_profile.MANAGED:
         if (deployment['name'],deployment['owner_token'])!=('apicontour-origin21-managed-db_default','apicontour-origin21-managed-db'): raise ValueError('invalid managed network')
-    elif deployment['owner_kind']=='fixture':
+    elif deployment['owner_kind']=='managed-human' and selected is origin21_profile.HUMAN:
+        if (deployment['name'],deployment['owner_token'])!=('apicontour-origin21-managed-human-db_default','apicontour-origin21-managed-human-db'): raise ValueError('invalid human managed network')
+    elif deployment['owner_kind']=='fixture' and selected is not origin21_profile.HUMAN:
         prefix='contour-origin21-qual-' if selected is origin21_profile.STATIC else 'contour-managed-origin21-qual-'
         if not re.fullmatch('[0-9a-f]{32}',deployment['owner_token']) or deployment['name']!=prefix+deployment['owner_token']: raise ValueError('invalid fixture network')
     else: raise ValueError('unsupported SQL deployment')
@@ -421,7 +426,10 @@ def for_deployment(directory, deployment, *, selected=None,qualification=None):
         else:
             origin21_products._capture_network(deployment,selected=selected)
             from deploy.local import origin21_managed_init
-            origin21_managed_init.verify_runtime_target(deployment,qualification=qualification)
+            if selected is origin21_profile.HUMAN:
+                origin21_managed_init.verify_runtime_target(deployment,qualification=qualification,selected=selected)
+            else:
+                origin21_managed_init.verify_runtime_target(deployment,qualification=qualification)
     verify(target)
     capture_renew.safe_dir(directory)
     timeout_options = '-c statement_timeout=60000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=60000'
@@ -438,7 +446,7 @@ def for_deployment(directory, deployment, *, selected=None,qualification=None):
             return origin21_transport._run(args,'',deadline=30) == 'CLEAN'
         except Exception:
             return False
-    return Runner(directory, target, verify, cleanup, launch)
+    return Runner(directory, target, verify, cleanup, launch, selected=selected if selected is origin21_profile.HUMAN else None)
 
 
 def production(*,selected=None):

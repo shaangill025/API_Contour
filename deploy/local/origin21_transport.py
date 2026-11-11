@@ -94,9 +94,12 @@ _MANAGED_SEAL=object()
 
 class ManagedTransport:
     """Context-bound local SQL transport; not an attestation against the host."""
-    __slots__=('_runner','_deployment','_image','_head','_receipt','_digest','_sealed','_qualification')
-    def __init__(self,seal,runner,deployment,image,head,receipt,digest,qualification=None):
-        if seal is not _MANAGED_SEAL: raise ValueError('managed transport factory required')
+    __slots__=('_runner','_deployment','_image','_head','_receipt','_digest','_sealed','_qualification','_selected','_human_transition')
+    def __init__(self,seal,runner,deployment,image,head,receipt,digest,qualification=None,selected=origin21_profile.MANAGED,human_transition=None):
+        if seal is not _MANAGED_SEAL or selected is not origin21_profile.MANAGED and selected is not origin21_profile.HUMAN: raise ValueError('managed transport factory required')
+        object.__setattr__(self,'_selected',selected)
+        if human_transition is not None and selected is not origin21_profile.HUMAN: raise ValueError('unexpected human transition')
+        object.__setattr__(self,'_human_transition',human_transition)
         object.__setattr__(self,'_runner',runner); object.__setattr__(self,'_deployment',tuple(sorted(deployment.items())))
         object.__setattr__(self,'_image',image); object.__setattr__(self,'_head',head)
         object.__setattr__(self,'_receipt',receipt); object.__setattr__(self,'_digest',digest); object.__setattr__(self,'_qualification',qualification); object.__setattr__(self,'_sealed',True)
@@ -104,16 +107,32 @@ class ManagedTransport:
     @property
     def qualification(self): return self._qualification
     def verify(self):
-        from deploy.local.origin21_managed_qualification import require_matching
-        require_matching(self._qualification)
-        owner=origin21_profile.MANAGED.owner
+        if self._selected is origin21_profile.MANAGED:
+            from deploy.local.origin21_managed_qualification import require_matching
+            require_matching(self._qualification)
+        elif self._qualification is not None: raise ValueError('unexpected qualification')
+        owner=self._selected.owner
         if self._qualification is not None: self._qualification.verify_owner(owner)
         elif os.path.lexists(owner/'qualification.intent'): raise ValueError('qualification proof required')
         from deploy.local import origin21_products
-        deployment=origin21_products._build_receipt(self._image,self._head,self._receipt,self._digest,selected=origin21_profile.MANAGED)
+        deployment=origin21_products._build_receipt(self._image,self._head,self._receipt,self._digest,selected=self._selected)
         if tuple(sorted(deployment.items()))!=self._deployment: raise RuntimeError('managed deployment receipt changed')
-        record=origin21_products._read_record('intent.json',selected=origin21_profile.MANAGED)
+        record=origin21_products._read_record('intent.json',selected=self._selected)
         if record.get('deployment')!=deployment or (record.get('app_image_id'),record.get('build_head'),record.get('build_receipt_sha256'))!=(self._image,self._head,self._digest): raise RuntimeError('managed owner record changed')
+        if self._selected is origin21_profile.HUMAN:
+            companions=os.path.lexists(owner/'companions.json')
+            attempted=os.path.lexists(owner/'companions-intent.json') or os.path.lexists(owner/'companions-created.json')
+            if attempted and not companions: raise ValueError('companion transition unresolved')
+            pending=os.path.lexists(owner/'human.intent')
+            complete=os.path.lexists(owner/'human.json')
+            if (pending or complete) and not companions or (complete and not pending): raise ValueError('human topology record missing')
+            if pending and not complete:
+                from deploy.local.origin21_managed_human_services import _HumanStageProof
+                if type(self._human_transition) is not _HumanStageProof: raise ValueError('human transition proof required')
+                self._human_transition.verify()
+            elif companions:
+                from deploy.local import origin21_managed_controller
+                origin21_managed_controller.verify_recorded_topology(selected=self._selected)
         self._runner.verify_target(self._runner.target)
     def admin(self,sql):
         if not isinstance(sql,str): raise ValueError('invalid SQL')
@@ -122,17 +141,29 @@ class ManagedTransport:
         if not isinstance(sql,str): raise ValueError('invalid SQL')
         self.verify(); return self._runner.run((GUARD+sql).encode('utf-8'),'sql','postgres')
     def authenticate(self,role,password):
-        profile=origin21_profile.MANAGED.profile
+        profile=self._selected.profile
         if role not in (profile.ingress_login,profile.worker_login) or not isinstance(password,str) or not re.fullmatch('[A-Za-z0-9_-]{32,4096}',password): raise ValueError('invalid credential')
         self.verify(); return self._runner.run(password.encode('ascii'),'auth',role)==role
+    def _bind_human_transition(self, proof):
+        from deploy.local.origin21_managed_human_services import _HumanStageProof
+        if self._selected is not origin21_profile.HUMAN or type(proof) is not _HumanStageProof: raise ValueError('human transition proof required')
+        proof.verify()
+        return ManagedTransport(_MANAGED_SEAL,self._runner,dict(self._deployment),self._image,self._head,
+                                self._receipt,self._digest,None,self._selected,proof)
+    def authenticate_app(self, password):
+        if self._selected is not origin21_profile.HUMAN or not isinstance(password,str) or not re.fullmatch('[0-9a-f]{64}',password): raise ValueError('human app credential required')
+        self.verify(); return self._runner.run(password.encode('ascii'),'auth','contour_app')=='contour_app'
 
 
-def managed_transport(*,image_id,head,receipt,digest,qualification=None):
+def managed_transport(*,image_id,head,receipt,digest,qualification=None,selected=origin21_profile.MANAGED):
     """Bind only the complete managed receipt and its verified private owner."""
     from deploy.local import capture_renew,origin21_products,origin21_sql_runner
-    selected=origin21_profile.MANAGED
-    from deploy.local.origin21_managed_qualification import require_matching
-    require_matching(qualification)
+    origin21_profile.require_context(selected)
+    if selected is not origin21_profile.MANAGED and selected is not origin21_profile.HUMAN: raise ValueError('managed context required')
+    if selected is origin21_profile.HUMAN and qualification is not None: raise ValueError('unexpected qualification')
+    if selected is origin21_profile.MANAGED:
+        from deploy.local.origin21_managed_qualification import require_matching
+        require_matching(qualification)
     if qualification is not None:
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         if type(qualification) is not OwnedManagedQualification: raise ValueError('qualification proof required')
@@ -151,6 +182,6 @@ def managed_transport(*,image_id,head,receipt,digest,qualification=None):
         try: os.fsync(fd)
         finally: os.close(fd)
     runner=origin21_sql_runner.for_deployment(directory,deployment,selected=selected,qualification=qualification)
-    transport=ManagedTransport(_MANAGED_SEAL,runner,deployment,image_id,head,receipt,digest,qualification)
+    transport=ManagedTransport(_MANAGED_SEAL,runner,deployment,image_id,head,receipt,digest,qualification,selected)
     transport.verify()
     return transport

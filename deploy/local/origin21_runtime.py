@@ -18,4 +18,4 @@ def configs(profile=origin21_profile.PROFILE):
         delivery_name='ingress',tenant=tenant,collector=profile.collector,source=profile.source,
         workload=[project,service,environment,profile.deployment],policy_key_id='local')
     gateway['capture_wire_version']='v2'
-    return {'capture':ingress,'gateway':gateway,'envoy':native_envoy.config(origin_v2=True,managed_edge=context is origin21_profile.MANAGED)}
+    return {'capture':ingress,'gateway':gateway,'envoy':native_envoy.config(origin_v2=True,managed_edge=context is origin21_profile.MANAGED or context is origin21_profile.HUMAN)}

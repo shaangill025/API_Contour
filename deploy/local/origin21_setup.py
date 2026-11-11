@@ -111,11 +111,11 @@ def prepare_identities(*, selected=origin21_profile.STATIC,qualification=None):
 def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slot=None, expected_evidence, renew=False, check_only=False, selected=origin21_profile.STATIC, transport=None):
     """Reconcile the fixed journal. Never returns a runtime readiness claim."""
     origin21_profile.require_context(selected)
-    if selected is origin21_profile.MANAGED:
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
         from deploy.local import origin21_transport
-        if type(transport) is not origin21_transport.ManagedTransport or inspect_slot is not None or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
+        if type(transport) is not origin21_transport.ManagedTransport or transport._selected is not selected or inspect_slot is not None or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
         from deploy.local import origin21_products
-        inspect_slot=lambda index:origin21_products.inspect_slot(index,selected=origin21_profile.MANAGED,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
+        inspect_slot=lambda index:origin21_products.inspect_slot(index,selected=selected,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
         transport.verify()
         psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
     elif transport is not None: raise ValueError('unexpected managed transport')
@@ -167,7 +167,7 @@ def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slo
             elif status!=origin21_state.ABSENT or n>origin21_state.PHASES.index('logins'): raise ValueError('login context drift')
     def completed(check_source):
         if not renew: return None
-        executor=transport.sensitive if selected is origin21_profile.MANAGED else sensitive_execute
+        executor=transport.sensitive if selected is not origin21_profile.STATIC else sensitive_execute
         return origin21_renewal.renew_locked(bound,executor,check_source=check_source)
     origin21_state.run(profile,operations,snapshot=snapshot,set_context=set_context,after_complete=completed,require_complete=(renew or check_only))
     return {'setup_reconciled':True,'pilot_ready':False}

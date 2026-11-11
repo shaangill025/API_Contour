@@ -34,32 +34,60 @@ def dispose_after_lost_ack(proof,owner):
     return _teardown(proof,True,owner)
 
 
-def _teardown(qualification,lost_ack,held_owner):
-    selected=profiles.MANAGED
+def _human_cleanup_guard(selected, intent):
+    if selected is not profiles.HUMAN: raise ValueError('human cleanup context required')
+    import hashlib
+    human_raw=origin_credentials._file(selected.owner/'human.json',65536); human=capture_renew.exact_json(human_raw)
+    cleanup={'version':1,'token':intent['token'],'human_sha256':hashlib.sha256(human_raw).hexdigest()}
+    if (_record(selected.owner/'human.cleanup.intent')!=cleanup or type(human) is not dict or
+        json.dumps(human,sort_keys=True,separators=(',',':')).encode()!=human_raw or human.get('token')!=intent['token'] or
+        type(human.get('services')) is not dict or set(human['services'])!={'app','mvp-keycloak'}): raise ValueError('human cleanup record invalid')
+    network=human.get('network_ids',{}).get('human')
+    import re
+    if (type(network) is not str or not re.fullmatch('[0-9a-f]{64}',network) or
+        any(_record(selected.owner/('human.cleanup-network.'+suffix))!={'version':1,'id':network} for suffix in ('intent','done'))): raise ValueError('human cleanup network record invalid')
+    if products._command(['docker','network','ls','-q','--no-trunc','--filter','id='+network],15).strip(): raise ValueError('human cleanup network remains')
+    for name,phase in (('app','app'),('mvp-keycloak','identity')):
+        item=human['services'][name]
+        if type(item) is not dict or type(item.get('id')) is not str or not re.fullmatch('[0-9a-f]{64}',item['id']): raise ValueError('human cleanup service invalid')
+        if any(_record(selected.owner/('human.cleanup-'+phase+'.'+suffix))!={'version':1,'id':item['id']} for suffix in ('intent','done')) or products._command(['docker','ps','-aq','--no-trunc','--filter','id='+item['id']],15).strip(): raise ValueError('human cleanup service remains')
+    volume=products._objects(['docker','volume','inspect',selected.project+'_human-keycloak-data']); labels=volume.get('Labels') or {}
+    if (volume.get('Name')!=selected.project+'_human-keycloak-data' or volume.get('Driver')!='local' or volume.get('Scope')!='local' or
+        (volume.get('Options') or {}) or labels.get('org.apicontour.origin21.owner')!=intent['token'] or
+        labels.get('com.docker.compose.project')!=selected.project or labels.get('com.docker.compose.volume')!='human-keycloak-data'):
+        raise ValueError('human cleanup volume drift')
+
+
+def _teardown(qualification,lost_ack,held_owner,*,selected=profiles.MANAGED,human_cleanup=None):
+    profiles.require_context(selected)
+    if selected is profiles.HUMAN:
+        if qualification is not None or lost_ack or held_owner is None or human_cleanup is not controller._HUMAN_CLEANUP: raise ValueError('human cleanup proof required')
+    elif selected is not profiles.MANAGED or human_cleanup is not None: raise ValueError('unsupported cleanup context')
+    base, network_name, project, volume_name = init._settings(selected)
     if qualification is not None:
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         if type(qualification) is not OwnedManagedQualification: raise ValueError('qualification proof required')
         qualification.verify_owner(selected.owner)
-    if SOURCE not in origin21_state.MANAGED_SOURCE_FILES or init.SOURCE not in origin21_state.MANAGED_SOURCE_FILES: raise RuntimeError('cleanup source not pinned')
-    initializer=_record(init.BASE/'initializer.intent'); done=_record(init.BASE/'initializer.done'); pg_start=_record(init.BASE/'postgres.start.result')
+    if SOURCE not in origin21_state._source_files(selected) or init.SOURCE not in origin21_state._source_files(selected): raise RuntimeError('cleanup source not pinned')
+    initializer=_record(base/'initializer.intent'); done=_record(base/'initializer.done'); pg_start=_record(base/'postgres.start.result')
     if type(initializer) is not dict or set(initializer)!={'version','head','build_image','build_receipt_sha256','token','network','volume'} or initializer['version']!=1: raise ValueError('initializer intent invalid')
-    source=init._source(initializer['head'])
+    source=init._context_call(selected,init._source,initializer['head'])
     if type(done) is not dict or set(done)!={'version','receipt_sha256','postgres_id','started_at'} or done['version']!=1: raise ValueError('initializer result invalid')
-    receipt_raw=origin_credentials._file(init.BASE/'runtime-receipt.json',4096); receipt=capture_renew.exact_json(receipt_raw)
+    receipt_raw=origin_credentials._file(base/'runtime-receipt.json',4096); receipt=capture_renew.exact_json(receipt_raw)
     import hashlib
     if json.dumps(receipt,sort_keys=True,separators=(',',':')).encode()!=receipt_raw or hashlib.sha256(receipt_raw).hexdigest()!=done['receipt_sha256'] or type(receipt) is not dict or set(receipt)!={'version','head','image_id','status','network'} or receipt['version']!=1 or receipt['head']!=initializer['head'] or receipt['image_id']!=initializer['build_image'] or receipt['status']!='passed': raise ValueError('runtime receipt changed')
     token=initializer.get('token'); pg_id=done.get('postgres_id'); started=done.get('started_at')
-    if initializer.get('network')!=init.NETWORK or initializer.get('volume')!=init._selected_volume(qualification) or pg_start!={'version':1,'id':pg_id,'started_at':started}: raise ValueError('initializer ownership changed')
+    if initializer.get('network')!=network_name or initializer.get('volume')!=init._context_call(selected,init._selected_volume,qualification) or pg_start!={'version':1,'id':pg_id,'started_at':started}: raise ValueError('initializer ownership changed')
     intent=products._read_record('intent.json',selected=selected); recorded=products._read_record('products.json',selected=selected)
     pending=products._read_record('companions-intent.json',selected=selected); complete=products._read_record('companions.json',selected=selected)
     deployment=intent['deployment']; slots=recorded['slots']; services=complete['services']; ids=[slot['container_id'] for slot in slots]
-    if receipt['network']!=deployment or deployment['postgres_id']!=pg_id or deployment['name']!=init.NETWORK or len(ids)!=2 or set(services)!=set(products.COMPANIONS): raise ValueError('cleanup topology changed')
+    if receipt['network']!=deployment or deployment['postgres_id']!=pg_id or deployment['name']!=network_name or len(ids)!=2 or set(services)!=set(products.COMPANIONS): raise ValueError('cleanup topology changed')
     images=pending['images']; all_ids=ids+[services[name]['id'] for name in products.COMPANIONS]
     if len(set(all_ids))!=7 or pg_id in all_ids: raise ValueError('cleanup identity collision')
     pg_image=products._image(init.POSTGRES)
     if pg_image['id']!=deployment['postgres_image_id']: raise ValueError('cleanup postgres image changed')
     from contextlib import nullcontext
-    context=nullcontext(held_owner) if lost_ack else controller.open_edge(**({'qualification':qualification} if qualification is not None else {}))
+    context=nullcontext(held_owner) if lost_ack or human_cleanup is not None else controller.open_edge(**({'qualification':qualification} if qualification is not None else {}))
     with context as owner:
         publisher=owner.publisher; edge_token=products._managed_edge_token(selected,intent['token'])
         if lost_ack:
@@ -88,6 +116,10 @@ def _teardown(qualification,lost_ack,held_owner):
                 unresolved()
                 controller._verify_created_publisher(publisher.cid,publisher.token,publisher_image,selected.edge/'watched',stopped_at=publisher.started)
             stopped()
+        elif human_cleanup is not None:
+            if owner.closed or controller._context_for_publisher(publisher) is not selected: raise ValueError('human cleanup owner changed')
+            _human_cleanup_guard(selected,intent)
+            topology=None
         else:
             owner._managed_gate(owner._load())
             topology=qualification.bind_topology(owner.peer,publisher) if qualification is not None else None
@@ -97,11 +129,12 @@ def _teardown(qualification,lost_ack,held_owner):
         business=set(ids+[services[x]['id'] for x in ('destination','native-gateway','native-envoy')]); capture={pg_id,services['native-gateway']['id'],services['origin21-capture-ingress']['id'],services['origin21-capture-worker']['id']}
         remaining_products={i+1:slots[i] for i in range(2)}; remaining_services=dict(services); publisher_live=True
         def check_remaining():
+            if human_cleanup is not None: _human_cleanup_guard(selected,intent)
             if lost_ack: unresolved()
-            if init._source(initializer['head'])!=source: raise ValueError('cleanup source changed')
+            if init._context_call(selected,init._source,initializer['head'])!=source: raise ValueError('cleanup source changed')
             products._verify_model('products',intent['model_sha256'],selected=selected); products._verify_model('companions',pending['model_sha256'],selected=selected)
-            products._network(business,intent['token'],selected=selected); init._network(token,deployment['id'],capture); init._volume(token,**({'qualification':qualification} if qualification is not None else {}))
-            state=init._postgres(pg_id,pg_image,deployment['id'],token,running=True,**({'qualification':qualification} if qualification is not None else {}))
+            products._network(business,intent['token'],selected=selected); init._context_call(selected,init._network,token,deployment['id'],capture); init._context_call(selected,init._volume,token,**({'qualification':qualification} if qualification is not None else {}))
+            state=init._context_call(selected,init._postgres,pg_id,pg_image,deployment['id'],token,running=True,**({'qualification':qualification} if qualification is not None else {}))
             if state['StartedAt']!=started: raise ValueError('cleanup postgres generation changed')
             project=products._command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+selected.project]).decode('ascii').split()
             expected={x['container_id'] for x in remaining_products.values()}|{x['id'] for x in remaining_services.values()}
@@ -139,17 +172,17 @@ def _teardown(qualification,lost_ack,held_owner):
         if products._command(['docker','network','ls','-q','--no-trunc','--filter','id='+slots[0]['namespace']],15).strip(): raise RuntimeError('business network remains')
         _write(selected.edge/'cleanup-business-network.done',{'version':1,'id':slots[0]['namespace']})
         # The last PG removal has its own complete identity proof; retain volume.
-        if init._source(initializer['head'])!=source: raise ValueError('cleanup source changed')
-        init._network(token,deployment['id'],[pg_id]); init._volume(token,**({'qualification':qualification} if qualification is not None else {}))
-        state=init._postgres(pg_id,pg_image,deployment['id'],token,running=True,**({'qualification':qualification} if qualification is not None else {}))
+        if init._context_call(selected,init._source,initializer['head'])!=source: raise ValueError('cleanup source changed')
+        init._context_call(selected,init._network,token,deployment['id'],[pg_id]); init._context_call(selected,init._volume,token,**({'qualification':qualification} if qualification is not None else {}))
+        state=init._context_call(selected,init._postgres,pg_id,pg_image,deployment['id'],token,running=True,**({'qualification':qualification} if qualification is not None else {}))
         if state['StartedAt']!=started: raise ValueError('cleanup postgres generation changed')
         _write(selected.edge/'cleanup-postgres.intent',{'version':1,'id':pg_id})
         if products._command(['docker','rm','-f',pg_id],30)!=pg_id.encode('ascii'): raise RuntimeError('postgres removal uncertain')
         if products._command(['docker','ps','-aq','--no-trunc','--filter','id='+pg_id],15).strip(): raise RuntimeError('postgres remains')
         init._db_inventory(token,[])
         _write(selected.edge/'cleanup-postgres.done',{'version':1,'id':pg_id})
-        if init._source(initializer['head'])!=source: raise ValueError('cleanup source changed')
-        init._network(token,deployment['id'],[]); init._volume(token,**({'qualification':qualification} if qualification is not None else {}))
+        if init._context_call(selected,init._source,initializer['head'])!=source: raise ValueError('cleanup source changed')
+        init._context_call(selected,init._network,token,deployment['id'],[]); init._context_call(selected,init._volume,token,**({'qualification':qualification} if qualification is not None else {}))
         _write(selected.edge/'cleanup-capture-network.intent',{'version':1,'id':deployment['id']})
         if products._command(['docker','network','rm',deployment['id']],30)!=deployment['id'].encode('ascii'): raise RuntimeError('capture network removal uncertain')
         if products._command(['docker','network','ls','-q','--no-trunc','--filter','id='+deployment['id']],15).strip(): raise RuntimeError('capture network remains')

@@ -42,8 +42,9 @@ def digest(value): return hashlib.sha256(DOMAIN+_bytes(value)).digest()
 
 class Evidence:
     def __init__(self,profile,inspect_slot,expected):
-        if (profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE) or not callable(inspect_slot) or type(expected) is not tuple or len(expected)!=2 or any(type(x) is not bytes or len(x)!=32 for x in expected):
+        if (profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE and profile is not origin21_profile.HUMAN_PROFILE) or not callable(inspect_slot) or type(expected) is not tuple or len(expected)!=2 or any(type(x) is not bytes or len(x)!=32 for x in expected):
             raise ValueError('fixed operator evidence required')
+        if profile is origin21_profile.HUMAN_PROFILE: origin21_profile.require_context(origin21_profile.HUMAN)
         self.profile,self.inspect_slot,self.expected=profile,inspect_slot,expected
         self.path=profile.state/'operator-evidence.json'
     def _current(self):

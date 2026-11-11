@@ -61,7 +61,9 @@ def _build_receipt(image_id,head,path,digest,*,selected=origin21_profile.STATIC)
         if network['name']!='apicontour-local_default' or network['owner_token']!='apicontour-local': raise ValueError('invalid local network')
     elif network['owner_kind']=='managed-local' and selected is origin21_profile.MANAGED:
         if (network['name'],network['owner_token'])!=('apicontour-origin21-managed-db_default','apicontour-origin21-managed-db'): raise ValueError('invalid managed database network')
-    elif network['owner_kind']=='fixture':
+    elif network['owner_kind']=='managed-human' and selected is origin21_profile.HUMAN:
+        if (network['name'],network['owner_token'])!=('apicontour-origin21-managed-human-db_default','apicontour-origin21-managed-human-db'): raise ValueError('invalid human database network')
+    elif network['owner_kind']=='fixture' and selected is not origin21_profile.HUMAN:
         prefix='contour-origin21-qual-' if selected is origin21_profile.STATIC else 'contour-managed-origin21-qual-'
         if not re.fullmatch('[0-9a-f]{32}',network['owner_token']) or network['name']!=prefix+network['owner_token']: raise ValueError('invalid fixture network')
     else: raise ValueError('unsupported deployment network')
@@ -92,7 +94,7 @@ def _mounts(index,*,selected=origin21_profile.STATIC):
         '/pilot/check_tls.js':ROOT/'deploy/pilot/check_tls.js', '/pilot/probe.js':ROOT/'deploy/pilot/probe.js',
         '/pilot/ca.crt':state.parent/'ca.crt',
     }
-    if selected is origin21_profile.MANAGED:
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
         for name in ('flows-wrong-name.json','flows-wrong-ca.json','native_edge_probe.js'):
             fixed['/pilot/'+name]=ROOT/'deploy/pilot'/name
     for name in ('client.crt','client.key','server.crt','server.key'):
@@ -175,10 +177,17 @@ def _select_model(full,group,*,selected=origin21_profile.STATIC):
     """Close a normalized Compose model over one fixed service group."""
     origin21_profile.require_context(selected)
     project=PROJECT if selected is origin21_profile.STATIC else selected.project
-    if group not in ('products','companions') or type(full) is not dict or set(full)!={'name','services','networks'} or full['name']!=project: raise ValueError('invalid compose model')
-    services=full['services']; networks=full['networks']; services_selected=PRODUCTS if group=='products' else COMPANIONS
-    if type(services) is not dict or set(services)!=set(PRODUCTS+COMPANIONS) or type(networks) is not dict or set(networks)!={'default','capture'}: raise ValueError('compose service scope drift')
-    required_networks={'default'} if group=='products' else {'default','capture'}
+    human = selected is origin21_profile.HUMAN
+    allowed_groups = ('products','companions','identity','application') if human else ('products','companions')
+    fields = {'name','services','networks','volumes'} if human else {'name','services','networks'}
+    if group not in allowed_groups or type(full) is not dict or set(full)!=fields or full['name']!=project: raise ValueError('invalid compose model')
+    services=full['services']; networks=full['networks']
+    services_selected=PRODUCTS if group=='products' else COMPANIONS if group=='companions' else ('mvp-keycloak',) if group=='identity' else ('app',)
+    expected_services=set(PRODUCTS+COMPANIONS+('app','mvp-keycloak')) if human else set(PRODUCTS+COMPANIONS)
+    expected_networks={'default','capture','human'} if human else {'default','capture'}
+    if type(services) is not dict or set(services)!=expected_services or type(networks) is not dict or set(networks)!=expected_networks: raise ValueError('compose service scope drift')
+    if human and (type(full['volumes']) is not dict or set(full['volumes'])!={'human-keycloak-data'}): raise ValueError('compose volume scope drift')
+    required_networks={'default'} if group=='products' else {'default','capture'} if group=='companions' else {'human'} if group=='identity' else {'capture','human'}
     output={}; used_networks=set()
     for name in services_selected:
         original=services[name]
@@ -194,14 +203,19 @@ def _select_model(full,group,*,selected=origin21_profile.STATIC):
             else: service.pop('depends_on',None)
         if type(service.get('volumes',[])) is not list: raise ValueError('invalid compose binds')
         for volume in service.get('volumes',[]):
-            if type(volume) is not dict or volume.get('type')!='bind' or not isinstance(volume.get('source'),str) or not os.path.isabs(volume['source']): raise ValueError('invalid compose bind')
+            if type(volume) is not dict: raise ValueError('invalid compose bind')
+            if human and group=='identity' and name=='mvp-keycloak' and volume.get('type')=='volume':
+                if volume.get('source')!='human-keycloak-data' or volume.get('target')!='/opt/keycloak/data': raise ValueError('invalid human volume')
+            elif volume.get('type')!='bind' or not isinstance(volume.get('source'),str) or not os.path.isabs(volume['source']): raise ValueError('invalid compose bind')
         output[name]=service
     if used_networks!=required_networks: raise ValueError('unreferenced compose network')
-    return {'name':project,'services':output,'networks':{name:networks[name] for name in sorted(required_networks)}}
+    result={'name':project,'services':output,'networks':{name:networks[name] for name in sorted(required_networks)}}
+    if human and group=='identity': result['volumes']=full['volumes']
+    return result
 
 
 def _reserve_managed_edge(selected,origin_token):
-    if selected is not origin21_profile.MANAGED or not re.fullmatch('[0-9a-f]{64}',origin_token): raise ValueError('invalid managed edge intent')
+    if (selected is not origin21_profile.MANAGED and selected is not origin21_profile.HUMAN) or not re.fullmatch('[0-9a-f]{64}',origin_token): raise ValueError('invalid managed edge intent')
     capture_renew.safe_dir(selected.edge.parent)
     os.mkdir(selected.edge,0o700)
     parent=os.open(selected.edge.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -218,7 +232,7 @@ def _reserve_managed_edge(selected,origin_token):
 
 
 def _managed_edge_token(selected,origin_token):
-    if selected is not origin21_profile.MANAGED or not re.fullmatch('[0-9a-f]{64}',origin_token): raise ValueError('invalid managed edge context')
+    if (selected is not origin21_profile.MANAGED and selected is not origin21_profile.HUMAN) or not re.fullmatch('[0-9a-f]{64}',origin_token): raise ValueError('invalid managed edge context')
     capture_renew.safe_dir(selected.edge)
     raw=origin_credentials._file(selected.edge/'intent.json',4096); value=capture_renew.exact_json(raw)
     if type(value) is not dict or set(value)!={'version','origin_token','edge_token'} or value['version']!=1 or value['origin_token']!=origin_token or not isinstance(value['edge_token'],str) or not re.fullmatch('[0-9a-f]{32}',value['edge_token']) or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw: raise ValueError('managed edge intent drift')
@@ -246,6 +260,12 @@ def _derive_model(group,token,app_image,capture_network,*,selected=origin21_prof
     default=full['networks']['default']; capture=full['networks']['capture']
     if (type(default) is not dict or default.get('name')!=network_name or default.get('internal') is not True or (default.get('labels') or {}).get('org.apicontour.origin21.owner')!=token or
         type(capture) is not dict or capture.get('name')!=capture_network or capture.get('external') is not True): raise ValueError('compose network identity drift')
+    if selected is origin21_profile.HUMAN:
+        human=full['networks']['human']; volume=full['volumes']['human-keycloak-data']
+        if (type(human) is not dict or human.get('name')!=selected.project+'_human' or human.get('internal') is not True or
+            (human.get('labels') or {}).get('org.apicontour.origin21.owner')!=token or type(volume) is not dict or
+            volume.get('name')!=selected.project+'_human-keycloak-data' or (volume.get('labels') or {}).get('org.apicontour.origin21.owner')!=token or volume.get('external') is True):
+            raise ValueError('human network or volume identity drift')
     result=json.dumps(model,sort_keys=True,separators=(',',':')).encode()
     if not 1<=len(result)<=MODEL_LIMIT: raise ValueError('compose model bound')
     return result
@@ -255,12 +275,16 @@ def _verify_model(group,digest,*,selected=origin21_profile.STATIC):
     origin21_profile.require_context(selected)
     project=PROJECT if selected is origin21_profile.STATIC else selected.project
     owner=OWNER if selected is origin21_profile.STATIC else selected.owner
-    if group not in ('products','companions') or not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest): raise ValueError('invalid compose model identity')
+    groups=('products','companions','identity','application') if selected is origin21_profile.HUMAN else ('products','companions')
+    if group not in groups or not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest): raise ValueError('invalid compose model identity')
     raw=origin_credentials._file(owner/(group+'-model.json'),MODEL_LIMIT)
     if hashlib.sha256(raw).hexdigest()!=digest: raise ValueError('compose model changed')
     value=capture_renew.exact_json(raw)
-    names=PRODUCTS if group=='products' else COMPANIONS; networks={'default'} if group=='products' else {'default','capture'}
-    if type(value) is not dict or set(value)!={'name','services','networks'} or value['name']!=project or type(value['services']) is not dict or set(value['services'])!=set(names) or type(value['networks']) is not dict or set(value['networks'])!=networks or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw: raise ValueError('invalid stored compose model')
+    names=PRODUCTS if group=='products' else COMPANIONS if group=='companions' else ('mvp-keycloak',) if group=='identity' else ('app',)
+    networks={'default'} if group=='products' else {'default','capture'} if group=='companions' else {'human'} if group=='identity' else {'capture','human'}
+    fields={'name','services','networks','volumes'} if group=='identity' else {'name','services','networks'}
+    if group=='identity' and (type(value) is not dict or type(value.get('volumes')) is not dict or set(value['volumes'])!={'human-keycloak-data'}): raise ValueError('invalid stored volume')
+    if type(value) is not dict or set(value)!=fields or value['name']!=project or type(value['services']) is not dict or set(value['services'])!=set(names) or type(value['networks']) is not dict or set(value['networks'])!=networks or json.dumps(value,sort_keys=True,separators=(',',':')).encode()!=raw: raise ValueError('invalid stored compose model')
     used_networks=set()
     for service in value['services'].values():
         if type(service) is not dict or type(service.get('networks')) is not dict or not set(service['networks']).issubset(networks) or type(service.get('depends_on',{})) is not dict or not set(service.get('depends_on',{})).issubset(names): raise ValueError('stored compose model escapes group')
@@ -304,7 +328,7 @@ def start_products(*, app_image_id, build_head, build_receipt, build_receipt_sha
     try: os.fsync(fd)
     finally: os.close(fd)
     if qualification is not None: qualification.bind_owner(owner)
-    if selected is origin21_profile.MANAGED: _reserve_managed_edge(selected,token)
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN: _reserve_managed_edge(selected,token)
     model=_context_call(selected,_derive_model,'products',token,app_image_id,deployment['name'])
     origin_credentials._write(owner/'products-model.json',model)
     model_hash=hashlib.sha256(model).hexdigest()
@@ -402,7 +426,7 @@ def _companion_mounts(service,*,selected=origin21_profile.STATIC,qualification=N
     elif service=='native-gateway': paths={'/run/native':state/'native/gateway'}
     elif service=='native-envoy':
         paths={'/run/forwarder':state/'native/forwarder'}
-        if selected is origin21_profile.MANAGED: paths.update({'/certs':selected.edge/'published','/run/watch':selected.edge/'watched'})
+        if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN: paths.update({'/certs':selected.edge/'published','/run/watch':selected.edge/'watched'})
     elif service=='origin21-capture-worker': paths={
         '/run/capture/worker.json':state/'capture/runtime/worker.json',
         '/run/capture/worker.password':state/'capture/runtime/worker.password', '/run/capture/database-ca.crt':root/'ca.crt'}
@@ -422,19 +446,21 @@ def _capture_network(deployment,*,selected=origin21_profile.STATIC):
         if labels.get('com.docker.compose.project')!='apicontour-local' or labels.get('com.docker.compose.network')!='default': raise RuntimeError('local network ownership drift')
     elif deployment['owner_kind']=='managed-local' and selected is origin21_profile.MANAGED:
         if name!='apicontour-origin21-managed-db_default' or deployment['owner_token']!='apicontour-origin21-managed-db' or labels.get('com.docker.compose.project')!='apicontour-origin21-managed-db' or labels.get('com.docker.compose.network')!='default': raise RuntimeError('managed network ownership drift')
-    elif deployment['owner_kind']=='fixture':
+    elif deployment['owner_kind']=='managed-human' and selected is origin21_profile.HUMAN:
+        if name!='apicontour-origin21-managed-human-db_default' or deployment['owner_token']!='apicontour-origin21-managed-human-db' or labels.get('com.docker.compose.project')!='apicontour-origin21-managed-human-db' or labels.get('com.docker.compose.network')!='default' or item.get('Internal') is not True: raise RuntimeError('human network ownership drift')
+    elif deployment['owner_kind']=='fixture' and selected is not origin21_profile.HUMAN:
         if item.get('Internal') is not True or labels.get('org.apicontour.fixture-owner')!=deployment['owner_token']: raise RuntimeError('fixture network ownership drift')
     else: raise RuntimeError('unsupported deployment network')
     cid=deployment['postgres_id']
     if cid not in (item.get('Containers') or {}): raise RuntimeError('postgres network membership drift')
     pg=_objects(['docker','inspect',cid]); cfg=pg.get('Config') or {}; pglabels=cfg.get('Labels') or {}
     if pg.get('Id')!=cid or pg.get('Image')!=deployment['postgres_image_id'] or (pg.get('State') or {}).get('Running') is not True or (pg.get('HostConfig') or {}).get('Init') is not True or cfg.get('Image')!='postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4': raise RuntimeError('postgres identity drift')
-    if deployment['owner_kind'] in ('local','managed-local'):
-        project='apicontour-local' if selected is origin21_profile.STATIC else 'apicontour-origin21-managed-db'
+    if deployment['owner_kind'] in ('local','managed-local','managed-human'):
+        project={'local':'apicontour-local','managed-local':'apicontour-origin21-managed-db','managed-human':'apicontour-origin21-managed-human-db'}[deployment['owner_kind']]
         if pglabels.get('com.docker.compose.project')!=project or pglabels.get('com.docker.compose.service')!='postgres': raise RuntimeError('postgres ownership drift')
     if deployment['owner_kind']=='fixture' and pglabels.get('org.apicontour.fixture-owner')!=deployment['owner_token']: raise RuntimeError('postgres ownership drift')
     networks=(pg.get('NetworkSettings') or {}).get('Networks') or {}
-    if selected is origin21_profile.MANAGED and set(networks)!={name}: raise RuntimeError('managed postgres network drift')
+    if (selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN) and set(networks)!={name}: raise RuntimeError('managed postgres network drift')
     network=networks.get(name) or {}
     if network.get('NetworkID')!=deployment['id'] or 'postgres' not in (network.get('Aliases') or []): raise RuntimeError('postgres alias drift')
     ca=capture_renew.read_file(selected.profile.state.parent/'ca.crt',65536)
@@ -449,7 +475,7 @@ def _validate_companion(obj,service,cid,image,token,default_network,capture_netw
     if service not in COMPANIONS or not re.fullmatch('[0-9a-f]{64}',cid): raise ValueError('invalid companion identity')
     config=obj.get('Config') or {}; host=obj.get('HostConfig') or {}; labels=config.get('Labels') or {}; state=obj.get('State') or {}
     ref=origin21_evidence.IMAGE if service=='destination' else ENVOY if service=='native-envoy' else image['id']
-    if selected is origin21_profile.MANAGED and service=='native-envoy':
+    if (selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN) and service=='native-envoy':
         if labels.get('org.apicontour.managed-edge-owner')!=_managed_edge_token(selected,token): raise RuntimeError('managed edge owner drift')
     memory=192*1024*1024 if service=='destination' else 256*1024*1024
     pids=64 if service=='destination' else 128
@@ -534,10 +560,14 @@ def _companion_record(intent,products,*,selected=origin21_profile.STATIC,qualifi
         obj=_objects(['docker','inspect',entry['id']]); state=_context_call(selected,_validate_companion,obj,service,entry['id'],image,intent['token'],network,capture,intent['deployment']['name'],running=True,**({'qualification':qualification} if qualification is not None else {}))
         if state['StartedAt']!=entry['started_at']: raise ValueError('companion generation changed')
     ids=_command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+project]).decode('ascii').split()
-    if len(ids)!=7 or set(ids)!=set(products+[slots[x]['id'] for x in COMPANIONS]): raise ValueError('project membership drift')
-    if selected is origin21_profile.MANAGED:
+    human_final=selected is origin21_profile.HUMAN and os.path.lexists(selected.owner/'human.json')
+    if selected is origin21_profile.HUMAN and os.path.lexists(selected.owner/'human.intent') and not human_final: raise ValueError('human transition unresolved')
+    if not human_final and (len(ids)!=7 or set(ids)!=set(products+[slots[x]['id'] for x in COMPANIONS])): raise ValueError('project membership drift')
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
         from deploy.local import origin21_managed_controller
-        origin21_managed_controller.verify_recorded_topology(**({'qualification':qualification} if qualification is not None else {}))
+        kwargs={'qualification':qualification} if qualification is not None else {}
+        if selected is origin21_profile.HUMAN: kwargs['selected']=selected
+        origin21_managed_controller.verify_recorded_topology(**kwargs)
     return network
 
 
@@ -560,10 +590,13 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     Product containers are never recreated, restarted or deleted here.
     """
     origin21_profile.require_context(selected)
-    if selected is origin21_profile.MANAGED:
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
         if any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
-        from deploy.local import origin21_managed_controller
-        return origin21_managed_controller.start_companions(app_image_id=app_image_id,build_head=build_head,build_receipt=build_receipt,build_receipt_sha256=build_receipt_sha256,transport=transport,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
+        from deploy.local import origin21_managed_controller, origin21_transport
+        if type(transport) is not origin21_transport.ManagedTransport or transport._selected is not selected: raise ValueError('managed transport required')
+        kwargs={'qualification':transport.qualification} if transport.qualification is not None else {}
+        if selected is origin21_profile.HUMAN: kwargs['selected']=selected
+        return origin21_managed_controller.start_companions(app_image_id=app_image_id,build_head=build_head,build_receipt=build_receipt,build_receipt_sha256=build_receipt_sha256,transport=transport,**kwargs)
     if transport is not None: raise ValueError('unexpected managed transport')
     capture_renew.safe_dir(OWNER)
     if stat.S_IMODE(os.lstat(OWNER).st_mode)!=0o700: raise ValueError('unsafe product ownership directory')

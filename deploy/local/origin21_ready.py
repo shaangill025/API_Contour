@@ -57,8 +57,8 @@ def validate_fresh(rows,before,index,leaf,evidence,revision,*,selected=origin21_
 
 def check(expected, *, psql=None, sensitive_execute=None, authenticate=None, selected=origin21_profile.STATIC, transport=None):
     origin21_profile.require_context(selected)
-    if selected is origin21_profile.MANAGED:
-        if type(transport) is not origin21_transport.ManagedTransport or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
+    if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
+        if type(transport) is not origin21_transport.ManagedTransport or transport._selected is not selected or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
         transport.verify(); psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
         inspect_slot=lambda i:origin21_products.inspect_slot(i,selected=selected,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
     else:

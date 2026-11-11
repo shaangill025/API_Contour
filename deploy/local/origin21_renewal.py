@@ -48,7 +48,8 @@ class History(NamedTuple):
 
 def artifacts(profile):
     """Validate only the fixed optional renewal files; never adopt extras."""
-    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND: raise ValueError('unsupported origin profile')
+    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND and profile is not origin21_profile.HUMAN_BOUND: raise ValueError('unsupported origin profile')
+    if profile is origin21_profile.HUMAN_BOUND: origin21_profile.require_context(origin21_profile.HUMAN)
     root=profile.state; lock=root/LOCK; path=root/PENDING
     present=set()
     if os.path.lexists(lock):
@@ -84,7 +85,8 @@ def history(profile, psql, pending=None):
     It never begins or commits a caller-owned transaction. A final empty probe rechecks them;
     the subsequent C-locked CAS separately rechecks the head and total under lock.
     """
-    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND: raise ValueError('unsupported origin profile')
+    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND and profile is not origin21_profile.HUMAN_BOUND: raise ValueError('unsupported origin profile')
+    if profile is origin21_profile.HUMAN_BOUND: origin21_profile.require_context(origin21_profile.HUMAN)
     t=provision.sql_quote(provision.IDS[0]); c=provision.sql_quote(profile.capture.collector)
     deadline=time.monotonic()+HISTORY_DEADLINE_SECONDS
     public=_public(profile)
@@ -147,7 +149,8 @@ def _locked_cas(profile, psql, base, old, proposal, new, preflight):
 
 def renew_locked(profile, psql, now=None, check_source=lambda: True):
     """Call only while the validated setup lock is held."""
-    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND: raise ValueError('unsupported origin profile')
+    if profile is not origin21_profile.BOUND and profile is not origin21_profile.MANAGED_BOUND and profile is not origin21_profile.HUMAN_BOUND: raise ValueError('unsupported origin profile')
+    if profile is origin21_profile.HUMAN_BOUND: origin21_profile.require_context(origin21_profile.HUMAN)
     now=now or datetime.datetime.now(datetime.timezone.utc)
     root=profile.state; lock=root/LOCK; path=root/PENDING
     fd=os.open(lock,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)

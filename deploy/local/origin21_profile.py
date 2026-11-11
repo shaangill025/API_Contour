@@ -61,7 +61,7 @@ _CAPTURE = _legacy_profiles.Profile(PROFILE.name, PROFILE.capture, PROFILE.colle
 BOUND = _legacy_profiles.OriginPilot(_CAPTURE, PROFILE.state, PROFILE.ingress_login, PROFILE.worker_login,
     'contour_origin_ingress', 'contour_catalog_worker', PROFILE.origins)
 
-# Only these two fixed contexts are authorities; equal reconstructed tuples are not.
+# Only these fixed contexts are authorities; equal reconstructed tuples are not.
 class Context(NamedTuple):
     profile: Profile
     bound: _legacy_profiles.OriginPilot
@@ -88,24 +88,42 @@ MANAGED = Context(MANAGED_PROFILE,MANAGED_BOUND,'apicontour-origin21-managed','a
                   MANAGED_STATE.parent/'origin21-products',ROOT/'deploy/local/origin21-managed-compose.yaml',MANAGED_STATE.parent/'managed-edge')
 
 
+HUMAN_STATE = ROOT / '.local-mvp-managed-human' / 'origin21-pilot'
+HUMAN_PROFILE = PROFILE._replace(
+    name='origin21-managed-human-pilot', state=HUMAN_STATE, capture=HUMAN_STATE/'capture',
+    origins=tuple(slot._replace(leaf_der=HUMAN_STATE/('replica'+str(i))/'client.crt.der')
+                  for i,slot in enumerate(PROFILE.origins,1)))
+_HUMAN_CAPTURE = _legacy_profiles.Profile(HUMAN_PROFILE.name,HUMAN_PROFILE.capture,HUMAN_PROFILE.collector,
+    HUMAN_PROFILE.source,HUMAN_PROFILE.deployment,HUMAN_PROFILE.instance,HUMAN_PROFILE.nonce,
+    HUMAN_PROFILE.approved_names,HUMAN_PROFILE.approved_route_segments)
+HUMAN_BOUND = _legacy_profiles.OriginPilot(_HUMAN_CAPTURE,HUMAN_PROFILE.state,HUMAN_PROFILE.ingress_login,
+    HUMAN_PROFILE.worker_login,'contour_origin_ingress','contour_catalog_worker',HUMAN_PROFILE.origins)
+HUMAN = Context(HUMAN_PROFILE,HUMAN_BOUND,'apicontour-origin21-managed-human',
+                'apicontour-origin21-managed-human_default',HUMAN_STATE.parent/'origin21-products',
+                ROOT/'deploy/local/origin21-managed-human-compose.yaml',HUMAN_STATE.parent/'managed-edge')
+
+
 def require_context(context):
-    if context is not STATIC and context is not MANAGED: raise ValueError('unsupported origin21 context')
+    if context is not STATIC and context is not MANAGED and context is not HUMAN: raise ValueError('unsupported origin21 context')
     return context
 
 
 def context_for_profile(profile):
     if profile is PROFILE: return STATIC
     if profile is MANAGED_PROFILE: return MANAGED
+    if profile is HUMAN_PROFILE: return require_context(HUMAN)
     raise ValueError('unsupported origin21 profile')
 
 
 def context_for_bound(profile):
     if profile is BOUND: return STATIC
     if profile is MANAGED_BOUND: return MANAGED
+    if profile is HUMAN_BOUND: return require_context(HUMAN)
     raise ValueError('unsupported origin21 bound profile')
 
 
 def context_for_capture(profile):
     if profile is BOUND.capture: return STATIC
     if profile is MANAGED_BOUND.capture: return MANAGED
+    if profile is HUMAN_BOUND.capture: return require_context(HUMAN)
     raise ValueError('unsupported origin21 capture profile')

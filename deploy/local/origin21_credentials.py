@@ -9,10 +9,10 @@ from deploy.pilot import origin_credentials
 
 class Credentials(origin_credentials.Credentials):
     def __init__(self, profile, ca_cert, ca_key):
-        if profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE: raise ValueError('unsupported origin21 profile')
+        if profile is not origin21_profile.PROFILE and profile is not origin21_profile.MANAGED_PROFILE and profile is not origin21_profile.HUMAN_PROFILE: raise ValueError('unsupported origin21 profile')
         cert,key=Path(ca_cert),Path(ca_key)
-        if profile is origin21_profile.MANAGED_PROFILE:
-            root=origin21_profile.MANAGED.profile.state.parent
+        if profile is origin21_profile.MANAGED_PROFILE or profile is origin21_profile.HUMAN_PROFILE:
+            root=origin21_profile.context_for_profile(profile).profile.state.parent
             if not cert.is_absolute() or not key.is_absolute() or cert!=root/'ca.crt' or key!=root/'ca.key': raise ValueError('managed CA paths required')
         self.profile, self.ca_cert, self.ca_key = profile, cert, key
         self.allow_observer_policy = False

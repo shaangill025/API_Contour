@@ -60,6 +60,35 @@ MANAGED_SOURCE_FILES = SOURCE_FILES + ('deploy/gateway/managed_edge.py','deploy/
     'tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/publisher.js',
     'tests/fixtures/managed-origin-qualification/test_driver.py','tests/fixtures/managed-origin-qualification/test_fixture.py',
     'tests/fixtures/managed-origin-qualification/test_proof.py','tests/fixtures/managed-origin-qualification/test_wrapper.py')
+HUMAN_SOURCE_FILES = MANAGED_SOURCE_FILES + (
+    'deploy/local/origin21-managed-human-compose.yaml',
+    'deploy/local/check_oidc.py',
+    'deploy/local/origin21_managed_human_preflight.py',
+    'deploy/local/origin21_managed_human_secret.py',
+    'deploy/local/origin21_managed_human_identity.py',
+    'deploy/local/origin21_managed_human_business.py',
+    'deploy/local/origin21_managed_human_topology.py',
+    'deploy/local/origin21_managed_human_services.py',
+    'deploy/local/origin21_managed_human_cli.py',
+    'deploy/local/origin21_managed_human_cleanup.py',
+    'tests/fixtures/managed-human/test_profile.py',
+    'tests/fixtures/managed-human/test_preflight.py',
+    'tests/fixtures/managed-human/test_app_secret.py',
+    'tests/fixtures/managed-human/test_source.py',
+    'tests/fixtures/managed-human/test_initializer.py',
+    'tests/fixtures/managed-human/test_oidc_profile.py',
+    'tests/fixtures/managed-human/test_realm.py',
+    'tests/fixtures/managed-human/test_business.py',
+    'tests/fixtures/managed-human/test_model.py',
+    'tests/fixtures/managed-human/test_membership.py',
+    'tests/fixtures/managed-human/test_sql_role.py',
+    'tests/fixtures/managed-human/test_topology.py',
+    'tests/fixtures/managed-human/test_services.py',
+    'tests/fixtures/managed-human/test_cli.py',
+    'tests/fixtures/managed-human/test_cleanup.py',
+    'tests/fixtures/managed-human/test_transport_gate.py',
+    'tests/fixtures/managed-human/legacy-membership.json',
+)
 MAX_JOURNAL = 4096
 
 
@@ -75,9 +104,15 @@ def _identity(profile):
     return hashlib.sha256(_encode(value)).hexdigest()
 
 
+def _source_files(context):
+    if context is origin21_profile.STATIC: return SOURCE_FILES
+    if context is origin21_profile.MANAGED: return MANAGED_SOURCE_FILES
+    if context is origin21_profile.HUMAN: return HUMAN_SOURCE_FILES
+    raise ValueError('unsupported origin21 context')
+
+
 def _source_snapshot(context=origin21_profile.STATIC):
-    origin21_profile.require_context(context)
-    files=SOURCE_FILES if context is origin21_profile.STATIC else MANAGED_SOURCE_FILES
+    files=_source_files(context)
     if context is origin21_profile.STATIC: return {name:(origin21_profile.ROOT/name).read_bytes() for name in files}
     result={}
     for name in files:
@@ -88,8 +123,7 @@ def _source_snapshot(context=origin21_profile.STATIC):
 
 
 def _source_identity(snapshot=None, context=origin21_profile.STATIC):
-    origin21_profile.require_context(context)
-    files=SOURCE_FILES if context is origin21_profile.STATIC else MANAGED_SOURCE_FILES
+    files=_source_files(context)
     snapshot=_source_snapshot(context) if snapshot is None else snapshot
     if set(snapshot)!=set(files): raise ValueError('source closure mismatch')
     digest=hashlib.sha256()
@@ -141,6 +175,7 @@ def run(profile, operations, *, snapshot=None, set_context=None, after_complete=
     never adopted. A completed phase is rechecked before any new mutation.
     """
     selected=origin21_profile.context_for_profile(profile)
+    origin21_profile.require_context(selected)
     if type(identities_only) is not bool or type(require_complete) is not bool or (identities_only and require_complete): raise ValueError('invalid setup mode')
     phases=PHASES[:1] if identities_only else PHASES
     if type(operations) is not dict or set(operations)!=set(phases): raise ValueError('invalid operations')

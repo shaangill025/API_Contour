@@ -10,9 +10,27 @@ import json
 import os
 
 
-def _topology_snapshot(peer,publisher,*,live_envoy=False,qualification=None):
+class _HumanTransition:
+    __slots__ = ()
+
+
+_HUMAN_TRANSITION = _HumanTransition()
+_HUMAN_CLEANUP = _HumanTransition()
+
+def _context_for_publisher(publisher):
+    # A path selects only the candidate. _topology_snapshot then validates the
+    # held publisher, owner, source, target and exact membership before use.
+    if publisher.watched == str(profiles.MANAGED.edge/'watched'): return profiles.MANAGED
+    if publisher.watched == str(profiles.HUMAN.edge/'watched'): return profiles.HUMAN
+    raise ValueError('unrecognized managed publisher')
+
+
+def _topology_snapshot(peer,publisher,*,live_envoy=False,qualification=None,_transition=None,_cleanup=None):
     if type(peer) is not NativeReplicaPeer or type(publisher) is not NativeDirectoryPublisher: raise ValueError('managed native identities required')
-    selected=profiles.MANAGED
+    selected=_context_for_publisher(publisher)
+    profiles.require_context(selected)
+    publisher.verify()
+    if selected is profiles.HUMAN and qualification is not None: raise ValueError('unexpected qualification')
     if qualification is not None: qualification.verify_owner(selected.owner)
     elif os.path.lexists(selected.owner/'qualification.intent'): raise ValueError('qualification proof required')
     intent=products._read_record('intent.json',selected=selected)
@@ -32,26 +50,26 @@ def _topology_snapshot(peer,publisher,*,live_envoy=False,qualification=None):
     if state['completed']!=len(origin21_state.PHASES) or state['pending'] is not None: raise ValueError('managed enrollment incomplete')
     ids=products._recorded_products(intent,recorded,selected=selected)
     from deploy.local import origin21_managed_init
-    if origin21_managed_init.SOURCE not in origin21_state.MANAGED_SOURCE_FILES: raise ValueError('managed DB source not pinned')
-    db_raw=origin_credentials._file(origin21_managed_init.BASE/'initializer.intent',4096)
+    if origin21_managed_init.SOURCE not in origin21_state._source_files(selected): raise ValueError('managed DB source not pinned')
+    db_raw=origin_credentials._file(selected.profile.state.parent/'initializer.intent',4096)
     db_intent=capture_renew.exact_json(db_raw)
     if (type(db_intent) is not dict or set(db_intent)!={'version','head','build_image','build_receipt_sha256','token','network','volume'} or db_intent.get('version')!=1 or json.dumps(db_intent,sort_keys=True,separators=(',',':')).encode()!=db_raw or
         (db_intent['head'],db_intent['build_image'])!=(intent['build_head'],intent['app_image_id']) or db_intent['network']!=intent['deployment']['name']): raise ValueError('managed DB ownership record changed')
-    volume=origin21_managed_init._selected_volume(qualification)
+    volume=origin21_managed_init._context_call(selected,origin21_managed_init._selected_volume,qualification)
     if db_intent['volume']!=volume: raise ValueError('managed DB volume identity changed')
     if qualification is not None: qualification.require_build(db_intent['build_image'],db_intent['head'],db_intent['build_receipt_sha256'])
     origin21_managed_init._db_inventory(db_intent['token'],[intent['deployment']['postgres_id']])
-    start_raw=origin_credentials._file(origin21_managed_init.BASE/'postgres.start.result',4096); db_start=capture_renew.exact_json(start_raw)
-    done_raw=origin_credentials._file(origin21_managed_init.BASE/'initializer.done',4096); db_done=capture_renew.exact_json(done_raw)
+    start_raw=origin_credentials._file(selected.profile.state.parent/'postgres.start.result',4096); db_start=capture_renew.exact_json(start_raw)
+    done_raw=origin_credentials._file(selected.profile.state.parent/'initializer.done',4096); db_done=capture_renew.exact_json(done_raw)
     if (type(db_start) is not dict or set(db_start)!={'version','id','started_at'} or db_start['version']!=1 or db_start['id']!=intent['deployment']['postgres_id'] or
         type(db_done) is not dict or set(db_done)!={'version','receipt_sha256','postgres_id','started_at'} or db_done['version']!=1 or
         db_done['postgres_id']!=db_start['id'] or db_done['started_at']!=db_start['started_at'] or db_done['receipt_sha256']!=intent['build_receipt_sha256'] or
         json.dumps(db_start,sort_keys=True,separators=(',',':')).encode()!=start_raw or json.dumps(db_done,sort_keys=True,separators=(',',':')).encode()!=done_raw): raise ValueError('managed DB generation record changed')
     pg_image=products._image(origin21_managed_init.POSTGRES)
     if pg_image['id']!=intent['deployment']['postgres_image_id']: raise ValueError('managed DB image changed')
-    pg_state=origin21_managed_init._postgres(db_start['id'],pg_image,intent['deployment']['id'],db_intent['token'],running=True,qualification=qualification)
+    pg_state=origin21_managed_init._context_call(selected,origin21_managed_init._postgres,db_start['id'],pg_image,intent['deployment']['id'],db_intent['token'],running=True,qualification=qualification)
     if pg_state['StartedAt']!=db_start['started_at']: raise ValueError('managed DB generation changed')
-    origin21_managed_init._volume(db_intent['token'],qualification=qualification)
+    origin21_managed_init._context_call(selected,origin21_managed_init._volume,db_intent['token'],qualification=qualification)
     slots=recorded['slots']; services=created['services']; all_ids=list(ids)
     for service,item in services.items():
         if type(item) is not dict or set(item)!={'id','started_at'} or not isinstance(item['id'],str): raise ValueError('managed companion record invalid')
@@ -59,7 +77,13 @@ def _topology_snapshot(peer,publisher,*,live_envoy=False,qualification=None):
         if (service=='native-envoy') != (item['started_at'] is None): raise ValueError('managed companion start invalid')
     if len(set(all_ids))!=7 or publisher.cid in all_ids: raise ValueError('managed container identity collision')
     project_ids=products._command(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+selected.project]).decode('ascii').split()
-    if len(project_ids)!=7 or set(project_ids)!=set(all_ids): raise ValueError('managed project membership changed')
+    human_cleanup = selected is profiles.HUMAN and _cleanup is _HUMAN_CLEANUP and os.path.lexists(selected.owner/'human.cleanup.intent')
+    if _cleanup is not None and not human_cleanup: raise ValueError('invalid human cleanup proof')
+    human_final = selected is profiles.HUMAN and os.path.lexists(selected.owner/'human.json') and not human_cleanup
+    human_partial = selected is profiles.HUMAN and os.path.lexists(selected.owner/'human.intent') and not human_final and not human_cleanup
+    if human_partial and _transition is not _HUMAN_TRANSITION: raise ValueError('human transition unresolved')
+    if _transition is not None and (selected is not profiles.HUMAN or not human_partial): raise ValueError('invalid human transition proof')
+    if not human_final and not human_partial and not human_cleanup and (len(project_ids)!=7 or set(project_ids)!=set(all_ids)): raise ValueError('managed project membership changed')
     edge_token=products._managed_edge_token(selected,intent['token'])
     edge_ids=products._command(['docker','ps','-aq','--no-trunc','--filter','label=org.apicontour.managed-edge-owner='+edge_token]).decode('ascii').split()
     if len(edge_ids)!=2 or set(edge_ids)!={services['native-envoy']['id'],publisher.cid}: raise ValueError('managed edge ownership membership changed')
@@ -74,7 +98,16 @@ def _topology_snapshot(peer,publisher,*,live_envoy=False,qualification=None):
     if peer.network_id!=business or pending.get('capture_network')!=capture: raise ValueError('managed network identity changed')
     network=products._objects(['docker','network','inspect',intent['deployment']['name']])
     expected_capture={intent['deployment']['postgres_id'],services['native-gateway']['id'],services['origin21-capture-ingress']['id'],services['origin21-capture-worker']['id']}
-    if set((network.get('Containers') or {}).keys())!=expected_capture or publisher.cid in expected_capture: raise ValueError('managed capture membership changed')
+    if human_final or human_partial or human_cleanup:
+        from deploy.local import origin21_managed_human_topology
+        if human_final:
+            origin21_managed_human_topology.verify_live(intent,recorded,services,publisher.cid,business,capture,db_intent['token'])
+        elif human_cleanup and os.path.lexists(selected.owner/'human.cleanup-identity.done'):
+            origin21_managed_human_topology.verify_removed_stage(intent,recorded,services,publisher.cid,business,capture,db_intent['token'])
+        else:
+            origin21_managed_human_topology.verify_identity_stage(intent,recorded,services,publisher.cid,business,capture,db_intent['token'],removed_app=human_cleanup)
+    elif set((network.get('Containers') or {}).keys())!=expected_capture or publisher.cid in expected_capture:
+        raise ValueError('managed capture membership changed')
     images=pending.get('images')
     if type(images) is not dict or set(images)!=set(products.COMPANIONS): raise ValueError('managed images invalid')
     app=products._image(intent['app_image_id']); node=products._image(products.origin21_evidence.IMAGE); envoy=products._image(products.ENVOY)
@@ -126,7 +159,8 @@ def start_envoy_once(owner):
     owner.reconcile()
 
 
-def _verify_created_publisher(cid,edge_token,node,watched,*,stopped_at=None):
+def _verify_created_publisher(cid,edge_token,node,watched,*,stopped_at=None,selected=profiles.MANAGED):
+    profiles.require_context(selected)
     """Inspect the exact inert publisher configuration before its first start."""
     import os
     import re
@@ -134,7 +168,7 @@ def _verify_created_publisher(cid,edge_token,node,watched,*,stopped_at=None):
     if not re.fullmatch('[0-9a-f]{64}',cid) or not re.fullmatch('[0-9a-f]{32}',edge_token): raise ValueError('publisher create identity invalid')
     obj=products._objects(['docker','inspect',cid]); cfg=obj.get('Config') or {}; host=obj.get('HostConfig') or {}; state=obj.get('State') or {}
     labels=cfg.get('Labels') or {}; mounts=obj.get('Mounts') or []; expected=_publisher_env(node['env']); expected.update({key:'' for key in _PUBLISH_CLEAR})
-    if (obj.get('Id')!=cid or obj.get('Name')!='/'+profiles.MANAGED.project+'-edge-publisher' or obj.get('Image')!=node['id'] or cfg.get('Image')!=products.origin21_evidence.IMAGE or
+    if (obj.get('Id')!=cid or obj.get('Name')!='/'+selected.project+'-edge-publisher' or obj.get('Image')!=node['id'] or cfg.get('Image')!=products.origin21_evidence.IMAGE or
         labels.get('org.apicontour.managed-edge-owner')!=edge_token or 'org.apicontour.origin21.owner' in labels or cfg.get('User')!=str(os.getuid())+':'+str(os.getgid()) or
         cfg.get('Entrypoint')!=['/usr/local/bin/node'] or cfg.get('Cmd')!=['-e',_PUBLISH_WARM] or _publisher_env(cfg.get('Env'))!=expected or
         state.get('Running') is not False or (stopped_at is None and (state.get('Status')!='created' or not str(state.get('StartedAt','')).startswith('0001-'))) or
@@ -146,7 +180,7 @@ def _verify_created_publisher(cid,edge_token,node,watched,*,stopped_at=None):
     if type(mounts) is not list or len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('Source')!=str(watched) or mounts[0].get('Destination')!='/watch' or mounts[0].get('RW') is not True: raise ValueError('publisher create mount changed')
 
 
-def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha256,transport,qualification=None):
+def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha256,transport,qualification=None,selected=profiles.MANAGED):
     """Create the managed companions and publish the initial edge once.
 
     Every ambiguous create/start is retained for operator inspection; this
@@ -157,12 +191,14 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     import stat
     from deploy.gateway.managed_edge import ManagedEdge,_PUBLISH_CLEAR,_PUBLISH_WARM
     from deploy.local import origin21_credentials,origin21_evidence,origin21_renewal,origin21_schema,origin21_setup,origin21_transport
-    selected=profiles.MANAGED
+    profiles.require_context(selected)
+    if selected is not profiles.MANAGED and selected is not profiles.HUMAN: raise ValueError('managed context required')
+    if selected is profiles.HUMAN and qualification is not None: raise ValueError('unexpected qualification')
     if qualification is not None:
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         if type(qualification) is not OwnedManagedQualification: raise ValueError('qualification proof required')
         qualification.verify()
-    if type(transport) is not origin21_transport.ManagedTransport or transport.qualification is not qualification: raise ValueError('managed transport required')
+    if type(transport) is not origin21_transport.ManagedTransport or transport._selected is not selected or transport.qualification is not qualification: raise ValueError('managed transport required')
     transport.verify()
     capture_renew.safe_dir(selected.owner)
     if stat.S_IMODE(os.lstat(selected.owner).st_mode)!=0o700: raise ValueError('managed owner unavailable')
@@ -233,7 +269,7 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     publisher_id=products._command(args,30).decode('ascii')
     if not re.fullmatch('[0-9a-f]{64}',publisher_id) or publisher_id in listed: raise RuntimeError('publisher create uncertain')
     origin_credentials._write(selected.edge/'publisher.created',json.dumps({'version':1,'id':publisher_id},sort_keys=True,separators=(',',':')).encode())
-    _verify_created_publisher(publisher_id,edge_token,node,selected.edge/'watched')
+    products._context_call(selected,_verify_created_publisher,publisher_id,edge_token,node,selected.edge/'watched')
     origin_credentials._write(selected.edge/'publisher.start.intent',json.dumps({'version':1,'id':publisher_id},sort_keys=True,separators=(',',':')).encode())
     if products._command(['docker','start',publisher_id],30)!=publisher_id.encode('ascii'): raise RuntimeError('publisher start uncertain')
     publisher_obj=products._objects(['docker','inspect',publisher_id]); publisher_start=(publisher_obj.get('State') or {}).get('StartedAt')
@@ -249,11 +285,13 @@ def start_companions(*,app_image_id,build_head,build_receipt,build_receipt_sha25
     return {'companions_started':True,'pilot_ready':False}
 
 
-def open_edge(*,qualification=None):
+def open_edge(*,qualification=None,selected=profiles.MANAGED):
     """Reopen only the already recorded managed edge; never rebind a generation."""
     import os
     from deploy.gateway.managed_edge import ManagedEdge
-    selected=profiles.MANAGED
+    profiles.require_context(selected)
+    if selected is not profiles.MANAGED and selected is not profiles.HUMAN: raise ValueError('managed context required')
+    if selected is profiles.HUMAN and qualification is not None: raise ValueError('unexpected qualification')
     intent=products._read_record('intent.json',selected=selected)
     recorded=products._read_record('products.json',selected=selected)
     created=products._read_record('companions-created.json',selected=selected)
@@ -269,7 +307,7 @@ def open_edge(*,qualification=None):
     return ManagedEdge(selected.edge/'state',selected.edge/'published',selected.edge/'watched',selected.profile.state.parent/'ca.crt',selected.profile.state.parent/'ca.key',peer,publisher,qualification=qualification)
 
 
-def verify_recorded_topology(*,qualification=None):
+def verify_recorded_topology(*,qualification=None,selected=profiles.MANAGED):
     """Enforce the persisted exact managed topology, including the publisher."""
-    with open_edge(qualification=qualification) as owner:
+    with open_edge(qualification=qualification,selected=selected) as owner:
         owner._managed_gate(owner._load())
