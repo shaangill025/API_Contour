@@ -900,7 +900,11 @@ fn project_actual_container(
         || !nil_or_empty(host.get("Devices").ok_or(InspectError::Invalid)?)
         || !nil_or_empty(host.get("DeviceRequests").ok_or(InspectError::Invalid)?)
         || !nil_or_empty(host.get("DeviceCgroupRules").ok_or(InspectError::Invalid)?)
-        || !nil_or_empty(host.get("Sysctls").ok_or(InspectError::Invalid)?)
+        // Docker 29 omits this field when unset; only null or an empty object
+        // is accepted when it is present.
+        || host.get("Sysctls").is_some_and(|value| {
+            !value.is_null() && !value.as_object().is_some_and(|map| map.is_empty())
+        })
     {
         return Err(InspectError::Drift);
     }
@@ -1987,6 +1991,91 @@ mod tests {
             )
             .is_ok()
         };
+        // Docker 29 created inspect, with only identities and host paths
+        // normalized. Keep the actual security/configuration field shapes.
+        let mut captured: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/docker29_created_normalized.json"
+        ))
+        .unwrap();
+        for mount in captured[0]["Mounts"].as_array_mut().unwrap() {
+            let destination = mount["Destination"].as_str().unwrap();
+            let expected_mount = p
+                .mounts
+                .iter()
+                .find(|m| m.destination == destination)
+                .unwrap();
+            mount["Source"] = serde_json::json!(expected_mount.source);
+        }
+        let captured_observation = ActualDockerObservation::fake(
+            DockerInspect::Container([0x11; 32]),
+            [0x66; 32],
+            serde_json::to_vec(&captured).unwrap(),
+        );
+        let captured_network = ActualDockerObservation::fake(
+            DockerInspect::Network([0x44; 32]),
+            [0x66; 32],
+            serde_json::to_vec(
+                &serde_json::json!([{"Id":netid,"Name":"causal-net","Internal":true,
+                "Labels":{"org.apicontour.causal.owner":netowner},"Containers":{}}]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            project_actual_container(
+                &captured_observation,
+                &captured_network,
+                &p.mounts,
+                &p.source_files,
+                &expected,
+                ActualState::Created
+            )
+            .is_ok(),
+            "Docker 29 created replay"
+        );
+        for valid in [serde_json::Value::Null, serde_json::json!({})] {
+            let mut same = captured.clone();
+            same[0]["HostConfig"]["Sysctls"] = valid;
+            let observed = ActualDockerObservation::fake(
+                DockerInspect::Container([0x11; 32]),
+                [0x66; 32],
+                serde_json::to_vec(&same).unwrap(),
+            );
+            assert!(
+                project_actual_container(
+                    &observed,
+                    &captured_network,
+                    &p.mounts,
+                    &p.source_files,
+                    &expected,
+                    ActualState::Created
+                )
+                .is_ok()
+            );
+        }
+        for invalid in [
+            serde_json::json!({"net.ipv4.ip_forward":"1"}),
+            serde_json::json!("invalid"),
+            serde_json::json!([]),
+        ] {
+            let mut bad = captured.clone();
+            bad[0]["HostConfig"]["Sysctls"] = invalid;
+            let observed = ActualDockerObservation::fake(
+                DockerInspect::Container([0x11; 32]),
+                [0x66; 32],
+                serde_json::to_vec(&bad).unwrap(),
+            );
+            assert!(
+                project_actual_container(
+                    &observed,
+                    &captured_network,
+                    &p.mounts,
+                    &p.source_files,
+                    &expected,
+                    ActualState::Created
+                )
+                .is_err()
+            );
+        }
         assert!(check(&container, &network));
         for mutation in 0..4 {
             let mut bad = container.clone();
