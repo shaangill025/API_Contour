@@ -1,3 +1,5 @@
+// Include history cases in the existing configured API test command.
+import './history.cases.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {api, ApiError, request} from '../src/api.ts';
