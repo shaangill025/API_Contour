@@ -564,6 +564,210 @@ mod capture_tests {
         .unwrap()
     }
     #[test]
+    fn malformed_json_is_admitted_as_unknown_with_v2_witness() {
+        let mut owner = make_owner_v2();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let witness = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "a".repeat(64),
+        };
+        let id = owner.begin_capture_v2(&scope(), &witness).unwrap();
+        owner
+            .capture_fragment(id, br#"{"id":"private-sentinel"#)
+            .unwrap();
+        let now = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        let s = scope();
+        let metadata = contour_core::RecordMetadata {
+            record_id: ID,
+            source_id: ID,
+            workload: [ID; 4],
+            protocol: "http",
+            direction: "response",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: Some(503),
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        owner
+            .finish_and_admit(id, metadata)
+            .expect("malformed JSON should be admitted as explicit unknown");
+        assert!(owner.freeze(ID, 1, 10000).unwrap());
+        let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+        let inputs = AdmissionInputs::new(
+            [ID; 2],
+            refs[0],
+            &refs,
+            &owner.live.as_ref().unwrap().sources,
+        )
+        .unwrap();
+        let mut attempt = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+        let bytes = attempt.view().wire().to_vec();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let record = &value["records"][0]["record"];
+        assert_eq!(
+            record["structure"],
+            json!({"kind":"unknown","reason":"malformed"})
+        );
+        assert_eq!(record["completeness"], "unavailable");
+        assert_eq!(record["reasons"], json!(["malformed"]));
+        assert_eq!(record["operation"], "GET");
+        assert_eq!(record["status_code"], 503);
+        assert_eq!(record["route_template"], "/orders");
+        assert_eq!(record["direction"], "response");
+        assert_eq!(record["parser_profile"], "http_json_v1");
+        assert_eq!(record["policy_revision"], 1);
+        assert_eq!(record["visibility"], "structure");
+        assert_eq!(record["source_id"], ID);
+        assert_eq!(
+            value["records"][0]["origin_witness"]["kind"],
+            "downstream_mtls_leaf_sha256_v1"
+        );
+        assert_eq!(
+            value["records"][0]["origin_witness"]["leaf_sha256"],
+            "a".repeat(64)
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-sentinel"));
+    }
+    #[test]
+    fn oversized_json_is_admitted_as_unknown_with_v2_witness() {
+        let mut owner = make_owner_v2();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let witness = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "a".repeat(64),
+        };
+        let id = owner.begin_capture_v2(&scope(), &witness).unwrap();
+        owner.capture_fragment(id, &vec![b'x'; 65537]).unwrap();
+        owner.capture_fragment(id, b"private-sentinel").unwrap();
+        let now = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        let s = scope();
+        let metadata = contour_core::RecordMetadata {
+            record_id: ID,
+            source_id: ID,
+            workload: [ID; 4],
+            protocol: "http",
+            direction: "response",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: Some(503),
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        owner
+            .finish_and_admit(id, metadata)
+            .expect("oversized JSON should be admitted as explicit unknown");
+        assert!(owner.freeze(ID, 1, 10000).unwrap());
+        let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+        let inputs = AdmissionInputs::new(
+            [ID; 2],
+            refs[0],
+            &refs,
+            &owner.live.as_ref().unwrap().sources,
+        )
+        .unwrap();
+        let mut attempt = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+        let bytes = attempt.view().wire().to_vec();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let record = &value["records"][0]["record"];
+        assert_eq!(
+            record["structure"],
+            json!({"kind":"unknown","reason":"limit"})
+        );
+        assert_eq!(record["completeness"], "partial");
+        assert_eq!(record["reasons"], json!(["limit"]));
+        assert_eq!(record["operation"], "GET");
+        assert_eq!(record["status_code"], 503);
+        assert_eq!(record["route_template"], "/orders");
+        assert_eq!(record["direction"], "response");
+        assert_eq!(record["parser_profile"], "http_json_v1");
+        assert_eq!(record["policy_revision"], 1);
+        assert_eq!(record["visibility"], "structure");
+        assert_eq!(record["source_id"], ID);
+        assert_eq!(
+            value["records"][0]["origin_witness"]["kind"],
+            "downstream_mtls_leaf_sha256_v1"
+        );
+        assert_eq!(
+            value["records"][0]["origin_witness"]["leaf_sha256"],
+            "a".repeat(64)
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-sentinel"));
+    }
+    #[test]
+    fn unknown_observation_does_not_bypass_full_queue() {
+        let mut owner = make_owner_v2();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let witness = OriginWitness::DownstreamMtlsLeafSha256V1 {
+            leaf_sha256: "a".repeat(64),
+        };
+        let id = owner.begin_capture_v2(&scope(), &witness).unwrap();
+        owner.capture_fragment(id, &vec![b'x'; 65537]).unwrap();
+        owner.capture_fragment(id, b"private-sentinel").unwrap();
+        let now = contour_core::Timestamp::parse(&stamp(OffsetDateTime::now_utc())).unwrap();
+        let s = scope();
+        let metadata = || contour_core::RecordMetadata {
+            record_id: "00000000-0000-0000-0000-000000000003",
+            source_id: ID,
+            workload: [ID; 4],
+            protocol: "http",
+            direction: "response",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now.clone(),
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: Some(503),
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        for record_id in [ID, "00000000-0000-0000-0000-000000000002"] {
+            let draft = record(&mut owner, record_id);
+            owner
+                .admit_inner(draft, Some(OriginWitness::Unattributed), |_| {})
+                .unwrap();
+        }
+        assert_eq!(owner.stats().records, 2);
+        assert!(matches!(
+            owner.finish_and_admit(id, metadata()),
+            Err(OwnerError::Queue(QueueError::Full))
+        ));
+        assert_eq!(owner.stats().records, 2);
+        let mut with_room = make_owner_v2();
+        with_room.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = with_room.begin_capture_v2(&scope(), &witness).unwrap();
+        with_room.capture_fragment(id, &vec![b'x'; 65537]).unwrap();
+        with_room
+            .finish_and_admit(id, metadata())
+            .expect("same unknown must be admitted with room");
+        assert_eq!(with_room.stats().records, 1);
+    }
+    #[test]
     fn v2_unattributed_stream_is_preserved_and_expiry_clears_on_rejected_start() {
         let mut owner = make_owner_v2();
         owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);

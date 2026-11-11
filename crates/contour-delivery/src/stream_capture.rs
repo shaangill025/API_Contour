@@ -2,7 +2,8 @@
 //! through the existing signed structural extractor.
 use super::{CollectorOwner, OwnerError};
 use contour_core::{
-    AdmissionInputs, CaptureScope, Observation, OriginWitness, RecordDraft, RecordMetadata,
+    AdmissionInputs, CaptureScope, Completeness, Observation, ObservationReason, OriginWitness,
+    RecordDraft, RecordMetadata, Shape, UnknownReason,
 };
 use std::{
     collections::BTreeMap,
@@ -31,6 +32,7 @@ struct Stream {
     operation: String,
     route: String,
     bytes: Vec<u8>,
+    limited: bool,
     witness: Option<OriginWitness>,
 }
 impl Drop for Stream {
@@ -158,6 +160,7 @@ impl CollectorOwner {
                 operation: scope.operation.to_owned(),
                 route: scope.route_template.to_owned(),
                 bytes,
+                limited: false,
                 witness,
             },
         );
@@ -206,12 +209,26 @@ impl CollectorOwner {
         }
         let stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
         let limit = self.check_stream_scope(&stream.scope())?;
-        if bytes.len() > limit.saturating_sub(stream.bytes.len())
-            || bytes.len() > MAX_RAW.saturating_sub(self.streams.total + stream.bytes.len())
-        {
+        let mut stream = stream;
+        if stream.limited {
+            self.guard()?;
+            self.streams.entries.insert(id, stream);
+            return Ok(());
+        }
+        if bytes.len() > limit.saturating_sub(stream.bytes.len()) {
+            // The inspected prefix is no longer useful. Wipe it immediately and
+            // retain only a typed limit marker, never the overflowing fragment.
+            stream.bytes.fill(0);
+            stream.bytes = Vec::new();
+            stream.limited = true;
+            self.guard()?;
+            self.streams.entries.insert(id, stream);
+            return Ok(());
+        }
+        // Only fragments that will be retained consume the aggregate budget.
+        if bytes.len() > MAX_RAW.saturating_sub(self.streams.total + stream.bytes.len()) {
             return Err(OwnerError::Paused);
         }
-        let mut stream = stream;
         stream
             .bytes
             .try_reserve_exact(bytes.len())
@@ -237,7 +254,30 @@ impl CollectorOwner {
             return Err(OwnerError::Paused);
         }
         let stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
-        self.inspect_json(&stream.scope(), &stream.bytes)
+        self.inspect_stream(&stream)
+    }
+    fn inspect_stream(&mut self, stream: &Stream) -> Result<(u64, Observation), OwnerError> {
+        if !stream.limited {
+            return self.inspect_json(&stream.scope(), &stream.bytes);
+        }
+        // Validate current scope and policy even though no body bytes remain.
+        self.guard()?;
+        self.check_stream_scope(&stream.scope())?;
+        let revision = self
+            .policies
+            .last()
+            .ok_or(OwnerError::Paused)?
+            .policy
+            .revision();
+        self.guard()?;
+        Ok((
+            revision,
+            Observation {
+                shape: Shape::unknown(UnknownReason::Limit),
+                completeness: Completeness::Partial,
+                reasons: vec![ObservationReason::Limit],
+            },
+        ))
     }
     pub(super) fn finish_and_admit(
         &mut self,
@@ -257,18 +297,92 @@ impl CollectorOwner {
         {
             return Err(OwnerError::Paused);
         }
-        let (revision, observation) = self.inspect_json(&stream.scope(), &stream.bytes)?;
-        if observation.completeness == contour_core::Completeness::Unavailable
-            || observation
-                .reasons
-                .contains(&contour_core::ObservationReason::Malformed)
-        {
-            return Err(OwnerError::Paused);
-        }
+        let (revision, observation) = self.inspect_stream(&stream)?;
         metadata.policy_revision = revision;
         let draft =
             RecordDraft::from_observation(metadata, observation).map_err(|_| OwnerError::Paused)?;
         let witness = stream.witness.take();
         self.admit_inner(draft, witness, |_| {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::capture_tests::{make_owner, scope};
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn overflow_discards_raw_and_ignores_later_bytes_but_rechecks_authority() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, b"sensitive-prefix").unwrap();
+        owner.capture_fragment(id, &vec![b'x'; MAX_BODY]).unwrap();
+        let stream = owner.streams.entries.get(&id).unwrap();
+        assert!(stream.limited);
+        assert!(stream.bytes.is_empty());
+        assert_eq!(stream.bytes.capacity(), 0);
+        assert_eq!(owner.streams.total, 0);
+        owner
+            .capture_fragment(id, &vec![b'y'; MAX_RAW + 1])
+            .unwrap();
+        assert_eq!(owner.streams.entries.get(&id).unwrap().bytes.capacity(), 0);
+        owner.live.as_mut().unwrap().deadline = Instant::now();
+        assert!(owner.capture_fragment(id, b"later").is_err());
+        assert!(owner.streams.is_empty());
+    }
+
+    #[test]
+    fn limited_stream_rechecks_changed_scope_before_finish() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner
+            .capture_fragment(id, &vec![b'x'; MAX_BODY + 1])
+            .unwrap();
+        owner.live.as_mut().unwrap().sources.clear();
+        assert!(owner.finish_capture(id).is_err());
+        assert!(owner.streams.is_empty());
+    }
+
+    #[test]
+    fn aggregate_raw_guard_rejects_a_within_limit_fragment_when_forced_full() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, b"x").unwrap();
+        owner.streams.total = MAX_RAW;
+        assert!(owner.capture_fragment(id, b"y").is_err());
+        assert!(!owner.streams.entries.contains_key(&id));
+    }
+
+    #[test]
+    fn oversized_single_frame_and_fragmented_body_have_identical_limit_result() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let large = vec![b'x'; MAX_RAW + 1];
+        let first = owner.begin_capture(&scope()).unwrap();
+        let second = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(first, &large).unwrap();
+        for chunk in large.chunks(MAX_BODY) {
+            owner.capture_fragment(second, chunk).unwrap();
+        }
+        for id in [first, second] {
+            let stream = owner.streams.entries.get(&id).unwrap();
+            assert!(stream.limited);
+            assert_eq!(stream.bytes.capacity(), 0);
+        }
+        assert_eq!(owner.streams.total, 0);
+        let (a_revision, a) = owner.finish_capture(first).unwrap();
+        let (b_revision, b) = owner.finish_capture(second).unwrap();
+        assert_eq!(a_revision, b_revision);
+        assert_eq!(a.shape, b.shape);
+        assert_eq!(a.completeness, b.completeness);
+        assert_eq!(a.reasons, b.reasons);
+        assert_eq!(a.shape, Shape::unknown(UnknownReason::Limit));
+        assert_eq!(a.completeness, Completeness::Partial);
+        assert_eq!(a.reasons, vec![ObservationReason::Limit]);
     }
 }
