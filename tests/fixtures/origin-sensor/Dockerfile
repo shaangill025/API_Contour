@@ -2,6 +2,7 @@ FROM rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f9
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY collectors/nodered/live-integration/manifest.json collectors/nodered/live-integration/manifest.json
 RUN cargo build --release --locked -p contour-ingress --example origin_https_probe --example origin_sensor_probe
 RUN cargo build --release --locked -p contour-postgres --example catalog_probe
 RUN mkdir /runtime-libs && cp /usr/lib/*-linux-gnu/libssl.so.3 /usr/lib/*-linux-gnu/libcrypto.so.3 /runtime-libs/

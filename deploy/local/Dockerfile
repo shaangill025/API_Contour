@@ -10,6 +10,7 @@ FROM rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f9
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY collectors/nodered/live-integration/manifest.json collectors/nodered/live-integration/manifest.json
 RUN cargo build --release --locked -p contour-platform
 RUN cargo build --release --locked -p contour-ingress --bin local_capture
 RUN cargo build --release --locked -p contour-ingress --bin local_gateway
