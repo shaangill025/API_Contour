@@ -1,5 +1,6 @@
 //! Fixed-owner pool. It never transfers authority or waits in capture callbacks.
 use super::{CaptureId, CollectorOwner, OwnerError, SendOutcome};
+use crate::adapter::StructuralAdapter;
 use contour_core::{AdmissionInputs, CaptureScope, OriginWitness, QueueStats, RecordMetadata};
 use std::{
     future::{Future, poll_fn},
@@ -259,7 +260,7 @@ impl CollectorPool {
         Ok(())
     }
     pub fn try_begin(&self, scope: &CaptureScope<'_>) -> Result<PoolCapture, OwnerError> {
-        self.try_begin_version(scope, None)
+        self.try_begin_version(scope, None, None)
     }
     /// Begin a V2 stream with a data-only origin witness.
     pub fn try_begin_v2(
@@ -267,17 +268,29 @@ impl CollectorPool {
         scope: &CaptureScope<'_>,
         witness: &OriginWitness,
     ) -> Result<PoolCapture, OwnerError> {
-        self.try_begin_version(scope, Some(witness))
+        self.try_begin_version(scope, Some(witness), None)
+    }
+    pub(crate) fn adapter_begin(
+        &self,
+        adapter: &StructuralAdapter,
+        scope: &CaptureScope<'_>,
+        witness: Option<&OriginWitness>,
+    ) -> Result<PoolCapture, OwnerError> {
+        self.try_begin_version(scope, witness, Some(adapter))
     }
     fn try_begin_version(
         &self,
         scope: &CaptureScope<'_>,
         witness: Option<&OriginWitness>,
+        adapter: Option<&StructuralAdapter>,
     ) -> Result<PoolCapture, OwnerError> {
         let _gate = self.try_gate().map_err(|_| {
             self.lose();
             OwnerError::Paused
         })?;
+        if adapter.is_some_and(|a| !a.active.load(Ordering::SeqCst)) {
+            return Err(OwnerError::Paused);
+        }
         let epoch = self.epoch.load(Ordering::Acquire);
         if !self.current(epoch) {
             self.lose();
@@ -349,6 +362,15 @@ impl CollectorPool {
             } {
                 self.next_slot
                     .store((slot + 1) % self.slots.len(), Ordering::Relaxed);
+                if let Some(a) = adapter {
+                    // The total order pairs this reservation with detach's
+                    // revoke-then-snapshot: one side observes the other.
+                    a.sequences[slot].store(id.sequence(), Ordering::SeqCst);
+                    if !a.active.load(Ordering::SeqCst) {
+                        owner.cancel_capture(id);
+                        return Err(OwnerError::Paused);
+                    }
+                }
                 return Ok(PoolCapture {
                     pool: self.instance,
                     slot,
@@ -360,6 +382,22 @@ impl CollectorPool {
         }
     }
     pub fn try_fragment(&self, token: PoolCapture, bytes: &[u8]) -> Result<(), OwnerError> {
+        self.fragment_version(token, bytes, None)
+    }
+    pub(crate) fn adapter_fragment(
+        &self,
+        adapter: &StructuralAdapter,
+        token: PoolCapture,
+        bytes: &[u8],
+    ) -> Result<(), OwnerError> {
+        self.fragment_version(token, bytes, Some(adapter))
+    }
+    fn fragment_version(
+        &self,
+        token: PoolCapture,
+        bytes: &[u8],
+        adapter: Option<&StructuralAdapter>,
+    ) -> Result<(), OwnerError> {
         if token.pool != self.instance {
             return Err(OwnerError::Paused);
         }
@@ -367,6 +405,9 @@ impl CollectorPool {
             self.lose();
             OwnerError::Paused
         })?;
+        if adapter.is_some_and(|a| !a.active.load(Ordering::SeqCst)) {
+            return Err(OwnerError::Paused);
+        }
         if !self.current(token.epoch) {
             self.lose();
             return Err(OwnerError::Paused);
@@ -397,6 +438,22 @@ impl CollectorPool {
         token: PoolCapture,
         metadata: RecordMetadata<'_>,
     ) -> Result<(), OwnerError> {
+        self.finish_version(token, metadata, None)
+    }
+    pub(crate) fn adapter_finish(
+        &self,
+        adapter: &StructuralAdapter,
+        token: PoolCapture,
+        metadata: RecordMetadata<'_>,
+    ) -> Result<(), OwnerError> {
+        self.finish_version(token, metadata, Some(adapter))
+    }
+    fn finish_version(
+        &self,
+        token: PoolCapture,
+        metadata: RecordMetadata<'_>,
+        adapter: Option<&StructuralAdapter>,
+    ) -> Result<(), OwnerError> {
         if token.pool != self.instance {
             return Err(OwnerError::Paused);
         }
@@ -404,6 +461,9 @@ impl CollectorPool {
             self.lose();
             OwnerError::Paused
         })?;
+        if adapter.is_some_and(|a| !a.active.load(Ordering::SeqCst)) {
+            return Err(OwnerError::Paused);
+        }
         if !self.current(token.epoch) {
             self.lose();
             return Err(OwnerError::Paused);
@@ -428,6 +488,14 @@ impl CollectorPool {
         result.inspect_err(|_| {
             self.lose();
         })
+    }
+    pub(crate) fn detach_adapter(&self, adapter: &StructuralAdapter) -> Result<(), OwnerError> {
+        adapter.active.store(false, Ordering::SeqCst);
+        for (slot, sequence) in adapter.sequences.iter().enumerate().take(self.slots.len()) {
+            self.cancelled[slot].fetch_max(sequence.load(Ordering::SeqCst), Ordering::AcqRel);
+        }
+        let _gate = self.try_gate()?;
+        Ok(())
     }
     pub fn try_cancel(&self, token: PoolCapture) {
         if token.pool != self.instance {
@@ -556,6 +624,185 @@ mod tests {
         make_owner, make_owner_at, make_owner_at_with_ttl, make_owner_v2, scope,
     };
     use super::*;
+
+    #[test]
+    fn drop_after_last_drain_requires_maintenance_to_reclaim_raw() {
+        let pool = CollectorPool::new(vec![make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let adapter = StructuralAdapter::attach(pool.clone()).unwrap();
+        let token = adapter.try_begin(&scope(), None).unwrap();
+        adapter.try_fragment(token, b"private").unwrap();
+        // Reproduce the exact interval between PoolGate's final drain and
+        // release of its underlying mutex, without timing-dependent threads.
+        let guard = pool.gate.lock().unwrap();
+        pool.drain_cancelled();
+        drop(adapter);
+        drop(guard);
+        assert!(!pool.slots[0].try_lock().unwrap().streams.is_empty());
+        pool.poll_authority().unwrap();
+        assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+    }
+
+    #[test]
+    fn pending_detach_retries_with_maintenance_and_never_accepts_fragments() {
+        let pool = CollectorPool::new(vec![make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let adapter = StructuralAdapter::attach(pool.clone()).unwrap();
+        let token = adapter.try_begin(&scope(), None).unwrap();
+        adapter.try_fragment(token, b"before").unwrap();
+        let gate = pool.gate.lock().unwrap();
+        pool.drain_cancelled();
+        assert!(adapter.detach().is_err());
+        assert!(pool.poll_authority().is_err());
+        assert!(adapter.detach().is_err());
+        assert!(adapter.try_fragment(token, b"after").is_err());
+        let s = scope();
+        let now = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+        let metadata = RecordMetadata {
+            record_id: s.source_id,
+            source_id: s.source_id,
+            workload: s.workload,
+            protocol: "http",
+            direction: "request",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: None,
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        assert!(adapter.try_finish(token, metadata).is_err());
+        assert_eq!(pool.slots[0].try_lock().unwrap().stats().records, 0);
+        drop(gate);
+        assert!(adapter.try_fragment(token, b"late").is_err());
+        assert!(pool.poll_authority().is_ok());
+        assert!(adapter.detach().is_ok());
+        assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+        assert_eq!(pool.slots[0].try_lock().unwrap().stats().records, 0);
+    }
+
+    #[test]
+    fn adapter_detach_cancels_only_its_stream_and_old_tokens_stay_dead() {
+        let pool = CollectorPool::new(vec![make_owner(), make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let a = StructuralAdapter::attach(pool.clone()).unwrap();
+        let b = StructuralAdapter::attach(pool.clone()).unwrap();
+        assert_eq!(a.descriptor().version, 1);
+        let old = a.try_begin(&scope(), None).unwrap();
+        let other = b.try_begin(&scope(), None).unwrap();
+        a.try_fragment(old, b"private").unwrap();
+        b.try_fragment(other, b"independent").unwrap();
+        assert!(b.try_fragment(old, b"foreign").is_err());
+        b.try_cancel(old);
+        a.detach().unwrap();
+        assert!(a.try_fragment(old, b"late").is_err());
+        assert!(a.try_begin(&scope(), None).is_err());
+        let s = scope();
+        let now = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+        let metadata = RecordMetadata {
+            record_id: s.source_id,
+            source_id: s.source_id,
+            workload: s.workload,
+            protocol: "http",
+            direction: "request",
+            visibility: "structure",
+            operation: s.operation,
+            route_template: s.route_template,
+            route_uncertain: false,
+            parser_profile: s.parser_profile,
+            policy_revision: 1,
+            count: 1,
+            first_seen: now.clone(),
+            last_seen: now,
+            sample_numerator: 1,
+            sample_denominator: 1,
+            status_code: None,
+            request_header_names: &[],
+            response_header_names: &[],
+            query_parameter_names: &[],
+        };
+        assert!(a.try_finish(old, metadata).is_err());
+        b.try_fragment(other, b"still live").unwrap();
+        let next = StructuralAdapter::attach(pool.clone()).unwrap();
+        assert!(next.try_fragment(old, b"stale").is_err());
+        let fresh = next.try_begin(&scope(), None).unwrap();
+        a.try_cancel(old);
+        next.try_fragment(fresh, b"new").unwrap();
+        b.try_cancel(other);
+        next.try_cancel(fresh);
+        assert!(
+            pool.slots
+                .iter()
+                .all(|s| s.try_lock().unwrap().streams.is_empty())
+        );
+    }
+
+    #[test]
+    fn adapter_detach_serializes_with_busy_gate_and_reclaims_capture() {
+        let pool = CollectorPool::new(vec![make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let adapter = StructuralAdapter::attach(pool.clone()).unwrap();
+        let token = adapter.try_begin(&scope(), None).unwrap();
+        adapter.try_fragment(token, b"private").unwrap();
+        let gate = pool.try_gate().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = adapter.clone();
+        let thread = std::thread::spawn(move || {
+            sent.send(worker.detach().is_err()).unwrap();
+        });
+        assert!(adapter.try_fragment(token, b"busy").is_err());
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+        drop(gate);
+        thread.join().unwrap();
+        adapter.detach().unwrap();
+        assert!(adapter.try_fragment(token, b"late").is_err());
+        assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+    }
+
+    #[test]
+    fn adapters_reject_cross_pool_and_support_v2_witness() {
+        let a = CollectorPool::new(vec![make_owner_v2()]).unwrap();
+        let b = CollectorPool::new(vec![make_owner_v2()]).unwrap();
+        a.enabled.store(true, Ordering::Release);
+        b.enabled.store(true, Ordering::Release);
+        let left = StructuralAdapter::attach(a).unwrap();
+        let right = StructuralAdapter::attach(b).unwrap();
+        assert!(left.descriptor().origin_v2);
+        let token = left
+            .try_begin(&scope(), Some(&OriginWitness::Unattributed))
+            .unwrap();
+        assert!(right.try_fragment(token, b"foreign").is_err());
+        right.try_cancel(token);
+        left.try_fragment(token, b"live").unwrap();
+        left.try_cancel(token);
+    }
+
+    #[test]
+    fn dropping_busy_attachment_durably_cancels_its_capture() {
+        let pool = CollectorPool::new(vec![make_owner()]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let adapter = StructuralAdapter::attach(pool.clone()).unwrap();
+        let token = adapter.try_begin(&scope(), None).unwrap();
+        adapter.try_fragment(token, b"private").unwrap();
+        let gate = pool.try_gate().unwrap();
+        drop(adapter);
+        assert!(!pool.slots[0].try_lock().unwrap().streams.is_empty());
+        drop(gate);
+        assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+    }
 
     #[test]
     fn pending_background_sends_leave_capture_owner_available() {

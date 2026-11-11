@@ -24,7 +24,9 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_rustls::TlsConnector;
+mod adapter;
 mod authority;
+pub use adapter::{AdapterCapture, AdapterDescriptor, StructuralAdapter};
 mod owner;
 pub use owner::{CaptureId, CollectorOwner, CollectorPool, OwnerError, PoolCapture, SendOutcome};
 mod retry;

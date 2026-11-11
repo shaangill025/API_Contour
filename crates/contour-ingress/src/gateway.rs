@@ -3,7 +3,7 @@ use crate::CollectorTls;
 mod upstream;
 use bytes::Bytes;
 use contour_core::{CaptureScope, OriginWitness, RecordMetadata, Timestamp};
-use contour_delivery::{CollectorPool, PoolCapture};
+use contour_delivery::{AdapterCapture, CollectorPool, StructuralAdapter};
 use http_body_util::{BodyExt, Empty, combinators::UnsyncBoxBody};
 use hyper::{
     Request, Response,
@@ -94,7 +94,7 @@ pub struct Gateway {
     upstream: Upstream,
     authority: HeaderValue,
     point: Arc<CapturePoint>,
-    pool: Arc<CollectorPool>,
+    adapter: Arc<StructuralAdapter>,
     connections: Arc<Semaphore>,
 }
 /// Operator-provided transport configuration. Peer and upstream identities are
@@ -178,7 +178,7 @@ impl Gateway {
             ),
             authority,
             point: Arc::new(point),
-            pool,
+            adapter: StructuralAdapter::attach(pool).map_err(|_| "adapter unavailable")?,
             connections: Arc::new(Semaphore::new(64)),
         }))
     }
@@ -280,7 +280,7 @@ impl Gateway {
         parts.headers.insert(header::HOST, self.authority.clone());
         let req_capture = if eligible {
             Capture::begin(
-                self.pool.clone(),
+                self.adapter.clone(),
                 self.point.clone(),
                 "request",
                 None,
@@ -299,7 +299,7 @@ impl Gateway {
         let response_eligible = prepare_response_capture(&mut parts.headers);
         let capture = if eligible && response_eligible {
             Capture::begin(
-                self.pool.clone(),
+                self.adapter.clone(),
                 self.point.clone(),
                 "response",
                 Some(parts.status.as_u16()),
@@ -499,9 +499,9 @@ fn prepare_response_capture(headers: &mut HeaderMap) -> bool {
         && (!had_encoding || headers.contains_key(header::CONTENT_ENCODING))
 }
 struct Capture {
-    pool: Arc<CollectorPool>,
+    adapter: Arc<StructuralAdapter>,
     point: Arc<CapturePoint>,
-    token: Option<PoolCapture>,
+    token: Option<AdapterCapture>,
     id: String,
     first: Timestamp,
     direction: &'static str,
@@ -509,7 +509,7 @@ struct Capture {
 }
 impl Capture {
     fn begin(
-        pool: Arc<CollectorPool>,
+        adapter: Arc<StructuralAdapter>,
         point: Arc<CapturePoint>,
         direction: &'static str,
         status: Option<u16>,
@@ -517,14 +517,14 @@ impl Capture {
     ) -> Option<Self> {
         let first = stamp()?;
         let id = uuid()?;
-        let token = if pool.is_origin_v2() {
-            pool.try_begin_v2(&point.scope(), witness)
+        let token = if adapter.descriptor().origin_v2 {
+            adapter.try_begin(&point.scope(), Some(witness))
         } else {
-            pool.try_begin(&point.scope())
+            adapter.try_begin(&point.scope(), None)
         }
         .ok()?;
         Some(Self {
-            pool,
+            adapter,
             point,
             token: Some(token),
             id,
@@ -538,7 +538,7 @@ impl Capture {
             return;
         };
         let Some(last) = stamp() else {
-            self.pool.try_cancel(token);
+            self.adapter.try_cancel(token);
             return;
         };
         let p = &self.point;
@@ -564,11 +564,11 @@ impl Capture {
             response_header_names: &[],
             query_parameter_names: &[],
         };
-        let _ = self.pool.try_finish(token, metadata);
+        let _ = self.adapter.try_finish(token, metadata);
     }
     fn cancel(&mut self) {
         if let Some(token) = self.token.take() {
-            self.pool.try_cancel(token);
+            self.adapter.try_cancel(token);
         }
     }
 }
@@ -664,7 +664,7 @@ impl<B: Body<Data = Bytes, Error = hyper::Error> + Unpin> Body for ObservedBody<
                     if let Some(data) = frame.data_ref() {
                         if capture
                             .token
-                            .is_some_and(|token| capture.pool.try_fragment(token, data).is_err())
+                            .is_some_and(|token| capture.adapter.try_fragment(token, data).is_err())
                         {
                             capture.cancel();
                         }
