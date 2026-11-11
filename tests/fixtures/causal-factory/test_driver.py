@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import tempfile
 import unittest
@@ -10,6 +11,29 @@ DRIVER = runpy.run_path(str(ROOT / 'scripts/test-postgres-causal-factory.py'))
 
 
 class DriverTests(unittest.TestCase):
+    def test_probe_stage_is_exact_closed_allowlist(self):
+        classify = DRIVER['probe_stage']
+        source = DRIVER['EXAMPLE'].read_text()
+        emitted = set(re.findall(r'(?:map_err\(\|_\|\s*|Err\()"([A-Za-z ]+)"', source))
+        self.assertTrue(emitted)
+        self.assertLessEqual(emitted, DRIVER['PROBE_STAGES'])
+        for stage in DRIVER['PROBE_STAGES']:
+            self.assertEqual(classify(b'factory probe: ' + stage.encode('ascii') + b'\n'), stage)
+        for unknown in (b'factory probe: private-secret\n', b'factory probe: bind\nprivate-secret',
+                        b'factory probe: bind', b'private-secret', b'x' * 10000,
+                        b'factory probe: \xff\n', 'factory probe: bind\n'):
+            self.assertIsNone(classify(unknown))
+
+    def test_final_drain_clears_previous_stage_on_read_failure(self):
+        stderr = b'factory probe: bind\n'
+        diagnostic = {'probe_stage': DRIVER['probe_stage'](stderr)}
+        self.assertEqual(diagnostic['probe_stage'], 'bind')
+        for overflow, read_failed in ((True, False), (False, True), (True, True)):
+            diagnostic['probe_stage'] = DRIVER['final_probe_stage'](stderr, overflow, read_failed)
+            self.assertIsNone(diagnostic['probe_stage'])
+            diagnostic['probe_stage'] = 'bind'
+        self.assertEqual(DRIVER['final_probe_stage'](stderr, False, False), 'bind')
+
     def test_primary_and_stop_failure_do_not_remove_known_proxy(self):
         primary, stop = ValueError('primary'), RuntimeError('stop')
         uncertain, remote = [], []

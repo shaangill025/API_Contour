@@ -31,6 +31,27 @@ PROFILE = '00000000-0000-4000-8000-000000000503'
 PROFILE_HASH = 'a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e'
 PRODUCT_ID = 'fa000000-0000-4000-8000-000000000013'
 EXPORT_ID = 'fa000000-0000-4000-8000-000000000014'
+PROBE_STAGES = frozenset({
+    'arguments', 'bind', 'binder TLS', 'binding', 'control', 'create',
+    'database settings', 'database trust', 'docker policy', 'grant key',
+    'hex identity', 'image', 'input', 'issue', 'issue journal', 'issuer TLS',
+    'local cleanup deadline', 'local cleanup unproved', 'network', 'output',
+    'password', 'peer', 'policy key', 'preflight', 'public key', 'relay closed',
+    'runtime', 'sources', 'start', 'startup closed', 'unexpected completion',
+})
+
+
+def probe_stage(stderr):
+    # Only a complete, exact static probe message is retained. In particular,
+    # never decode or copy unknown diagnostics, partial messages, or payloads.
+    if not isinstance(stderr, bytes) or len(stderr) > 96:
+        return None
+    return next((stage for stage in PROBE_STAGES
+                 if stderr == b'factory probe: ' + stage.encode('ascii') + b'\n'), None)
+
+
+def final_probe_stage(stderr, overflow, read_failed):
+    return None if overflow or read_failed else probe_stage(stderr)
 
 
 def load(path):
@@ -123,7 +144,7 @@ def cleanup_with_evidence(primary, uncertain, factory_attempted, proxy_known, in
 
 
 def qualify(work, docker, d, inspect, create, bridge, https, live, stage, executable,
-            product_leaf, export_leaf, binary, socket, binary_hash, config, stages, owned, uncertain):
+            product_leaf, export_leaf, binary, socket, binary_hash, config, stages, owned, uncertain, diagnostic):
     import shutil
     token = secrets.token_hex(32)
     name = 'contour-factory-' + uuid.uuid4().hex
@@ -273,11 +294,18 @@ def qualify(work, docker, d, inspect, create, bridge, https, live, stage, execut
             with monitor.lock:
                 out, err = bytes(monitor.buffers['out']), bytes(monitor.buffers['err'])
                 bad = monitor.overflow or monitor.read_failed
-            if bad or err or out not in (b'',b'READY\n'): raise RuntimeError('factory readiness output')
+            if bad or err or out not in (b'',b'READY\n'):
+                diagnostic['phase'] = 'factory_readiness'
+                diagnostic['probe_stage'] = probe_stage(err) if not bad else None
+                raise RuntimeError('factory readiness output')
             if out == b'READY\n': break
-            if monitor.child.poll() is not None: raise RuntimeError('factory exited before ready')
+            if monitor.child.poll() is not None:
+                diagnostic['phase'] = 'factory_readiness'
+                raise RuntimeError('factory exited before ready')
             time.sleep(.05)
-        else: raise TimeoutError('factory readiness')
+        else:
+            diagnostic['phase'] = 'factory_readiness'
+            raise TimeoutError('factory readiness')
         receipt = (journal/'create.cid').read_bytes(); intent = (journal/'create.intent').read_bytes()
         prefix_bytes = b'apicontour/local-create-intent/1\n'
         if len(receipt) != 41 or not receipt.startswith(b'CCI-CID1\n') or len(intent) != len(prefix_bytes)+160 or not intent.startswith(prefix_bytes):
@@ -313,7 +341,13 @@ def qualify(work, docker, d, inspect, create, bridge, https, live, stage, execut
     finally:
         def stop_local():
             if monitor is not None and not monitor_stopped:
-                monitor.stop(False)
+                try:
+                    monitor.stop(False)
+                finally:
+                    if diagnostic['phase'] == 'factory_readiness':
+                        with monitor.lock:
+                            diagnostic['probe_stage'] = final_probe_stage(
+                                bytes(monitor.buffers['err']), monitor.overflow, monitor.read_failed)
         def cleanup_remote():
             if proxy_known is not None:
                 cid, owner = proxy_known
@@ -374,6 +408,7 @@ def main():
     print('private result:', result_dir / 'result.json', flush=True)
     started = time.monotonic()
     stages, failures = [], []
+    diagnostic = {'phase': None, 'probe_stage': None}
     owned, uncertain = [], []
     probe = None
     probe_hash = None
@@ -444,7 +479,7 @@ def main():
             (work/(name+'.pub')).write_bytes(public[-32:])
         # Remaining setup and cleanup is delegated to the helper below.
         qualify(work, docker, d, inspect, create, bridge, https, live, stage, executable,
-                product_leaf, export_leaf, binary, socket, binary_hash, config, stages, owned, uncertain)
+                product_leaf, export_leaf, binary, socket, binary_hash, config, stages, owned, uncertain, diagnostic)
         if bridge['digest_file'](executable) != probe_hash or source_snapshot(bridge) != before:
             raise RuntimeError('source or artifact drift')
         stages.append('source_unchanged')
@@ -464,6 +499,7 @@ def main():
                    'source_hashes': before, 'probe_sha256': probe_hash,
                    'elapsed_seconds': round(time.monotonic()-started, 3),
                    'failure_type': type(primary).__name__ if primary else None,
+                   'failure_phase': diagnostic['phase'], 'probe_stage': diagnostic['probe_stage'],
                    'cleanup_failures': [type(x).__name__ for x in failures], 'owned_resources': owned, 'uncertain_resources': uncertain,
                    'boundary': 'factory startup and incoming listener mTLS only; outbound completion, exporter ACK and wire graph unqualified'}
         pending = result_dir/'result.pending'; result = result_dir/'result.json'
