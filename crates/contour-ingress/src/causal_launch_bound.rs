@@ -40,6 +40,7 @@ const PATHS: [&str; 7] = [
 /// ```
 pub struct BoundLaunchInputs {
     deployment: InspectedDeployment,
+    target: crate::causal_launch_docker::RunningTarget,
     observation: Vec<u8>,
     setup_deadline: Instant,
     snapshots: [FileSnapshot; 7],
@@ -123,7 +124,34 @@ fn fresh(
         Ok(())
     }
 }
+pub(crate) struct BoundInputParts {
+    pub(crate) deployment: InspectedDeployment,
+    pub(crate) target: crate::causal_launch_docker::RunningTarget,
+    pub(crate) observation: Vec<u8>,
+    pub(crate) setup_deadline: Instant,
+    pub(crate) snapshots: [FileSnapshot; 7],
+    pub(crate) permit_stream: StdStream,
+    pub(crate) attach: UnixStream,
+    pub(crate) config: crate::causal_launch_docker::LaunchConfig,
+}
 impl BoundLaunchInputs {
+    pub(crate) fn from_running(parts: BoundInputParts) -> Self {
+        Self {
+            deployment: parts.deployment,
+            target: parts.target,
+            observation: parts.observation,
+            setup_deadline: parts.setup_deadline,
+            snapshots: parts.snapshots,
+            permit_stream: parts.permit_stream,
+            attach: parts.attach,
+            product_credential: parts.config.product_credential,
+            export_credential: parts.config.export_credential,
+            batch_bytes: parts.config.batch_bytes,
+            batch_events: parts.config.batch_events,
+            queue_bytes: parts.config.queue_bytes,
+            queue_ttl_ms: parts.config.queue_ttl_ms,
+        }
+    }
     fn validate_mounts(&self) -> Result<(), BoundLaunchError> {
         let pairs: Vec<_> = PATHS
             .iter()
@@ -132,6 +160,9 @@ impl BoundLaunchInputs {
             .collect();
         self.deployment
             .revalidate(&self.observation, &pairs)
+            .map_err(|_| BoundLaunchError::Invalid)?;
+        self.deployment
+            .validate_candidate_sources()
             .map_err(|_| BoundLaunchError::Invalid)
     }
     /// This transition is dormant because the input has no constructor. It
@@ -157,6 +188,10 @@ impl BoundLaunchInputs {
         let seed = Secret(random()?);
         let slot = random()?;
         self.validate_mounts()?;
+        self.target
+            .revalidate(&self.deployment, setup_deadline)
+            .await
+            .map_err(|_| BoundLaunchError::Invalid)?;
         if Instant::now() >= setup_deadline {
             return Err(BoundLaunchError::Expired);
         }
@@ -240,6 +275,10 @@ impl BoundLaunchInputs {
         }
         fresh(&session, window.remaining_deadline())?;
         self.validate_mounts()?;
+        self.target
+            .revalidate(&self.deployment, window.remaining_deadline())
+            .await
+            .map_err(|_| BoundLaunchError::Invalid)?;
         fresh(&session, window.remaining_deadline())?;
         let ca = hex(&material.ca_sha256());
         let export = hex(&material.export_leaf());
@@ -297,6 +336,10 @@ impl BoundLaunchInputs {
         };
         let permit = CausalPermitOwner::from_bound(proof);
         Ok(BoundTransfer {
+            deployment: self.deployment,
+            target: self.target,
+            snapshots: self.snapshots,
+            observation: self.observation,
             seed,
             metadata,
             permit: Some(permit),
@@ -348,6 +391,10 @@ impl BoundPermitProof {
 /// One-use seed transfer state. Drop clears owned seed bytes best effort; this
 /// is not a guarantee of memory erasure. A failed/partial transfer is terminal.
 pub struct BoundTransfer {
+    deployment: InspectedDeployment,
+    target: crate::causal_launch_docker::RunningTarget,
+    snapshots: [FileSnapshot; 7],
+    observation: Vec<u8>,
     seed: Secret,
     metadata: Vec<u8>,
     permit: Option<CausalPermitOwner>,
@@ -361,9 +408,18 @@ pub struct BoundTransfer {
 impl BoundTransfer {
     /// Write once to the sealed owned attach. On cancellation or partial write,
     /// this consumed state and permit are dropped; no remote process is killed.
-    pub async fn transfer(
+    pub(crate) async fn transfer(
         mut self,
-    ) -> Result<(CausalPermitOwner, UnixStream, RelayCodec), BoundLaunchError> {
+    ) -> Result<
+        (
+            CausalPermitOwner,
+            UnixStream,
+            RelayCodec,
+            crate::causal_launch_docker::RunningTarget,
+            Instant,
+        ),
+        BoundLaunchError,
+    > {
         if !self
             .permit
             .as_ref()
@@ -371,15 +427,32 @@ impl BoundTransfer {
         {
             return Err(BoundLaunchError::Expired);
         }
+        let deadline = (Instant::now() + TRANSFER_BUDGET)
+            .min(self.ceiling)
+            .min(self.setup_deadline);
+        if Instant::now() >= deadline {
+            return Err(BoundLaunchError::Expired);
+        }
+        self.target
+            .revalidate(&self.deployment, deadline)
+            .await
+            .map_err(|_| BoundLaunchError::Invalid)?;
         let attach = self.attach.as_mut().ok_or(BoundLaunchError::Invalid)?;
-        let codec = transfer_with_deadlines(
+        let permit = self.permit.as_ref().ok_or(BoundLaunchError::Invalid)?;
+        let gate = RunningGate {
+            target: &self.target,
+            deployment: &self.deployment,
+            snapshots: &self.snapshots,
+            observation: &self.observation,
+            permit,
+        };
+        let codec = guarded_bootstrap(
             attach,
             &self.metadata,
             &self.seed.0,
-            self.generation,
-            self.identity,
-            self.epoch,
-            (self.ceiling, self.setup_deadline),
+            (self.generation, self.identity, self.epoch),
+            deadline,
+            &gate,
         )
         .await?;
         if !self
@@ -393,39 +466,76 @@ impl BoundTransfer {
             self.permit.take().ok_or(BoundLaunchError::Invalid)?,
             self.attach.take().ok_or(BoundLaunchError::Invalid)?,
             codec,
+            self.target,
+            deadline,
         ))
     }
 }
-async fn transfer_with_deadlines(
-    attach: &mut UnixStream,
-    metadata: &[u8],
-    seed: &[u8; 32],
-    generation: [u8; 32],
-    identity: [u8; 32],
-    epoch: u64,
-    deadlines: (Instant, Instant),
-) -> Result<RelayCodec, BoundLaunchError> {
-    let deadline = (Instant::now() + TRANSFER_BUDGET)
-        .min(deadlines.0)
-        .min(deadlines.1);
-    if Instant::now() >= deadline {
-        return Err(BoundLaunchError::Expired);
-    }
-    transfer_frame(
-        attach, metadata, seed, generation, identity, epoch, deadline,
-    )
-    .await
+trait ProxyGate {
+    async fn verify(&self, pid: u32, start: u64, deadline: Instant)
+    -> Result<(), BoundLaunchError>;
 }
-async fn transfer_frame(
+struct RunningGate<'a> {
+    target: &'a crate::causal_launch_docker::RunningTarget,
+    deployment: &'a InspectedDeployment,
+    snapshots: &'a [FileSnapshot; 7],
+    observation: &'a [u8],
+    permit: &'a CausalPermitOwner,
+}
+impl ProxyGate for RunningGate<'_> {
+    async fn verify(
+        &self,
+        pid: u32,
+        start: u64,
+        deadline: Instant,
+    ) -> Result<(), BoundLaunchError> {
+        self.target
+            .verify_proxy(self.deployment, pid, start, deadline)
+            .await
+            .map_err(|_| BoundLaunchError::Invalid)?;
+        let pairs: Vec<_> = PATHS
+            .iter()
+            .zip(self.snapshots.iter())
+            .map(|(p, s)| (*p, s))
+            .collect();
+        self.deployment
+            .revalidate(self.observation, &pairs)
+            .map_err(|_| BoundLaunchError::Invalid)?;
+        self.deployment
+            .validate_candidate_sources()
+            .map_err(|_| BoundLaunchError::Invalid)?;
+        self.target
+            .revalidate(self.deployment, deadline)
+            .await
+            .map_err(|_| BoundLaunchError::Invalid)?;
+        if !self.permit.bound_fresh() || Instant::now() >= deadline {
+            return Err(BoundLaunchError::Expired);
+        }
+        Ok(())
+    }
+}
+async fn guarded_bootstrap<G: ProxyGate>(
     attach: &mut UnixStream,
     metadata: &[u8],
     seed: &[u8; 32],
+    identity: ([u8; 32], [u8; 32], u64),
+    deadline: Instant,
+    gate: &G,
+) -> Result<RelayCodec, BoundLaunchError> {
+    let (mut codec, pid, start) =
+        perform_hello(attach, identity.0, identity.1, identity.2, deadline).await?;
+    gate.verify(pid, start, deadline).await?;
+    write_bootstrap(attach, metadata, seed, &mut codec, deadline).await?;
+    Ok(codec)
+}
+async fn perform_hello(
+    attach: &mut UnixStream,
     generation: [u8; 32],
     identity: [u8; 32],
     epoch: u64,
     deadline: Instant,
-) -> Result<RelayCodec, BoundLaunchError> {
-    if Instant::now() >= deadline || metadata.is_empty() || metadata.len() > 16384 {
+) -> Result<(RelayCodec, u32, u64), BoundLaunchError> {
+    if Instant::now() >= deadline {
         return Err(BoundLaunchError::Expired);
     }
     let mut codec = RelayCodec::new(random()?, generation, identity, epoch)
@@ -443,18 +553,27 @@ async fn transfer_frame(
         .map_err(|_| BoundLaunchError::Transfer)?
         .map_err(|_| BoundLaunchError::Transfer)?;
     let events = codec.push(&hello).map_err(|_| BoundLaunchError::Transfer)?;
-    if !matches!(events.as_slice(), [RelayEvent::Hello { .. }]) {
-        return Err(BoundLaunchError::Transfer);
-    }
+    let (pid, start) = match events.as_slice() {
+        [RelayEvent::Hello { pid, start }] => (*pid, *start),
+        _ => return Err(BoundLaunchError::Transfer),
+    };
     let mut extra = [0u8; 1];
     match attach.try_read(&mut extra) {
-        Ok(0) => return Err(BoundLaunchError::Transfer),
         Ok(_) => return Err(BoundLaunchError::Transfer),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
         Err(_) => return Err(BoundLaunchError::Transfer),
     }
-    if Instant::now() >= deadline {
-        return Err(BoundLaunchError::Transfer);
+    Ok((codec, pid, start))
+}
+async fn write_bootstrap(
+    attach: &mut UnixStream,
+    metadata: &[u8],
+    seed: &[u8; 32],
+    codec: &mut RelayCodec,
+    deadline: Instant,
+) -> Result<(), BoundLaunchError> {
+    if Instant::now() >= deadline || metadata.is_empty() || metadata.len() > 16384 {
+        return Err(BoundLaunchError::Expired);
     }
     let mut frame = SecretFrame(Vec::with_capacity(9 + 8 + metadata.len() + 32));
     frame.0.extend_from_slice(b"CBP1B");
@@ -477,6 +596,38 @@ async fn transfer_frame(
     codec
         .bootstrap_transferred()
         .map_err(|_| BoundLaunchError::Transfer)?;
+    Ok(())
+}
+#[cfg(test)]
+async fn transfer_with_deadlines(
+    attach: &mut UnixStream,
+    metadata: &[u8],
+    seed: &[u8; 32],
+    generation: [u8; 32],
+    identity: [u8; 32],
+    epoch: u64,
+    deadlines: (Instant, Instant),
+) -> Result<RelayCodec, BoundLaunchError> {
+    let deadline = (Instant::now() + TRANSFER_BUDGET)
+        .min(deadlines.0)
+        .min(deadlines.1);
+    transfer_frame(
+        attach, metadata, seed, generation, identity, epoch, deadline,
+    )
+    .await
+}
+#[cfg(test)]
+async fn transfer_frame(
+    attach: &mut UnixStream,
+    metadata: &[u8],
+    seed: &[u8; 32],
+    generation: [u8; 32],
+    identity: [u8; 32],
+    epoch: u64,
+    deadline: Instant,
+) -> Result<RelayCodec, BoundLaunchError> {
+    let (mut codec, _, _) = perform_hello(attach, generation, identity, epoch, deadline).await?;
+    write_bootstrap(attach, metadata, seed, &mut codec, deadline).await?;
     Ok(codec)
 }
 
@@ -634,6 +785,50 @@ mod tests {
             let result=transfer_with_deadlines(&mut host,b"{}",&[7;32],[1;32],[2;32],1,(Instant::now()+Duration::from_secs(1),Instant::now())).await;
             assert!(matches!(result,Err(BoundLaunchError::Expired)));
             assert!(matches!(peer.try_read(&mut [0u8;1]),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+        });
+    }
+    #[test]
+    fn hello_returns_before_any_bootstrap_is_written() {
+        runtime().block_on(async {
+            let (mut host,mut peer)=UnixStream::pair().unwrap();
+            let task=tokio::spawn(async move {
+                let mut initial=[0;41];peer.read_exact(&mut initial).await.unwrap();
+                peer.write_all(&hello(&initial)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert!(matches!(peer.try_read(&mut [0u8;1]),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+            });
+            let (_,pid,start)=perform_hello(&mut host,[1;32],[2;32],1,Instant::now()+Duration::from_secs(1)).await.unwrap();
+            assert_eq!((pid,start),(1,2)); task.await.unwrap();
+        });
+    }
+    #[test]
+    fn wrong_namespace_pid_proof_never_sends_bootstrap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Gate(AtomicUsize);
+        impl ProxyGate for Gate {
+            async fn verify(
+                &self,
+                pid: u32,
+                start: u64,
+                _: Instant,
+            ) -> Result<(), BoundLaunchError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                if (pid, start) != (99, 2) {
+                    return Err(BoundLaunchError::Invalid);
+                }
+                Ok(())
+            }
+        }
+        runtime().block_on(async {
+            let (mut host,mut peer)=UnixStream::pair().unwrap();
+            let task=tokio::spawn(async move {
+                let mut initial=[0;41];peer.read_exact(&mut initial).await.unwrap();peer.write_all(&hello(&initial)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert!(matches!(peer.try_read(&mut [0u8;1]),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+            });
+            let gate=Gate(AtomicUsize::new(0));
+            let result=guarded_bootstrap(&mut host,b"{}",&[7;32],([1;32],[2;32],1),Instant::now()+Duration::from_secs(1),&gate).await;
+            assert!(matches!(result,Err(BoundLaunchError::Invalid)));assert_eq!(gate.0.load(Ordering::SeqCst),1);task.await.unwrap();
         });
     }
 }

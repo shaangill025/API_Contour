@@ -194,6 +194,36 @@ impl CausalIssue {
         }
         out
     }
+    /// Signature/scope preflight for an inert candidate proxy only. Local wall
+    /// clock is not database time and this does not issue a session or authorize
+    /// a producer, seed transfer, or permit.
+    pub fn signature_preflight_503(
+        &self,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| CausalError::Expired)?;
+        let nanos = i128::try_from(duration.as_nanos()).map_err(|_| CausalError::Expired)?;
+        let now =
+            OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| CausalError::Expired)?;
+        self.signature_preflight_503_at(peer, grant_keys, policy_keys, now)
+    }
+    fn signature_preflight_503_at(
+        &self,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        now: OffsetDateTime,
+    ) -> Result<(), CausalError> {
+        let (grant, _) = verify(self, peer, grant_keys, policy_keys, now)?;
+        if SessionProfile::from_verified(&grant)? != SessionProfile::Candidate503 {
+            return Err(CausalError::Identity);
+        }
+        Ok(())
+    }
     /// Parse only original request inputs, with no verification or session creation.
     pub fn from_original_bytes(bytes: &[u8]) -> Result<Self, CausalError> {
         const FIXED: usize = 4 + 10 * 36 + 32 + 36 + 8 + 8;
@@ -1583,7 +1613,68 @@ mod tests {
         assert_eq!(s.wire_profile_503().unwrap().verified_until(), tightened);
         s.verified_until = Instant::now();
         assert!(s.wire_profile_503().is_none());
+        let candidate_issue = CausalIssue::new(
+            binding(),
+            ID,
+            Duration::from_secs(60),
+            &bytes(&candidate, "candidate"),
+            &bytes(&legacy, "policy"),
+        )
+        .unwrap();
+        assert!(
+            candidate_issue
+                .signature_preflight_503_at(&[3; 32], &grant_keys, &policy_keys, now())
+                .is_ok()
+        );
+        assert!(
+            candidate_issue
+                .signature_preflight_503_at(&[9; 32], &grant_keys, &policy_keys, now())
+                .is_err()
+        );
+        assert!(
+            candidate_issue
+                .signature_preflight_503_at(
+                    &[3; 32],
+                    &grant_keys,
+                    &policy_keys,
+                    now() + time::Duration::days(366)
+                )
+                .is_err()
+        );
+        let wrong_policy = CausalIssue::new(
+            binding(),
+            ID,
+            Duration::from_secs(60),
+            &bytes(&candidate, "candidate"),
+            &bytes(&legacy, "wrong_policy_tenant"),
+        )
+        .unwrap();
+        assert!(
+            wrong_policy
+                .signature_preflight_503_at(&[3; 32], &grant_keys, &policy_keys, now())
+                .is_err()
+        );
+        let mut damaged = candidate["candidate"].clone();
+        damaged["signature_base64url"] = json!("AAAA");
+        let damaged = CausalIssue::new(
+            binding(),
+            ID,
+            Duration::from_secs(60),
+            &serde_json::to_vec(&damaged).unwrap(),
+            &bytes(&legacy, "policy"),
+        )
+        .unwrap();
+        assert!(
+            damaged
+                .signature_preflight_503_at(&[3; 32], &grant_keys, &policy_keys, now())
+                .is_err()
+        );
         let old_issue = request(&legacy, "grant", "policy");
+        assert!(
+            old_issue
+                .signature_preflight_503_at(&[3; 32], &grant_keys, &policy_keys, now())
+                .is_err()
+        );
         let (old, _) = verify(&old_issue, &[3; 32], &grant_keys, &policy_keys, now()).unwrap();
         let mut old_session = session(old_issue);
         old_session.profile = SessionProfile::from_verified(&old).unwrap();

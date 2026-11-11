@@ -240,6 +240,66 @@ fn expected_sources(mounts: &[Mount]) -> Result<Vec<String>, InspectError> {
     }
     Ok(paths)
 }
+// Compare the retained source inventory to the exact reviewed 503 asset
+// manifest. This is a source-integrity check, not Docker or producer proof.
+fn candidate_source_digests_for(
+    mounts: &[Mount],
+    sources: &[SourceFile],
+) -> Result<(), InspectError> {
+    const MANIFEST: &[u8] =
+        include_bytes!("../../../collectors/nodered/live-integration/manifest.json");
+    const MANIFEST_HASH: &str = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
+    if hex_digest(Sha256::digest(MANIFEST).into()) != MANIFEST_HASH || mounts.len() != 11 {
+        return Err(InspectError::Invalid);
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(MANIFEST).map_err(|_| InspectError::Invalid)?;
+    let files = manifest
+        .get("files")
+        .and_then(|v| v.as_object())
+        .ok_or(InspectError::Invalid)?;
+    let tree = manifest
+        .get("arch_trees")
+        .and_then(|v| v.as_object())
+        .ok_or(InspectError::Invalid)?;
+    if files.len() != 19 || sources.len() != 23 {
+        return Err(InspectError::Invalid);
+    }
+    for entry in sources {
+        let expected = if entry.path == mounts[0].source {
+            files
+                .get("/adapter/causal-codec.js")
+                .and_then(|v| v.as_str())
+        } else if entry.path == mounts[3].source {
+            manifest.get("flow_sha256").and_then(|v| v.as_str())
+        } else if let Some(name) = entry.path.strip_prefix(&(mounts[1].source.clone() + "/")) {
+            files
+                .get(&format!("/adapter/error-integration/{name}"))
+                .and_then(|v| v.as_str())
+        } else if let Some(name) = entry.path.strip_prefix(&(mounts[2].source.clone() + "/")) {
+            match name {
+                "manifest.json" => Some(MANIFEST_HASH),
+                "tree-arm64.json" => tree
+                    .get("arm64")
+                    .and_then(|v| v.get("sha256"))
+                    .and_then(|v| v.as_str()),
+                "tree-x64.json" => tree
+                    .get("x64")
+                    .and_then(|v| v.get("sha256"))
+                    .and_then(|v| v.as_str()),
+                _ => files
+                    .get(&format!("/adapter/live-integration/{name}"))
+                    .and_then(|v| v.as_str()),
+            }
+        } else {
+            None
+        };
+        if expected != Some(entry.sha256.as_str()) {
+            return Err(InspectError::Drift);
+        }
+    }
+    Ok(())
+}
 fn parse(input: &[u8]) -> Result<Projection, InspectError> {
     if input.is_empty() || input.len() > MAX_JSON {
         return Err(InspectError::Invalid);
@@ -264,7 +324,7 @@ fn parse(input: &[u8]) -> Result<Projection, InspectError> {
         || !p.running
         || p.tty
         || p.auto_remove
-        || !p.cmd.is_empty()
+        || p.cmd != ["/adapter/live-integration/private-launch-proxy.js"]
         || !p.device_cgroup_rules.is_empty()
         || !p.device_requests.is_empty()
         || !p.devices.is_empty()
@@ -305,11 +365,7 @@ fn parse(input: &[u8]) -> Result<Projection, InspectError> {
         || p.cpu_nanos > 1_000_000_000
         || p.pids == 0
         || p.pids > 128
-        || p.entrypoint
-            != [
-                "/usr/local/bin/node",
-                "/adapter/live-integration/private-launch-proxy.js",
-            ]
+        || p.entrypoint != ["/usr/local/bin/node"]
         || p.user.split_once(':').is_none_or(|(u, g)| {
             !u.parse::<u32>().is_ok_and(|v| v > 0) || !g.parse::<u32>().is_ok_and(|v| v > 0)
         })
@@ -583,13 +639,62 @@ impl HeldMount {
         for (index, ((_, old), (_, new))) in
             self.components.iter().zip(&fresh.components).enumerate()
         {
-            let contents = !self.directory && index + 1 == self.components.len();
+            // Only the mounted leaf directory is sensitive to entries changing;
+            // unrelated changes to ancestor directories must not fence a launch.
+            let contents = index + 1 == self.components.len();
             if !fingerprint(old, new, contents) {
                 return Err(InspectError::Drift);
             }
         }
         Ok(())
     }
+}
+// Both code directories are bind-mounted as directories. Checking just the
+// named files would allow an additional Node module to shadow a checked file.
+fn closed_code_directories(mounts: &[Mount], handles: &[HeldMount]) -> Result<(), InspectError> {
+    let expected = expected_sources(mounts)?;
+    for index in [1usize, 2] {
+        let handle = handles.get(index).ok_or(InspectError::Invalid)?;
+        let prefix = format!("{}/", mounts[index].source);
+        let mut required: BTreeSet<&str> = expected
+            .iter()
+            .filter_map(|path| path.strip_prefix(&prefix))
+            .collect();
+        let before = handle
+            .components
+            .last()
+            .ok_or(InspectError::Invalid)?
+            .0
+            .metadata()
+            .map_err(|_| InspectError::Io)?;
+        for entry in std::fs::read_dir(&handle.path).map_err(|_| InspectError::Drift)? {
+            let entry = entry.map_err(|_| InspectError::Drift)?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(InspectError::Drift)?;
+            if !entry
+                .file_type()
+                .map_err(|_| InspectError::Drift)?
+                .is_file()
+            {
+                return Err(InspectError::Drift);
+            }
+            if !(required.remove(name) || index == 2 && name == "README.md") {
+                return Err(InspectError::Drift);
+            }
+        }
+        let after = handle
+            .components
+            .last()
+            .ok_or(InspectError::Invalid)?
+            .0
+            .metadata()
+            .map_err(|_| InspectError::Io)?;
+        if !required.is_empty() || !fingerprint(&before, &after, true) {
+            return Err(InspectError::Drift);
+        }
+        handle.revalidate()?;
+    }
+    Ok(())
 }
 fn hex_digest(bytes: [u8; 32]) -> String {
     use std::fmt::Write;
@@ -643,6 +748,611 @@ fn inventory_hash(domain: &[u8], sources: &[HeldMount]) -> Result<String, Inspec
     hash.update(&bytes);
     Ok(hex_digest(hash.finalize().into()))
 }
+// All inputs below originate in fixed CLI observations or in the already
+// captured source set; no public raw-JSON constructor is exposed.
+pub(crate) struct ActualExpected<'a> {
+    pub(crate) cid: [u8; 32],
+    pub(crate) image: [u8; 32],
+    pub(crate) owner: [u8; 32],
+    pub(crate) network_id: [u8; 32],
+    pub(crate) network_name: &'a str,
+    pub(crate) network_owner: [u8; 32],
+    pub(crate) network_label: &'a str,
+    pub(crate) peers: Vec<[u8; 32]>,
+    pub(crate) daemon: String,
+    pub(crate) policy_digest: [u8; 32],
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActualState {
+    Created,
+    Running,
+}
+fn object_field<'a>(
+    v: &'a serde_json::Value,
+    k: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, InspectError> {
+    v.get(k)
+        .and_then(|x| x.as_object())
+        .ok_or(InspectError::Invalid)
+}
+fn text_field<'a>(v: &'a serde_json::Value, k: &str) -> Result<&'a str, InspectError> {
+    v.get(k)
+        .and_then(|x| x.as_str())
+        .ok_or(InspectError::Invalid)
+}
+fn bool_field(v: &serde_json::Value, k: &str) -> Result<bool, InspectError> {
+    v.get(k)
+        .and_then(|x| x.as_bool())
+        .ok_or(InspectError::Invalid)
+}
+fn u64_field(v: &serde_json::Value, k: &str) -> Result<u64, InspectError> {
+    v.get(k)
+        .and_then(|x| x.as_u64())
+        .ok_or(InspectError::Invalid)
+}
+fn strings_field(v: &serde_json::Value, k: &str) -> Result<Vec<String>, InspectError> {
+    let x = v.get(k).ok_or(InspectError::Invalid)?;
+    if x.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut result = x
+        .as_array()
+        .ok_or(InspectError::Invalid)?
+        .iter()
+        .map(|x| x.as_str().map(str::to_owned).ok_or(InspectError::Invalid))
+        .collect::<Result<Vec<_>, _>>()?;
+    result.sort();
+    Ok(result)
+}
+fn string_pairs(value: &serde_json::Value) -> Result<Vec<String>, InspectError> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let map = value.as_object().ok_or(InspectError::Invalid)?;
+    map.iter()
+        .map(|(k, v)| {
+            Ok(format!(
+                "{}={}",
+                k,
+                v.as_str().ok_or(InspectError::Invalid)?
+            ))
+        })
+        .collect()
+}
+fn nil_or_empty(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_object().is_some_and(|v| v.is_empty())
+        || value.as_array().is_some_and(|v| v.is_empty())
+}
+fn value_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+pub(crate) struct ValidatedActual {
+    projection: Projection,
+    state: ActualState,
+}
+impl ValidatedActual {
+    pub(crate) fn identity(&self) -> (u64, &str) {
+        (self.projection.pid, &self.projection.started_at)
+    }
+    pub(crate) fn normalized(&self) -> Result<Vec<u8>, InspectError> {
+        if self.state != ActualState::Running {
+            return Err(InspectError::Invalid);
+        }
+        serde_json::to_vec(&self.projection).map_err(|_| InspectError::Invalid)
+    }
+}
+
+pub(crate) fn validate_actual_container(
+    container: &crate::causal_launch_process::ActualDockerObservation,
+    network: &crate::causal_launch_process::ActualDockerObservation,
+    sources: &CandidateSources,
+    expected: &ActualExpected<'_>,
+    state_kind: ActualState,
+) -> Result<ValidatedActual, InspectError> {
+    sources.revalidate()?;
+    project_actual_container(
+        container,
+        network,
+        &sources.mounts,
+        &sources.source_entries,
+        expected,
+        state_kind,
+    )
+}
+fn project_actual_container(
+    container: &crate::causal_launch_process::ActualDockerObservation,
+    network: &crate::causal_launch_process::ActualDockerObservation,
+    source_mounts: &[Mount],
+    source_entries: &[SourceFile],
+    expected: &ActualExpected<'_>,
+    state_kind: ActualState,
+) -> Result<ValidatedActual, InspectError> {
+    use crate::causal_launch_process::DockerInspect;
+    if container.observed_at() > std::time::Instant::now()
+        || network.observed_at() > std::time::Instant::now()
+    {
+        return Err(InspectError::Invalid);
+    }
+    if container.recipe() != DockerInspect::Container(expected.cid)
+        || network.recipe() != DockerInspect::Network(expected.network_id)
+        || container.policy_digest() != expected.policy_digest
+        || network.policy_digest() != expected.policy_digest
+    {
+        return Err(InspectError::Invalid);
+    }
+    let container = serde_json::Value::Object(
+        crate::causal_launch_docker::one_object(container.bytes())
+            .map_err(|_| InspectError::Invalid)?,
+    );
+    let network = serde_json::Value::Object(
+        crate::causal_launch_docker::one_object(network.bytes())
+            .map_err(|_| InspectError::Invalid)?,
+    );
+    let cid = value_hex(&expected.cid);
+    let image = format!("sha256:{}", value_hex(&expected.image));
+    if text_field(&container, "Id")? != cid || text_field(&container, "Image")? != image {
+        return Err(InspectError::Drift);
+    }
+    let config = container.get("Config").ok_or(InspectError::Invalid)?;
+    let host = container.get("HostConfig").ok_or(InspectError::Invalid)?;
+    let state = container.get("State").ok_or(InspectError::Invalid)?;
+    let settings = container
+        .get("NetworkSettings")
+        .ok_or(InspectError::Invalid)?;
+    if text_field(config, "Image")? != IMAGE
+        || text_field(config, "User")? != "1000:1000"
+        || !bool_field(config, "AttachStdin")?
+        || !bool_field(config, "AttachStdout")?
+        || bool_field(config, "AttachStderr")?
+        || !bool_field(config, "OpenStdin")?
+    {
+        return Err(InspectError::Drift);
+    }
+    if !nil_or_empty(host.get("PortBindings").ok_or(InspectError::Invalid)?)
+        || !nil_or_empty(host.get("Devices").ok_or(InspectError::Invalid)?)
+        || !nil_or_empty(host.get("DeviceRequests").ok_or(InspectError::Invalid)?)
+        || !nil_or_empty(host.get("DeviceCgroupRules").ok_or(InspectError::Invalid)?)
+        || !nil_or_empty(host.get("Sysctls").ok_or(InspectError::Invalid)?)
+    {
+        return Err(InspectError::Drift);
+    }
+    // Reject inherited privilege and resource overrides outside the fixed CLI
+    // recipe. Extra mask/readonly paths only make the container more restrictive.
+    for key in [
+        "Binds",
+        "Ulimits",
+        "BlkioWeightDevice",
+        "BlkioDeviceReadBps",
+        "BlkioDeviceWriteBps",
+        "BlkioDeviceReadIOps",
+        "BlkioDeviceWriteIOps",
+    ] {
+        if !nil_or_empty(host.get(key).ok_or(InspectError::Invalid)?) {
+            return Err(InspectError::Drift);
+        }
+    }
+    for key in [
+        "CpuShares",
+        "CpuPeriod",
+        "CpuQuota",
+        "CpuRealtimePeriod",
+        "CpuRealtimeRuntime",
+        "MemoryReservation",
+        "OomScoreAdj",
+        "BlkioWeight",
+        "CpuCount",
+        "CpuPercent",
+        "IOMaximumIOps",
+        "IOMaximumBandwidth",
+    ] {
+        if host.get(key).and_then(|v| v.as_i64()) != Some(0) {
+            return Err(InspectError::Drift);
+        }
+    }
+    for key in [
+        "Cgroup",
+        "CgroupParent",
+        "CpusetCpus",
+        "CpusetMems",
+        "VolumeDriver",
+        "Isolation",
+    ] {
+        if !text_field(host, key)?.is_empty() {
+            return Err(InspectError::Drift);
+        }
+    }
+    if !matches!(
+        host.get("OomKillDisable"),
+        Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false))
+    ) {
+        return Err(InspectError::Drift);
+    }
+    let swap = host
+        .get("MemorySwap")
+        .and_then(|v| v.as_i64())
+        .ok_or(InspectError::Invalid)?;
+    if swap <= 0 || swap > 1_073_741_824 {
+        return Err(InspectError::Drift);
+    }
+    let masked = strings_field(host, "MaskedPaths")?;
+    let readonly = strings_field(host, "ReadonlyPaths")?;
+    if ["/proc/kcore", "/proc/keys", "/sys/firmware"]
+        .iter()
+        .any(|x| !masked.iter().any(|y| y == x))
+        || [
+            "/proc/bus",
+            "/proc/fs",
+            "/proc/irq",
+            "/proc/sys",
+            "/proc/sysrq-trigger",
+        ]
+        .iter()
+        .any(|x| !readonly.iter().any(|y| y == x))
+    {
+        return Err(InspectError::Drift);
+    }
+    let log = host.get("LogConfig").ok_or(InspectError::Invalid)?;
+    if !nil_or_empty(log.get("Config").ok_or(InspectError::Invalid)?) {
+        return Err(InspectError::Drift);
+    }
+    let started = text_field(state, "StartedAt")?.to_owned();
+    let pid = u64_field(state, "Pid")?;
+    let running = bool_field(state, "Running")?;
+    match state_kind {
+        ActualState::Created
+            if text_field(state, "Status")? == "created"
+                && !running
+                && pid == 0
+                && started == "0001-01-01T00:00:00Z" => {}
+        ActualState::Running
+            if text_field(state, "Status")? == "running" && running && pid > 0 && utc(&started) => {
+        }
+        _ => return Err(InspectError::Drift),
+    }
+    let actual_mounts = container
+        .get("Mounts")
+        .and_then(|v| v.as_array())
+        .ok_or(InspectError::Invalid)?;
+    if actual_mounts.len() != source_mounts.len() {
+        return Err(InspectError::Drift);
+    }
+    let mut mounts = Vec::with_capacity(actual_mounts.len());
+    for m in actual_mounts {
+        mounts.push(Mount {
+            destination: text_field(m, "Destination")?.into(),
+            kind: text_field(m, "Type")?.into(),
+            propagation: text_field(m, "Propagation")?.into(),
+            read_only: !bool_field(m, "RW")?,
+            source: text_field(m, "Source")?.into(),
+        });
+    }
+    mounts.sort_by(|a, b| a.destination.cmp(&b.destination));
+    if mounts != source_mounts {
+        return Err(InspectError::Drift);
+    }
+    let exposed = object_field(config, "ExposedPorts")?;
+    let mut exposed_ports: Vec<_> = exposed.keys().cloned().collect();
+    exposed_ports.sort();
+    let ports = settings.get("Ports").ok_or(InspectError::Invalid)?;
+    if !(state_kind == ActualState::Created && ports.is_null()) {
+        let ports = ports.as_object().ok_or(InspectError::Invalid)?;
+        if ports.keys().any(|k| k != "1880/tcp") || ports.values().any(|v| !v.is_null()) {
+            return Err(InspectError::Drift);
+        }
+    }
+    let endpoints = object_field(settings, "Networks")?;
+    if endpoints.len() != 1 {
+        return Err(InspectError::Drift);
+    }
+    let endpoint = endpoints
+        .get(expected.network_name)
+        .ok_or(InspectError::Drift)?;
+    let actual_network_id = text_field(endpoint, "NetworkID")?;
+    if (state_kind == ActualState::Running && actual_network_id != value_hex(&expected.network_id))
+        || (state_kind == ActualState::Created && !actual_network_id.is_empty())
+    {
+        return Err(InspectError::Drift);
+    }
+    let mut aliases = strings_field(endpoint, "Aliases")?;
+    if state_kind == ActualState::Created && aliases.is_empty() {
+        aliases.push("causal-node".into());
+    }
+    if !aliases.iter().any(|x| x == "causal-node") {
+        return Err(InspectError::Drift);
+    }
+    if text_field(&network, "Id")? != value_hex(&expected.network_id)
+        || text_field(&network, "Name")? != expected.network_name
+        || !bool_field(&network, "Internal")?
+    {
+        return Err(InspectError::Drift);
+    }
+    let net_labels = object_field(&network, "Labels")?;
+    if net_labels
+        .get(expected.network_label)
+        .and_then(|v| v.as_str())
+        != Some(value_hex(&expected.network_owner).as_str())
+    {
+        return Err(InspectError::Drift);
+    }
+    let containers = object_field(&network, "Containers")?;
+    let mut expected_members: Vec<_> = expected.peers.iter().map(|x| value_hex(x)).collect();
+    if state_kind == ActualState::Running {
+        expected_members.push(cid.clone());
+    }
+    expected_members.sort();
+    if expected_members.windows(2).any(|w| w[0] == w[1])
+        || containers.keys().ne(expected_members.iter())
+    {
+        return Err(InspectError::Drift);
+    }
+    let tmpfs = object_field(host, "Tmpfs")?;
+    let mut tmpfs_entries = Vec::new();
+    for (dest, options) in tmpfs {
+        let mut options: Vec<String> = options
+            .as_str()
+            .ok_or(InspectError::Invalid)?
+            .split(',')
+            .map(str::to_owned)
+            .collect();
+        options.sort();
+        tmpfs_entries.push(Tmpfs {
+            destination: dest.clone(),
+            options,
+        });
+    }
+    let labels = string_pairs(config.get("Labels").ok_or(InspectError::Invalid)?)?;
+    if labels
+        != [format!(
+            "org.apicontour.causal.owner={}",
+            value_hex(&expected.owner)
+        )]
+    {
+        return Err(InspectError::Drift);
+    }
+    let security_opt = strings_field(host, "SecurityOpt")?;
+    let restart = host.get("RestartPolicy").ok_or(InspectError::Invalid)?;
+    let mut p = Projection {
+        attach_stderr: bool_field(config, "AttachStderr")?,
+        attach_stdin: bool_field(config, "AttachStdin")?,
+        attach_stdout: bool_field(config, "AttachStdout")?,
+        auto_remove: bool_field(host, "AutoRemove")?,
+        cap_add: strings_field(host, "CapAdd")?,
+        cap_drop: strings_field(host, "CapDrop")?,
+        cgroupns_mode: text_field(host, "CgroupnsMode")?.into(),
+        cmd: strings_field(config, "Cmd")?,
+        container_id: cid,
+        context: "explicit-unix".into(),
+        cpu_nanos: u64_field(host, "NanoCpus")?,
+        daemon_endpoint: expected.daemon.clone(),
+        device_cgroup_rules: Vec::new(),
+        device_requests: Vec::new(),
+        devices: Vec::new(),
+        dns: strings_field(host, "Dns")?,
+        dns_options: strings_field(host, "DnsOptions")?,
+        dns_search: strings_field(host, "DnsSearch")?,
+        domainname: text_field(config, "Domainname")?.into(),
+        entrypoint: strings_field(config, "Entrypoint")?,
+        env: strings_field(config, "Env")?,
+        exposed_ports,
+        extra_hosts: strings_field(host, "ExtraHosts")?,
+        group_add: strings_field(host, "GroupAdd")?,
+        hostname: text_field(config, "Hostname")?.into(),
+        image_id: image,
+        image_ref: text_field(config, "Image")?.into(),
+        init: bool_field(host, "Init")?,
+        ipc_mode: text_field(host, "IpcMode")?.into(),
+        labels,
+        links: strings_field(host, "Links")?,
+        log_driver: text_field(host.get("LogConfig").ok_or(InspectError::Invalid)?, "Type")?.into(),
+        memory: u64_field(host, "Memory")?,
+        mounts,
+        name: text_field(&container, "Name")?.into(),
+        network: Network {
+            aliases,
+            id: value_hex(&expected.network_id),
+            internal: true,
+            members: expected_members.clone(),
+            name: expected.network_name.into(),
+            owner: value_hex(&expected.network_owner),
+        },
+        network_mode: text_field(host, "NetworkMode")?.into(),
+        no_new_privileges: security_opt == ["no-new-privileges:true"],
+        pid,
+        pid_mode: text_field(host, "PidMode")?.into(),
+        pids: u64_field(host, "PidsLimit")?,
+        ports: Vec::new(),
+        privileged: bool_field(host, "Privileged")?,
+        publish_all_ports: bool_field(host, "PublishAllPorts")?,
+        read_only_root: bool_field(host, "ReadonlyRootfs")?,
+        restart_policy: text_field(restart, "Name")?.into(),
+        running,
+        runtime: text_field(host, "Runtime")?.into(),
+        security_opt,
+        shm_size: u64_field(host, "ShmSize")?,
+        source_files: source_entries.to_vec(),
+        started_at: started,
+        sysctls: Vec::new(),
+        tmpfs: tmpfs_entries,
+        tty: bool_field(config, "Tty")?,
+        user: text_field(config, "User")?.into(),
+        userns_mode: text_field(host, "UsernsMode")?.into(),
+        uts_mode: text_field(host, "UTSMode")?.into(),
+        version: 1,
+        volumes_from: strings_field(host, "VolumesFrom")?,
+        working_dir: text_field(config, "WorkingDir")?.into(),
+    };
+    // Running-only validator is reused with explicitly synthetic state fields
+    // solely for pre-start validation; these bytes cannot mint running state.
+    if state_kind == ActualState::Created {
+        p.running = true;
+        p.pid = 1;
+        p.started_at = "2000-01-01T00:00:00Z".into();
+        p.network.members.push(value_hex(&expected.cid));
+        p.network.members.sort();
+    }
+    let bytes = serde_json::to_vec(&p).map_err(|_| InspectError::Invalid)?;
+    parse(&bytes)?;
+    candidate_source_digests_for(&p.mounts, &p.source_files)?;
+    Ok(ValidatedActual {
+        projection: p,
+        state: state_kind,
+    })
+}
+
+/// Retained candidate source and mount identities captured without following
+/// path components. This is data only; it does not establish container use.
+pub struct CandidateSources {
+    mounts: Vec<Mount>,
+    mount_handles: Vec<HeldMount>,
+    source_handles: Vec<HeldMount>,
+    source_entries: Vec<SourceFile>,
+    snapshots: Vec<crate::FileSnapshot>,
+}
+impl CandidateSources {
+    /// Capture the fixed eleven mount sources in destination order. Keys must be
+    /// owned 0600 files; source inventory must match the compiled 503 manifest.
+    pub fn capture(paths: &[PathBuf; 11]) -> Result<Self, InspectError> {
+        let destinations = [
+            "/adapter/causal-codec.js",
+            "/adapter/error-integration",
+            "/adapter/live-integration",
+            "/data/flows.json",
+            "/run/apicontour/live/ca.pem",
+            "/run/apicontour/live/export.key",
+            "/run/apicontour/live/export.pem",
+            "/run/apicontour/live/product.key",
+            "/run/apicontour/live/product.pem",
+            "/run/apicontour/live/server.key",
+            "/run/apicontour/live/server.pem",
+        ];
+        let mut mounts = Vec::with_capacity(11);
+        let mut mount_handles = Vec::with_capacity(11);
+        for (index, path) in paths.iter().enumerate() {
+            let value = path.to_str().ok_or(InspectError::Invalid)?;
+            if !abs_path(value)
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+            {
+                return Err(InspectError::Invalid);
+            }
+            let private = destinations[index].ends_with(".key");
+            mount_handles.push(HeldMount::open(path, private, index == 1 || index == 2)?);
+            mounts.push(Mount {
+                destination: destinations[index].into(),
+                kind: "bind".into(),
+                propagation: "rprivate".into(),
+                read_only: true,
+                source: value.into(),
+            });
+        }
+        let mut source_handles = Vec::new();
+        let mut source_entries = Vec::new();
+        for path in expected_sources(&mounts)? {
+            let handle = HeldMount::open(Path::new(&path), false, false)?;
+            let digest = handle.digest.ok_or(InspectError::Invalid)?;
+            source_entries.push(SourceFile {
+                path,
+                sha256: hex_digest(digest),
+            });
+            source_handles.push(handle);
+        }
+        candidate_source_digests_for(&mounts, &source_entries)?;
+        closed_code_directories(&mounts, &mount_handles)?;
+        let mut snapshots = Vec::new();
+        for (index, path) in paths.iter().enumerate().skip(4) {
+            let snapshot = crate::snapshot_file(path, destinations[index].ends_with(".key"))
+                .map_err(|_| InspectError::Drift)?;
+            let digest: [u8; 32] = Sha256::digest(snapshot.as_bytes()).into();
+            if mount_handles[index].digest != Some(digest) {
+                return Err(InspectError::Drift);
+            }
+            snapshots.push(snapshot);
+        }
+        let captured = Self {
+            mounts,
+            mount_handles,
+            source_handles,
+            source_entries,
+            snapshots,
+        };
+        captured.revalidate()?;
+        Ok(captured)
+    }
+    pub(crate) fn seal(
+        self,
+        actual: ValidatedActual,
+    ) -> Result<(InspectedDeployment, [crate::FileSnapshot; 7]), InspectError> {
+        if actual.state != ActualState::Running
+            || actual.projection.mounts != self.mounts
+            || actual.projection.source_files != self.source_entries
+        {
+            return Err(InspectError::Drift);
+        }
+        self.revalidate()?;
+        let snapshots: [crate::FileSnapshot; 7] = self
+            .snapshots
+            .try_into()
+            .map_err(|_| InspectError::Invalid)?;
+        Ok((
+            InspectedDeployment {
+                projection: actual.projection,
+                sources: self.mount_handles,
+                source_files: self.source_handles,
+            },
+            snapshots,
+        ))
+    }
+    pub(crate) fn paths(&self) -> Result<[PathBuf; 11], InspectError> {
+        self.mounts
+            .iter()
+            .map(|m| PathBuf::from(&m.source))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| InspectError::Invalid)
+    }
+    pub(crate) fn mount_pairs(&self) -> Vec<(&str, &str)> {
+        self.mounts
+            .iter()
+            .map(|m| (m.source.as_str(), m.destination.as_str()))
+            .collect()
+    }
+    pub(crate) fn commitment(&self) -> Result<[u8; 32], InspectError> {
+        self.revalidate()?;
+        let mount = serde_json::to_vec(&identity_list(&self.mount_handles)?)
+            .map_err(|_| InspectError::Invalid)?;
+        let source = serde_json::to_vec(&identity_list(&self.source_handles)?)
+            .map_err(|_| InspectError::Invalid)?;
+        let mut hash = Sha256::new();
+        hash.update(b"apicontour/candidate-sources/1\n");
+        hash.update((mount.len() as u64).to_be_bytes());
+        hash.update(mount);
+        hash.update((source.len() as u64).to_be_bytes());
+        hash.update(source);
+        Ok(hash.finalize().into())
+    }
+    /// Reopen every absolute path and compare every retained ancestor and leaf.
+    pub fn revalidate(&self) -> Result<(), InspectError> {
+        candidate_source_digests_for(&self.mounts, &self.source_entries)?;
+        closed_code_directories(&self.mounts, &self.mount_handles)?;
+        for handle in self.mount_handles.iter().chain(&self.source_handles) {
+            handle.revalidate()?;
+        }
+        if self.snapshots.len() != 7 {
+            return Err(InspectError::Invalid);
+        }
+        for (index, snapshot) in self.snapshots.iter().enumerate() {
+            let digest: [u8; 32] = Sha256::digest(snapshot.as_bytes()).into();
+            if self.mount_handles[index + 4].digest != Some(digest) {
+                return Err(InspectError::Drift);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Sealed inspected state. It cannot be constructed from caller-supplied JSON;
 /// the future fixed Docker adapter must create it only after actual inspection.
 /// It conveys no 503 authorization and is not an attestation.
@@ -721,6 +1431,14 @@ impl InspectedDeployment {
         }
         Ok(())
     }
+    /// Validate all source digests against the fixed candidate 503 manifest.
+    /// Call `revalidate` separately to reopen the retained paths and material.
+    pub fn validate_candidate_sources(&self) -> Result<(), InspectError> {
+        candidate_source_digests_for(&self.projection.mounts, &self.projection.source_files)
+    }
+    pub(crate) fn matches_actual(&self, actual: &ValidatedActual) -> bool {
+        actual.state == ActualState::Running && self.projection == actual.projection
+    }
     /// Canonical public data record for correlation only; never a bearer token.
     pub fn canonical_record(&self) -> Result<Vec<u8>, InspectError> {
         if self.sources.len() != self.projection.mounts.len()
@@ -773,6 +1491,47 @@ mod tests {
         "/run/apicontour/live/server.key",
         "/run/apicontour/live/server.pem",
     ];
+    #[test]
+    fn code_directories_reject_shadow_modules_and_transient_changes() {
+        let f = Fixture::new();
+        let mounts = &f.inspected.projection.mounts;
+        let held = &f.inspected.sources;
+        assert_eq!(expected_sources(mounts).unwrap().len(), 23);
+        assert_eq!(closed_code_directories(mounts, held), Ok(()));
+        let shadow = f.root.join("item02/private-bootstrap");
+        std::fs::write(&shadow, b"shadow").unwrap();
+        assert_eq!(
+            closed_code_directories(mounts, held),
+            Err(InspectError::Drift)
+        );
+        std::fs::remove_file(shadow).unwrap();
+        // Even when the injected entry is removed, the retained directory's
+        // change timestamps fence the previous capture.
+        assert_eq!(
+            closed_code_directories(mounts, held),
+            Err(InspectError::Drift)
+        );
+
+        let f = Fixture::new();
+        std::fs::create_dir(f.root.join("item01/node_modules")).unwrap();
+        assert_eq!(
+            closed_code_directories(&f.inspected.projection.mounts, &f.inspected.sources),
+            Err(InspectError::Drift)
+        );
+
+        let f = Fixture::new();
+        let file = f.root.join("item02/private-bootstrap.js");
+        let original = std::fs::read(&file).unwrap();
+        std::fs::write(&file, b"temporary-change").unwrap();
+        std::fs::write(&file, original).unwrap();
+        let source = f
+            .inspected
+            .source_files
+            .iter()
+            .find(|s| s.path == file)
+            .unwrap();
+        assert_eq!(source.revalidate(), Err(InspectError::Drift));
+    }
     struct Fixture {
         root: PathBuf,
         inspected: InspectedDeployment,
@@ -848,7 +1607,7 @@ mod tests {
             let options = ["mode=1777", "nodev", "noexec", "nosuid", "rw", "size=16m"]
                 .map(str::to_string)
                 .to_vec();
-            let p=Projection{attach_stderr:false,attach_stdin:true,attach_stdout:true,auto_remove:false,cap_add:vec![],cap_drop:vec!["ALL".into()],cgroupns_mode:"private".into(),cmd:vec![],container_id:cid.clone(),context:"local".into(),cpu_nanos:1_000_000_000,daemon_endpoint:"unix:///tmp/docker.sock".into(),device_cgroup_rules:vec![],device_requests:vec![],devices:vec![],dns:vec![],dns_options:vec![],dns_search:vec![],domainname:"".into(),entrypoint:vec!["/usr/local/bin/node".into(),"/adapter/live-integration/private-launch-proxy.js".into()],env:["FLOWS=flows.json","HOME=/data","HOSTNAME=causal-live","LANG=C.UTF-8","NODE_PATH=/usr/src/node-red/node_modules","NODE_RED_VERSION=v5.0.9","NODE_VERSION=24.22.1","PATH=/usr/src/node-red/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","TZ=UTC","YARN_VERSION=1.22.22"].map(str::to_string).to_vec(),exposed_ports:vec!["1880/tcp".into()],extra_hosts:vec![],group_add:vec![],hostname:"causal-live".into(),image_id:format!("sha256:{}","22".repeat(32)),image_ref:IMAGE.into(),init:true,ipc_mode:"private".into(),labels:vec![format!("org.apicontour.causal.owner={}","33".repeat(32))],links:vec![],log_driver:"none".into(),memory:536_870_912,mounts,name:"/contour-causal-proxy".into(),network:Network{aliases:vec!["causal-node".into()],id:"44".repeat(32),internal:true,members:vec![cid],name:"causal-net".into(),owner:"55".repeat(32)},network_mode:"causal-net".into(),no_new_privileges:true,pid:123,pid_mode:"".into(),pids:128,ports:vec![],privileged:false,publish_all_ports:false,read_only_root:true,restart_policy:"no".into(),running:true,runtime:"runc".into(),security_opt:vec!["no-new-privileges:true".into()],shm_size:67_108_864,source_files:source_entries,started_at:"2026-11-07T00:00:00Z".into(),sysctls:vec![],tmpfs:vec![Tmpfs{destination:"/data".into(),options:options.clone()},Tmpfs{destination:"/tmp".into(),options}],tty:false,user:"1000:1000".into(),userns_mode:"".into(),uts_mode:"".into(),version:1,volumes_from:vec![],working_dir:"/data".into()};
+            let p=Projection{attach_stderr:false,attach_stdin:true,attach_stdout:true,auto_remove:false,cap_add:vec![],cap_drop:vec!["ALL".into()],cgroupns_mode:"private".into(),cmd:vec!["/adapter/live-integration/private-launch-proxy.js".into()],container_id:cid.clone(),context:"local".into(),cpu_nanos:1_000_000_000,daemon_endpoint:"unix:///tmp/docker.sock".into(),device_cgroup_rules:vec![],device_requests:vec![],devices:vec![],dns:vec![],dns_options:vec![],dns_search:vec![],domainname:"".into(),entrypoint:vec!["/usr/local/bin/node".into()],env:["FLOWS=flows.json","HOME=/data","HOSTNAME=causal-live","LANG=C.UTF-8","NODE_PATH=/usr/src/node-red/node_modules","NODE_RED_VERSION=v5.0.9","NODE_VERSION=24.22.1","PATH=/usr/src/node-red/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","TZ=UTC","YARN_VERSION=1.22.22"].map(str::to_string).to_vec(),exposed_ports:vec!["1880/tcp".into()],extra_hosts:vec![],group_add:vec![],hostname:"causal-live".into(),image_id:format!("sha256:{}","22".repeat(32)),image_ref:IMAGE.into(),init:true,ipc_mode:"private".into(),labels:vec![format!("org.apicontour.causal.owner={}","33".repeat(32))],links:vec![],log_driver:"none".into(),memory:536_870_912,mounts,name:"/contour-causal-proxy".into(),network:Network{aliases:vec!["causal-node".into()],id:"44".repeat(32),internal:true,members:vec![cid],name:"causal-net".into(),owner:"55".repeat(32)},network_mode:"causal-net".into(),no_new_privileges:true,pid:123,pid_mode:"".into(),pids:128,ports:vec![],privileged:false,publish_all_ports:false,read_only_root:true,restart_policy:"no".into(),running:true,runtime:"runc".into(),security_opt:vec!["no-new-privileges:true".into()],shm_size:67_108_864,source_files:source_entries,started_at:"2026-11-07T00:00:00Z".into(),sysctls:vec![],tmpfs:vec![Tmpfs{destination:"/data".into(),options:options.clone()},Tmpfs{destination:"/tmp".into(),options}],tty:false,user:"1000:1000".into(),userns_mode:"".into(),uts_mode:"".into(),version:1,volumes_from:vec![],working_dir:"/data".into()};
             Self {
                 root,
                 inspected: InspectedDeployment {
@@ -1025,5 +1784,246 @@ mod tests {
         v["network"]["members"] = serde_json::json!(["11".repeat(32), "11".repeat(32)]);
         assert!(parse(&serde_json::to_vec(&v).unwrap()).is_err());
         assert!(parse(&vec![b'x'; MAX_JSON + 1]).is_err());
+    }
+    #[test]
+    fn candidate_inventory_rejects_each_source_digest_mutation() {
+        let fixture = Fixture::new();
+        let mut p = fixture.inspected.projection.clone();
+        let manifest: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../collectors/nodered/live-integration/manifest.json"
+        ))
+        .unwrap();
+        let entries = p
+            .source_files
+            .iter()
+            .map(|entry| {
+                let source = &entry.path;
+                let expected = if *source == p.mounts[0].source {
+                    manifest["files"]["/adapter/causal-codec.js"]
+                        .as_str()
+                        .unwrap()
+                } else if *source == p.mounts[3].source {
+                    manifest["flow_sha256"].as_str().unwrap()
+                } else if let Some(name) = source.strip_prefix(&(p.mounts[1].source.clone() + "/"))
+                {
+                    manifest["files"][format!("/adapter/error-integration/{name}")]
+                        .as_str()
+                        .unwrap()
+                } else {
+                    let name = source
+                        .strip_prefix(&(p.mounts[2].source.clone() + "/"))
+                        .unwrap();
+                    match name {
+                        "manifest.json" => {
+                            "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"
+                        }
+                        "tree-arm64.json" => {
+                            manifest["arch_trees"]["arm64"]["sha256"].as_str().unwrap()
+                        }
+                        "tree-x64.json" => {
+                            manifest["arch_trees"]["x64"]["sha256"].as_str().unwrap()
+                        }
+                        _ => manifest["files"][format!("/adapter/live-integration/{name}")]
+                            .as_str()
+                            .unwrap(),
+                    }
+                };
+                SourceFile {
+                    path: source.clone(),
+                    sha256: expected.into(),
+                }
+            })
+            .collect();
+        p.source_files = entries;
+        assert_eq!(
+            candidate_source_digests_for(&p.mounts, &p.source_files),
+            Ok(())
+        );
+        for index in 0..23 {
+            let mut bad = p.clone();
+            bad.source_files[index].sha256 = "00".repeat(32);
+            assert_eq!(
+                candidate_source_digests_for(&bad.mounts, &bad.source_files),
+                Err(InspectError::Drift)
+            );
+        }
+    }
+    #[test]
+    fn exact_node_entrypoint_and_proxy_command_only() {
+        let fixture = Fixture::new();
+        let mut p = fixture.inspected.projection.clone();
+        assert!(parse(&serde_json::to_vec(&p).unwrap()).is_ok());
+        p.entrypoint
+            .push("/adapter/live-integration/private-launch-proxy.js".into());
+        p.cmd.clear();
+        assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());
+        p.entrypoint = vec!["/bin/sh".into()];
+        p.cmd = vec!["-c".into(), "node proxy.js".into()];
+        assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());
+        p.entrypoint = vec!["/usr/local/bin/node".into()];
+        p.cmd = vec![
+            "/adapter/live-integration/private-launch-proxy.js".into(),
+            "extra".into(),
+        ];
+        assert!(parse(&serde_json::to_vec(&p).unwrap()).is_err());
+    }
+    #[test]
+    fn fixed_actual_projection_rejects_container_and_network_drift() {
+        use crate::causal_launch_process::{ActualDockerObservation, DockerInspect};
+        let fixture = Fixture::new();
+        let mut p = fixture.inspected.projection.clone();
+        let manifest: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../collectors/nodered/live-integration/manifest.json"
+        ))
+        .unwrap();
+        for entry in &mut p.source_files {
+            let source = &entry.path;
+            let expected = if *source == p.mounts[0].source {
+                manifest["files"]["/adapter/causal-codec.js"]
+                    .as_str()
+                    .unwrap()
+            } else if *source == p.mounts[3].source {
+                manifest["flow_sha256"].as_str().unwrap()
+            } else if let Some(name) = source.strip_prefix(&(p.mounts[1].source.clone() + "/")) {
+                manifest["files"][format!("/adapter/error-integration/{name}")]
+                    .as_str()
+                    .unwrap()
+            } else {
+                let name = source
+                    .strip_prefix(&(p.mounts[2].source.clone() + "/"))
+                    .unwrap();
+                match name {
+                    "manifest.json" => {
+                        "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"
+                    }
+                    "tree-arm64.json" => {
+                        manifest["arch_trees"]["arm64"]["sha256"].as_str().unwrap()
+                    }
+                    "tree-x64.json" => manifest["arch_trees"]["x64"]["sha256"].as_str().unwrap(),
+                    _ => manifest["files"][format!("/adapter/live-integration/{name}")]
+                        .as_str()
+                        .unwrap(),
+                }
+            };
+            entry.sha256 = expected.into();
+        }
+        let raw_mounts:Vec<_>=p.mounts.iter().map(|m|serde_json::json!({"Destination":m.destination,"Type":"bind","Propagation":"rprivate","RW":false,"Source":m.source})).collect();
+        let cid = "11".repeat(32);
+        let netid = "44".repeat(32);
+        let owner = "33".repeat(32);
+        let netowner = "55".repeat(32);
+        let mut host = serde_json::json!({"PortBindings":null,"Devices":null,"DeviceRequests":null,"DeviceCgroupRules":null,"Sysctls":{},"AutoRemove":false,"CapAdd":null,"CapDrop":["ALL"],"CgroupnsMode":"private","NanoCpus":1000000000,"Dns":[],"DnsOptions":[],"DnsSearch":[],"ExtraHosts":null,"GroupAdd":null,"Init":true,"IpcMode":"private","Links":null,"LogConfig":{"Type":"none"}});
+        let remaining = serde_json::json!({"Memory":536870912,"NetworkMode":"causal-net","PidMode":"","PidsLimit":128,"Privileged":false,"PublishAllPorts":false,"ReadonlyRootfs":true,"RestartPolicy":{"Name":"no"},"Runtime":"runc","SecurityOpt":["no-new-privileges:true"],"ShmSize":67108864,"Tmpfs":{"/data":"rw,nosuid,nodev,noexec,size=16m,mode=1777","/tmp":"rw,nosuid,nodev,noexec,size=16m,mode=1777"},"UsernsMode":"","UTSMode":"","VolumesFrom":null});
+        host.as_object_mut()
+            .unwrap()
+            .extend(remaining.as_object().unwrap().clone());
+        let safety = serde_json::json!({"Binds":null,"Ulimits":null,"BlkioWeightDevice":null,"BlkioDeviceReadBps":null,"BlkioDeviceWriteBps":null,"BlkioDeviceReadIOps":null,"BlkioDeviceWriteIOps":null,"CpuShares":0,"CpuPeriod":0,"CpuQuota":0,"CpuRealtimePeriod":0,"CpuRealtimeRuntime":0,"MemoryReservation":0,"OomScoreAdj":0,"BlkioWeight":0,"CpuCount":0,"CpuPercent":0,"IOMaximumIOps":0,"IOMaximumBandwidth":0,"Cgroup":"","CgroupParent":"","CpusetCpus":"","CpusetMems":"","VolumeDriver":"","Isolation":"","OomKillDisable":false,"MemorySwap":1073741824,"MaskedPaths":["/proc/kcore","/proc/keys","/sys/firmware"],"ReadonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"]});
+        host.as_object_mut()
+            .unwrap()
+            .extend(safety.as_object().unwrap().clone());
+        host["LogConfig"]["Config"] = serde_json::json!({});
+        let config = serde_json::json!({"Image":IMAGE,"User":"1000:1000","AttachStdin":true,"AttachStdout":true,"AttachStderr":false,"OpenStdin":true,"Tty":false,"Cmd":["/adapter/live-integration/private-launch-proxy.js"],"Entrypoint":["/usr/local/bin/node"],"Env":p.env,"ExposedPorts":{"1880/tcp":{}},"Domainname":"","Hostname":"causal-live","Labels":{"org.apicontour.causal.owner":owner},"WorkingDir":"/data"});
+        let mut container = serde_json::json!([{ "Id":cid,"Image":format!("sha256:{}","22".repeat(32)),"Name":"/contour-causal-proxy","State":{"Status":"running","Running":true,"Pid":123,"StartedAt":"2026-11-07T00:00:00Z"},"Config":config,"HostConfig":host,"Mounts":raw_mounts,"NetworkSettings":{"Ports":{"1880/tcp":null},"Networks":{"causal-net":{"NetworkID":netid,"Aliases":["causal-node"]}}}}]);
+        let mut network = serde_json::json!([{"Id":netid,"Name":"causal-net","Internal":true,"Labels":{"org.apicontour.causal.owner":netowner},"Containers":{cid.clone():{}}}]);
+        let expected = ActualExpected {
+            cid: [0x11; 32],
+            image: [0x22; 32],
+            owner: [0x33; 32],
+            network_id: [0x44; 32],
+            network_name: "causal-net",
+            network_owner: [0x55; 32],
+            network_label: "org.apicontour.causal.owner",
+            peers: vec![],
+            daemon: "unix:///tmp/docker.sock".into(),
+            policy_digest: [0x66; 32],
+        };
+        let check = |c: &serde_json::Value, n: &serde_json::Value| {
+            let co = ActualDockerObservation::fake(
+                DockerInspect::Container([0x11; 32]),
+                [0x66; 32],
+                serde_json::to_vec(c).unwrap(),
+            );
+            let no = ActualDockerObservation::fake(
+                DockerInspect::Network([0x44; 32]),
+                [0x66; 32],
+                serde_json::to_vec(n).unwrap(),
+            );
+            project_actual_container(
+                &co,
+                &no,
+                &p.mounts,
+                &p.source_files,
+                &expected,
+                ActualState::Running,
+            )
+            .is_ok()
+        };
+        assert!(check(&container, &network));
+        for (field, value) in [
+            ("Init", serde_json::json!(false)),
+            ("CapAdd", serde_json::json!(["SYS_ADMIN"])),
+            ("ReadonlyRootfs", serde_json::json!(false)),
+            ("PublishAllPorts", serde_json::json!(true)),
+            ("Memory", serde_json::json!(536870913)),
+        ] {
+            let mut bad = container.clone();
+            bad[0]["HostConfig"][field] = value;
+            assert!(!check(&bad, &network));
+        }
+        let mut bad = container.clone();
+        bad[0]["Mounts"][0]["RW"] = serde_json::json!(true);
+        assert!(!check(&bad, &network));
+        let mut bad = container.clone();
+        bad[0]["Id"] = serde_json::json!("ff".repeat(32));
+        assert!(!check(&bad, &network));
+        let mut created = container.clone();
+        created[0]["State"] = serde_json::json!({"Status":"created","Running":false,"Pid":0,"StartedAt":"0001-01-01T00:00:00Z"});
+        created[0]["NetworkSettings"]["Ports"] = serde_json::Value::Null;
+        created[0]["NetworkSettings"]["Networks"]["causal-net"]["NetworkID"] =
+            serde_json::json!("");
+        let mut empty = network.clone();
+        empty[0]["Containers"] = serde_json::json!({});
+        let co = ActualDockerObservation::fake(
+            DockerInspect::Container([0x11; 32]),
+            [0x66; 32],
+            serde_json::to_vec(&created).unwrap(),
+        );
+        let no = ActualDockerObservation::fake(
+            DockerInspect::Network([0x44; 32]),
+            [0x66; 32],
+            serde_json::to_vec(&empty).unwrap(),
+        );
+        assert!(
+            project_actual_container(
+                &co,
+                &no,
+                &p.mounts,
+                &p.source_files,
+                &expected,
+                ActualState::Created
+            )
+            .is_ok()
+        );
+        assert!(
+            project_actual_container(
+                &co,
+                &no,
+                &p.mounts,
+                &p.source_files,
+                &expected,
+                ActualState::Running
+            )
+            .is_err()
+        );
+        container[0]["HostConfig"]["Privileged"] = serde_json::json!(true);
+        assert!(!check(&container, &network));
+        container[0]["HostConfig"]["Privileged"] = serde_json::json!(false);
+        container[0]["Config"]["Cmd"] =
+            serde_json::json!(["/adapter/live-integration/private-launch-proxy.js", "extra"]);
+        assert!(!check(&container, &network));
+        container[0]["Config"]["Cmd"] =
+            serde_json::json!(["/adapter/live-integration/private-launch-proxy.js"]);
+        network[0]["Containers"]["foreign"] = serde_json::json!({});
+        assert!(!check(&container, &network));
     }
 }

@@ -30,6 +30,7 @@ const LOCK: &CStr = c"lock";
 const RECORD: &CStr = c"issue";
 const GENERATION: &CStr = c"generation";
 const LAUNCH: &CStr = c"launch";
+const INERT_CREATE: &CStr = c"inert-create";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CausalJournalError {
@@ -257,6 +258,55 @@ impl CausalIssueOwner {
             _lock: lock,
             request,
         })
+    }
+    pub(crate) fn signature_preflight_503(
+        &self,
+        peer: &[u8; 32],
+        grants: &CausalGrantKeys,
+        policies: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        self.request.signature_preflight_503(peer, grants, policies)
+    }
+    pub(crate) fn original_commitment(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut original = self.request.original_bytes();
+        let mut hash = Sha256::new();
+        hash.update(b"apicontour/original-causal-issue/1\n");
+        hash.update(&original);
+        let result = hash.finalize().into();
+        original.fill(0);
+        result
+    }
+    /// Permanently consumes the same-original inert-create slot before Docker
+    /// mutation. An uncertain fsync or create cannot be replayed by selecting a
+    /// different external create-intent directory.
+    pub(crate) fn consume_inert_create(
+        &mut self,
+        token: [u8; 32],
+        plan: [u8; 32],
+    ) -> Result<(), CausalJournalError> {
+        if token == [0; 32] || plan == [0; 32] {
+            return Err(CausalJournalError::Unsafe);
+        }
+        let mut file = open_at(
+            &self._dir,
+            INERT_CREATE,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COI1")
+            .and_then(|_| file.write_all(&token))
+            .and_then(|_| file.write_all(&plan))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
     }
     // A generation is consumed even when the caller crashes before launch.
     pub(crate) fn claim_generation(&mut self) -> Result<[u8; 32], CausalJournalError> {
@@ -729,5 +779,26 @@ mod tests {
         std::fs::set_permissions(&t.path, std::fs::Permissions::from_mode(0o700)).unwrap();
         symlink("missing", t.path.join("lock")).unwrap();
         assert!(prepare(&t.path).is_err());
+    }
+    #[test]
+    fn inert_create_slot_never_replays_after_reopen_or_sync_failure() {
+        for fail in [None, Some(1), Some(2)] {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            FAIL_SYNC.with(|c| c.set(fail));
+            let result = owner.consume_inert_create([3; 32], [4; 32]);
+            FAIL_SYNC.with(|c| c.set(None));
+            if fail.is_some() {
+                assert_eq!(result, Err(CausalJournalError::Io));
+            } else {
+                assert_eq!(result, Ok(()));
+            }
+            drop(owner);
+            let mut reopened = prepare(&t.path).unwrap();
+            assert_eq!(
+                reopened.consume_inert_create([5; 32], [6; 32]),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
     }
 }

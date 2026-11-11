@@ -3,6 +3,8 @@ mod authority;
 #[cfg(unix)]
 mod causal_launch_bound;
 #[cfg(unix)]
+mod causal_launch_docker;
+#[cfg(unix)]
 mod causal_launch_files;
 #[cfg(unix)]
 mod causal_launch_inspect;
@@ -22,9 +24,14 @@ mod service;
 #[cfg(unix)]
 pub use causal_launch_bound::{BoundLaunchError, BoundLaunchInputs, BoundTransfer};
 #[cfg(unix)]
+pub use causal_launch_docker::{
+    BoundLauncher, InertCreated, InertStarted, LaunchConfig, LaunchObserveError, OwnerLabel,
+    Prelaunch503, VerifiedImage, VerifiedNetwork, VerifiedPeer,
+};
+#[cfg(unix)]
 pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
 #[cfg(unix)]
-pub use causal_launch_inspect::{InspectError, InspectedDeployment};
+pub use causal_launch_inspect::{CandidateSources, InspectError, InspectedDeployment};
 pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
 pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
 #[cfg(unix)]

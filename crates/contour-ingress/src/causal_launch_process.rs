@@ -29,6 +29,7 @@ pub enum ProcessError {
 pub struct OwnedCreateIntent {
     _lock: File,
     _directory: File,
+    token: [u8; 32],
 }
 
 fn open_at(
@@ -101,6 +102,61 @@ fn private_file(file: &File) -> Result<(), ProcessError> {
     Ok(())
 }
 impl OwnedCreateIntent {
+    pub(crate) fn token(&self) -> [u8; 32] {
+        self.token
+    }
+    pub(crate) fn record_cid(&self, cid: [u8; 32]) -> Result<(), ProcessError> {
+        if cid == [0; 32] {
+            return Err(ProcessError::Unsafe);
+        }
+        let mut file = open_at(
+            &self._directory,
+            c"create.cid",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NONBLOCK,
+            0o600,
+        )
+        .map_err(|_| ProcessError::Io)?;
+        private_file(&file)?;
+        file.write_all(b"CCI-CID1\n")
+            .and_then(|_| file.write_all(&cid))
+            .and_then(|_| file.sync_all())
+            .and_then(|_| self._directory.sync_all())
+            .map_err(|_| ProcessError::Io)
+    }
+    pub(crate) fn record_start(&self, cid: [u8; 32]) -> Result<(), ProcessError> {
+        let mut receipt = open_at(
+            &self._directory,
+            c"create.cid",
+            libc::O_RDONLY | libc::O_NONBLOCK,
+            0,
+        )
+        .map_err(|_| ProcessError::Unsafe)?;
+        private_file(&receipt)?;
+        let mut exact = [0u8; 41];
+        receipt
+            .read_exact(&mut exact)
+            .map_err(|_| ProcessError::Io)?;
+        let mut extra = [0u8; 1];
+        if receipt.read(&mut extra).map_err(|_| ProcessError::Io)? != 0
+            || &exact[..9] != b"CCI-CID1\n"
+            || exact[9..] != cid
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let mut file = open_at(
+            &self._directory,
+            c"create.start",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NONBLOCK,
+            0o600,
+        )
+        .map_err(|_| ProcessError::Io)?;
+        private_file(&file)?;
+        file.write_all(b"CCI-START1\n")
+            .and_then(|_| file.write_all(&cid))
+            .and_then(|_| file.sync_all())
+            .and_then(|_| self._directory.sync_all())
+            .map_err(|_| ProcessError::Io)
+    }
     /// Prepare and fsync an immutable intent before any future create. Inputs
     /// are expected identities, not observations or authorization. Existing or
     /// partially written records always fail closed and require operator review.
@@ -179,6 +235,7 @@ impl OwnedCreateIntent {
         Ok(Self {
             _lock: lock,
             _directory: dir,
+            token,
         })
     }
 }
@@ -195,6 +252,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+// Fixed, bounded in-container PID-namespace inspection. This never uses the
+// host Docker-init PID as the proxy PID and contains no caller-supplied code.
+const PROXY_PROC_SCRIPT: &str = r#"'use strict';const f=require('node:fs');const [p,t]=process.argv.slice(1);if(!/^[1-9][0-9]{0,9}$/.test(p)||!/^[1-9][0-9]{0,19}$/.test(t))throw Error('input');function read(path){const fd=f.openSync(path,f.constants.O_RDONLY|f.constants.O_NOFOLLOW),b=Buffer.alloc(8193);let n=0;try{for(;;){const r=f.readSync(fd,b,n,b.length-n,null);if(r===0)break;n+=r;if(n===b.length)throw Error('bound');}}finally{f.closeSync(fd);}if(n===0)throw Error('empty');return b.subarray(0,n);}const base='/proc/'+p+'/';const s=read(base+'stat').toString('utf8');const i=s.lastIndexOf(') ');if(i<0)throw Error('stat');const fields=s.slice(i+2).split(' ');if(fields[1]!=='1'||fields[19]!==t)throw Error('identity');const status=read(base+'status').toString('utf8');const m=/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m.exec(status);if(!m||m.slice(1).some(x=>x!=='1000'))throw Error('uid');const c=read(base+'cmdline');if(!c.equals(Buffer.from('/usr/local/bin/node\0/adapter/live-integration/private-launch-proxy.js\0')))throw Error('cmd');process.stdout.write('OK '+p+' '+t+'\n');"#;
 
 const MAX_STDOUT: usize = 262_144;
 const MAX_STDERR: usize = 16_384;
@@ -475,6 +536,230 @@ impl DockerPolicy {
         launch(cmd, deadline)
     }
 }
+pub(crate) struct FixedCreateSpec<'a> {
+    pub(crate) network: &'a str,
+    pub(crate) owner: [u8; 32],
+    pub(crate) mounts: Vec<(&'a str, &'a str)>,
+}
+impl DockerPolicy {
+    pub(crate) fn daemon_endpoint(&self) -> String {
+        format!("unix://{}", self.socket.to_string_lossy())
+    }
+    pub(crate) fn policy_digest(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub(crate) async fn verify_proxy_process(
+        &self,
+        cid: [u8; 32],
+        pid: u32,
+        start: u64,
+        deadline: Instant,
+    ) -> Result<(), ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        if cid == [0; 32] || pid == 0 || start == 0 {
+            return Err(ProcessError::Unsafe);
+        }
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args([
+                "exec",
+                &hex(&cid),
+                "/usr/local/bin/node",
+                "-e",
+                PROXY_PROC_SCRIPT,
+                "--",
+                &pid.to_string(),
+                &start.to_string(),
+            ]);
+        let bytes = launch(cmd, deadline)?.wait().await?;
+        if bytes != format!("OK {pid} {start}\n").as_bytes() {
+            return Err(ProcessError::Unsafe);
+        }
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)
+    }
+    pub(crate) fn create_inert(
+        &self,
+        spec: &FixedCreateSpec<'_>,
+        deadline: Instant,
+    ) -> Result<LocalProcess, ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        let cmd = self.fixed_create_command(spec)?;
+        launch(cmd, deadline)
+    }
+    fn fixed_create_command(&self, spec: &FixedCreateSpec<'_>) -> Result<Command, ProcessError> {
+        if spec.owner == [0; 32]
+            || spec.network.is_empty()
+            || spec.network.len() > 128
+            || !spec
+                .network
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            || spec.mounts.len() != 11
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let targets = [
+            "/adapter/causal-codec.js",
+            "/adapter/error-integration",
+            "/adapter/live-integration",
+            "/data/flows.json",
+            "/run/apicontour/live/ca.pem",
+            "/run/apicontour/live/export.key",
+            "/run/apicontour/live/export.pem",
+            "/run/apicontour/live/product.key",
+            "/run/apicontour/live/product.pem",
+            "/run/apicontour/live/server.key",
+            "/run/apicontour/live/server.pem",
+        ];
+        if spec.mounts.iter().map(|m| m.1).ne(targets)
+            || spec.mounts.iter().any(|(p, _)| {
+                !p.starts_with('/')
+                    || !p.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-')
+                    })
+            })
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let owner = hex(&spec.owner);
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config);
+        cmd.args([
+            "create",
+            "--pull",
+            "never",
+            "--name",
+            &format!("contour-causal-{owner}"),
+            "--label",
+            &format!("org.apicontour.causal.owner={owner}"),
+            "--interactive",
+            "--attach",
+            "stdin",
+            "--attach",
+            "stdout",
+            "--init",
+            "--hostname",
+            "causal-live",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/data",
+            "--network",
+            spec.network,
+            "--network-alias",
+            "causal-node",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--log-driver",
+            "none",
+            "--memory",
+            "536870912",
+            "--cpus",
+            "1",
+            "--pids-limit",
+            "128",
+            "--tmpfs",
+            "/data:rw,nosuid,nodev,noexec,size=16m,mode=1777",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777",
+            "--entrypoint",
+            "/usr/local/bin/node",
+        ]);
+        for value in [
+            "FLOWS=flows.json",
+            "HOME=/data",
+            "HOSTNAME=causal-live",
+            "LANG=C.UTF-8",
+            "NODE_PATH=/usr/src/node-red/node_modules",
+            "NODE_RED_VERSION=v5.0.9",
+            "NODE_VERSION=24.22.1",
+            "PATH=/usr/src/node-red/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "TZ=UTC",
+            "YARN_VERSION=1.22.22",
+        ] {
+            cmd.arg("--env").arg(value);
+        }
+        for (source, dest) in &spec.mounts {
+            cmd.arg("--mount").arg(format!(
+                "type=bind,src={source},dst={dest},readonly,bind-propagation=rprivate"
+            ));
+        }
+        cmd.args([
+            APPROVED_IMAGE,
+            "/adapter/live-integration/private-launch-proxy.js",
+        ]);
+        Ok(cmd)
+    }
+}
+/// A fixed-recipe observation produced only by this module's local CLI worker.
+/// The bytes remain untrusted until a closed Docker projection is validated.
+pub(crate) struct ActualDockerObservation {
+    recipe: DockerInspect,
+    policy_digest: [u8; 32],
+    observed_at: Instant,
+    bytes: Vec<u8>,
+}
+impl ActualDockerObservation {
+    #[cfg(test)]
+    pub(crate) fn fake(recipe: DockerInspect, policy_digest: [u8; 32], bytes: Vec<u8>) -> Self {
+        Self {
+            recipe,
+            policy_digest,
+            observed_at: Instant::now(),
+            bytes,
+        }
+    }
+    pub(crate) fn observed_at(&self) -> Instant {
+        self.observed_at
+    }
+    pub(crate) fn recipe(&self) -> DockerInspect {
+        self.recipe
+    }
+    pub(crate) fn policy_digest(&self) -> [u8; 32] {
+        self.policy_digest
+    }
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+impl DockerPolicy {
+    pub(crate) async fn observe(
+        &self,
+        recipe: DockerInspect,
+        deadline: Instant,
+    ) -> Result<ActualDockerObservation, ProcessError> {
+        let process = self.inspect(recipe, deadline)?;
+        let bytes = process.wait().await?;
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        Ok(ActualDockerObservation {
+            recipe,
+            policy_digest: self.digest,
+            observed_at: Instant::now(),
+            bytes,
+        })
+    }
+}
 fn check_deadline(deadline: Instant) -> Result<(), ProcessError> {
     let now = Instant::now();
     if deadline <= now || deadline.duration_since(now) > PRELAUNCH_MAX {
@@ -487,6 +772,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// Closed read-only command selection; identifiers are fixed 32-byte values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockerInspect {
     Daemon,
     Image,
@@ -785,6 +1071,276 @@ fn drive(
     (response, clean)
 }
 
+/// Private local CLI attach supervisor. Cancellation signals only its own local
+/// setsid group; it never signals or deletes the remote container.
+pub(crate) struct LocalAttached {
+    stream: Option<tokio::net::UnixStream>,
+    cancel: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    cleanup: LocalCleanup,
+}
+impl LocalAttached {
+    pub(crate) fn take_stream(&mut self) -> Result<tokio::net::UnixStream, ProcessError> {
+        self.stream.take().ok_or(ProcessError::Unsafe)
+    }
+    pub(crate) fn activate(&self) {
+        self.active.store(true, Ordering::Release);
+    }
+    pub(crate) fn cleanup(&self) -> LocalCleanup {
+        self.cleanup.clone()
+    }
+}
+impl Drop for LocalAttached {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+impl DockerPolicy {
+    /// Start exactly one already-owned CID. The fixed start command is never
+    /// used to retry an ambiguous create/start outcome.
+    pub(crate) fn start_attached(
+        &self,
+        cid: [u8; 32],
+        deadline: Instant,
+    ) -> Result<LocalAttached, ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        if cid == [0; 32] {
+            return Err(ProcessError::Unsafe);
+        }
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args(["start", "-a", "-i", &hex(&cid)]);
+        launch_attached(cmd, deadline)
+    }
+}
+fn launch_attached(mut cmd: Command, deadline: Instant) -> Result<LocalAttached, ProcessError> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: setsid is async-signal-safe and creates a private local group.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut guard = SpawnGuard(Some(cmd.spawn().map_err(|_| ProcessError::Io)?));
+    let child = guard.0.as_mut().ok_or(ProcessError::Io)?;
+    let input = child.stdin.take().ok_or(ProcessError::Io)?;
+    let output = child.stdout.take().ok_or(ProcessError::Io)?;
+    let errors = child.stderr.take().ok_or(ProcessError::Io)?;
+    let (host, bridge) = std::os::unix::net::UnixStream::pair().map_err(|_| ProcessError::Io)?;
+    host.set_nonblocking(true).map_err(|_| ProcessError::Io)?;
+    bridge.set_nonblocking(true).map_err(|_| ProcessError::Io)?;
+    let stream = tokio::net::UnixStream::from_std(host).map_err(|_| ProcessError::Io)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicBool::new(false));
+    let cleanup = LocalCleanup(Arc::new(AtomicU8::new(0)));
+    let cancel_worker = cancel.clone();
+    let active_worker = active.clone();
+    let cleanup_worker = cleanup.clone();
+    std::thread::Builder::new()
+        .name("contour-local-attach".into())
+        .spawn(move || {
+            let Some(child) = guard.0.take() else {
+                cleanup_worker.0.store(2, Ordering::Release);
+                return;
+            };
+            let clean = drive_attached(
+                child,
+                input,
+                output,
+                errors,
+                bridge,
+                (deadline, &cancel_worker, &active_worker),
+            );
+            cleanup_worker
+                .0
+                .store(if clean { 1 } else { 2 }, Ordering::Release);
+        })
+        .map_err(|_| ProcessError::CleanupUnknown)?;
+    Ok(LocalAttached {
+        stream: Some(stream),
+        cancel,
+        active,
+        cleanup,
+    })
+}
+fn transfer_read<R: Read>(reader: &mut R, buffer: &mut Vec<u8>) -> Result<bool, ProcessError> {
+    if buffer.len() >= 32768 {
+        return Ok(false);
+    }
+    let mut bytes = [0u8; 8192];
+    let cap = (32768 - buffer.len()).min(bytes.len());
+    match reader.read(&mut bytes[..cap]) {
+        Ok(0) => Err(ProcessError::Io),
+        Ok(n) => {
+            buffer.extend_from_slice(&bytes[..n]);
+            Ok(true)
+        }
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => Ok(false),
+        Err(_) => Err(ProcessError::Io),
+    }
+}
+fn transfer_write<W: Write>(writer: &mut W, buffer: &mut Vec<u8>) -> Result<bool, ProcessError> {
+    if buffer.is_empty() {
+        return Ok(false);
+    }
+    match writer.write(buffer) {
+        Ok(0) => Err(ProcessError::Io),
+        Ok(n) => {
+            buffer.drain(..n);
+            Ok(true)
+        }
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => Ok(false),
+        Err(_) => Err(ProcessError::Io),
+    }
+}
+fn drive_attached(
+    mut child: Child,
+    mut input: impl Write + AsRawFd,
+    mut output: impl Read + AsRawFd,
+    mut errors: impl Read + AsRawFd,
+    mut bridge: std::os::unix::net::UnixStream,
+    controls: (Instant, &AtomicBool, &AtomicBool),
+) -> bool {
+    let (deadline, cancel, active) = controls;
+    let pid = child.id() as i32;
+    if [
+        input.as_raw_fd(),
+        output.as_raw_fd(),
+        errors.as_raw_fd(),
+        bridge.as_raw_fd(),
+    ]
+    .into_iter()
+    .any(|fd| nonblocking(fd).is_err())
+    {
+        cancel.store(true, Ordering::Release);
+    }
+    let mut incoming = Vec::new();
+    let mut outgoing = Vec::new();
+    let mut stalled = Instant::now();
+    let mut exited = false;
+    loop {
+        if cancel.load(Ordering::Acquire)
+            || (!active.load(Ordering::Acquire) && Instant::now() >= deadline)
+        {
+            break;
+        }
+        let mut progress = false;
+        match transfer_read(&mut bridge, &mut incoming) {
+            Ok(v) => progress |= v,
+            Err(_) => break,
+        }
+        match transfer_write(&mut input, &mut incoming) {
+            Ok(v) => progress |= v,
+            Err(_) => break,
+        }
+        match transfer_read(&mut output, &mut outgoing) {
+            Ok(v) => progress |= v,
+            Err(_) => break,
+        }
+        match transfer_write(&mut bridge, &mut outgoing) {
+            Ok(v) => progress |= v,
+            Err(_) => break,
+        }
+        let mut byte = [0u8; 1];
+        match errors.read(&mut byte) {
+            Ok(0) => {}
+            Ok(_) => break,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(_) => break,
+        }
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: owned child is deliberately unreaped until cleanup.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } != 0
+        {
+            break;
+        }
+        if info.si_signo != 0 {
+            exited = true;
+            break;
+        }
+        if progress {
+            stalled = Instant::now();
+        } else if (!incoming.is_empty() || !outgoing.is_empty())
+            && stalled.elapsed() >= Duration::from_secs(2)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(input);
+    drop(output);
+    drop(errors);
+    drop(bridge);
+    if !exited {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == 0
+            && info.si_signo != 0
+        {
+            exited = true;
+        }
+    }
+    // SAFETY: only signal the owned group while its leader remains unreaped.
+    let owned = unsafe { libc::getpgid(pid) } == pid || exited;
+    let already_absent = unsafe { libc::kill(-pid, 0) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    let killed = if owned && !already_absent {
+        (unsafe { libc::kill(-pid, libc::SIGKILL) }) == 0
+    } else {
+        already_absent
+    };
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut reaped = false;
+    while Instant::now() < until {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                reaped = true;
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => break,
+        }
+    }
+    if !reaped {
+        let _ = std::thread::Builder::new()
+            .name("contour-attach-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+        return false;
+    }
+    // SAFETY: signal zero only probes group existence.
+    let absent = unsafe { libc::kill(-pid, 0) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    absent && (killed || exited)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,19 +1413,36 @@ mod tests {
             }
             "stall" => std::thread::sleep(Duration::from_secs(30)),
             "fail" => std::process::exit(17),
+            "interactive" => {
+                print!("READY-CLI");
+                std::io::stdout().flush().unwrap();
+                let mut bytes = [0; 4];
+                std::io::stdin().read_exact(&mut bytes).unwrap();
+                std::io::stdout().write_all(&bytes).unwrap();
+                std::io::stdout().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "noisy" => {
+                eprint!("unexpected stderr");
+                std::io::stderr().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
             "warning" => {
                 eprint!("warning");
                 std::io::stderr().flush().unwrap();
             }
             "descendant" => {
-                let mut child = fixture_command("stall").spawn().unwrap();
+                // This subprocess has its own test mutex after exec.
+                let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
+                let mut child = fixture_command("stall", &_process_guard).spawn().unwrap();
                 let _ = child.wait();
             }
             _ => std::process::exit(71),
         }
         std::process::exit(0);
     }
-    fn fixture_command(mode: &str) -> Command {
+    // The guard parameter makes fixture launches require an acquired guard.
+    fn fixture_command(mode: &str, _guard: &std::sync::MutexGuard<'_, ()>) -> Command {
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.env_clear()
             .env("CONTOUR_PROCESS_TEST_MODE", mode)
@@ -880,13 +1453,17 @@ mod tests {
             ]);
         cmd
     }
-    fn run_mode(mode: &str, duration: Duration) -> (Result<Vec<u8>, ProcessError>, Option<bool>) {
+    fn run_mode(
+        mode: &str,
+        duration: Duration,
+        guard: &std::sync::MutexGuard<'_, ()>,
+    ) -> (Result<Vec<u8>, ProcessError>, Option<bool>) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            let process = launch(fixture_command(mode), Instant::now() + duration).unwrap();
+            let process = launch(fixture_command(mode, guard), Instant::now() + duration).unwrap();
             let cleanup = process.cleanup();
             let result = tokio::time::timeout(Duration::from_secs(5), process.wait())
                 .await
@@ -896,28 +1473,30 @@ mod tests {
     }
     #[test]
     fn owned_process_bounds_output_and_time() {
-        let (ok, clean) = run_mode("ok", Duration::from_secs(2));
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
+        let (ok, clean) = run_mode("ok", Duration::from_secs(2), &_process_guard);
         assert!(ok.unwrap().windows(17).any(|x| x == b"controlled-output"));
         assert_eq!(clean, Some(true));
         for mode in ["flood_out", "flood_err"] {
-            let (r, c) = run_mode(mode, Duration::from_secs(2));
+            let (r, c) = run_mode(mode, Duration::from_secs(2), &_process_guard);
             assert_eq!(r, Err(ProcessError::OutputLimit));
             assert_eq!(c, Some(true));
         }
-        let (warning, clean) = run_mode("warning", Duration::from_secs(2));
+        let (warning, clean) = run_mode("warning", Duration::from_secs(2), &_process_guard);
         assert_eq!(warning, Err(ProcessError::Exit));
         assert_eq!(clean, Some(true));
-        let (failed, clean) = run_mode("fail", Duration::from_secs(2));
+        let (failed, clean) = run_mode("fail", Duration::from_secs(2), &_process_guard);
         assert_eq!(failed, Err(ProcessError::Exit));
         assert_eq!(clean, Some(true));
-        let (r, c) = run_mode("partial", Duration::from_millis(100));
+        let (r, c) = run_mode("partial", Duration::from_millis(100), &_process_guard);
         assert_eq!(r, Err(ProcessError::Timeout));
         assert_eq!(c, Some(true));
     }
     #[test]
     fn dropping_handle_cancels_and_reaps_owned_group() {
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
         let process = launch(
-            fixture_command("stall"),
+            fixture_command("stall", &_process_guard),
             Instant::now() + Duration::from_secs(5),
         )
         .unwrap();
@@ -931,8 +1510,9 @@ mod tests {
     }
     #[test]
     fn cancellation_does_not_claim_cleanup_when_descendants_remain() {
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
         let process = launch(
-            fixture_command("descendant"),
+            fixture_command("descendant", &_process_guard),
             Instant::now() + Duration::from_secs(5),
         )
         .unwrap();
@@ -947,12 +1527,13 @@ mod tests {
     }
     #[test]
     fn cancelling_wait_future_reaps_the_owned_process() {
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let process = launch(
-            fixture_command("stall"),
+            fixture_command("stall", &_process_guard),
             Instant::now() + Duration::from_secs(5),
         )
         .unwrap();
@@ -1028,5 +1609,169 @@ mod tests {
             check_deadline(Instant::now() + Duration::from_secs(1)),
             Ok(())
         );
+    }
+    #[test]
+    fn interactive_owned_group_relays_and_cancels_locally() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut process = launch_attached(
+                fixture_command("interactive", &_process_guard),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            let cleanup = process.cleanup();
+            let mut stream = process.take_stream().unwrap();
+            let mut seen = Vec::new();
+            let mut b = [0; 1];
+            while !seen.ends_with(b"READY-CLI") {
+                tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut b))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                seen.push(b[0]);
+                assert!(seen.len() < 256);
+            }
+            stream.write_all(b"PING").await.unwrap();
+            let mut reply = [0; 4];
+            tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&reply, b"PING");
+            process.activate();
+            drop(stream);
+            drop(process);
+            let until = Instant::now() + Duration::from_secs(4);
+            while cleanup.result().is_none() && Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(cleanup.result(), Some(true));
+        });
+    }
+    #[test]
+    fn interactive_stderr_is_terminal() {
+        let _process_guard = crate::causal_owner::PROCESS_TEST_LOCK.lock().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let process = launch_attached(
+                fixture_command("noisy", &_process_guard),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            let cleanup = process.cleanup();
+            let until = Instant::now() + Duration::from_secs(4);
+            while cleanup.result().is_none() && Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(cleanup.result(), Some(true));
+            drop(process);
+        });
+    }
+    #[test]
+    fn start_marker_requires_exact_durable_cid_and_is_single_use() {
+        let p = dir();
+        let intent =
+            OwnedCreateIntent::prepare_record(&p, [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        assert!(intent.record_start([5; 32]).is_err());
+        assert!(!p.join("create.start").exists());
+        intent.record_cid([5; 32]).unwrap();
+        assert!(intent.record_start([6; 32]).is_err());
+        assert!(!p.join("create.start").exists());
+        intent.record_start([5; 32]).unwrap();
+        let record = std::fs::read(p.join("create.start")).unwrap();
+        assert!(intent.record_start([5; 32]).is_err());
+        assert_eq!(record, std::fs::read(p.join("create.start")).unwrap());
+        drop(intent);
+        std::fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn cid_receipt_is_exclusive_and_never_overwrites() {
+        let p = dir();
+        let intent =
+            OwnedCreateIntent::prepare_record(&p, [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        intent.record_cid([5; 32]).unwrap();
+        let bytes = std::fs::read(p.join("create.cid")).unwrap();
+        assert_eq!(&bytes[..9], b"CCI-CID1\n");
+        assert_eq!(&bytes[9..], &[5; 32]);
+        assert!(intent.record_cid([6; 32]).is_err());
+        assert_eq!(std::fs::read(p.join("create.cid")).unwrap(), bytes);
+        drop(intent);
+        std::fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn fixed_create_recipe_has_no_shell_or_injected_mounts() {
+        let identity = Identity {
+            dev: 0,
+            ino: 0,
+            mode: 0,
+            uid: 0,
+            nlink: 0,
+            len: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        };
+        let policy = DockerPolicy {
+            binary: "/approved/docker".into(),
+            socket: "/approved/socket".into(),
+            config: "/approved/config".into(),
+            binary_identity: identity,
+            socket_identity: identity,
+            config_identity: identity,
+            executable_hash: [1; 32],
+            digest: [2; 32],
+        };
+        let targets = [
+            "/adapter/causal-codec.js",
+            "/adapter/error-integration",
+            "/adapter/live-integration",
+            "/data/flows.json",
+            "/run/apicontour/live/ca.pem",
+            "/run/apicontour/live/export.key",
+            "/run/apicontour/live/export.pem",
+            "/run/apicontour/live/product.key",
+            "/run/apicontour/live/product.pem",
+            "/run/apicontour/live/server.key",
+            "/run/apicontour/live/server.pem",
+        ];
+        let spec = FixedCreateSpec {
+            network: "causal-net",
+            owner: [3; 32],
+            mounts: targets.iter().map(|d| ("/approved/source", *d)).collect(),
+        };
+        let cmd = policy.fixed_create_command(&spec).unwrap();
+        assert_eq!(cmd.get_program(), "/approved/docker");
+        let args: Vec<_> = cmd.get_args().map(|x| x.to_str().unwrap()).collect();
+        assert_eq!(
+            args.last(),
+            Some(&"/adapter/live-integration/private-launch-proxy.js")
+        );
+        assert_eq!(args.iter().filter(|x| **x == "--mount").count(), 11);
+        for required in [
+            "--init",
+            "--read-only",
+            "--cap-drop",
+            "--security-opt",
+            "--log-driver",
+            "none",
+            "--entrypoint",
+            "/usr/local/bin/node",
+        ] {
+            assert!(args.contains(&required));
+        }
+        assert!(!args.contains(&"/bin/sh"));
+        assert!(!args.contains(&"--publish"));
+        let mut bad = spec;
+        bad.mounts[0].0 = "/approved/source,readonly=false";
+        assert!(policy.fixed_create_command(&bad).is_err());
     }
 }
