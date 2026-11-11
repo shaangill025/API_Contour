@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use contour_ingress::{BoundLaunchError, BoundLauncher, InertStarted, LaunchConfig};
+use contour_ingress::{BoundLaunchError, BoundLauncher, InertStarted, LaunchConfig, LocalCleanup};
 use contour_postgres::{CausalIssuer, CausalMarkerBinder};
 
 // This integration test is compiled as a downstream crate, so private-module
@@ -11,6 +11,7 @@ async fn bind_from_downstream<'a>(
     issuer: &mut CausalIssuer,
     binder: &mut CausalMarkerBinder,
 ) -> Result<BoundLauncher<'a>, BoundLaunchError> {
+    let _: LocalCleanup = started.local_cleanup();
     let config = LaunchConfig {
         product_credential: "product".into(),
         export_credential: "export".into(),
@@ -19,5 +20,7 @@ async fn bind_from_downstream<'a>(
         queue_bytes: 8192,
         queue_ttl_ms: 1000,
     };
-    started.bind(issuer, binder, config).await
+    let bound = started.bind(issuer, binder, config).await?;
+    let _: LocalCleanup = bound.local_cleanup();
+    Ok(bound)
 }

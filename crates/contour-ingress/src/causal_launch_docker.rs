@@ -806,6 +806,14 @@ impl<'a> InertCreated<'a> {
     }
 }
 
+impl InertStarted<'_> {
+    /// Observe cleanup of the owned local attach process group after it is dropped.
+    /// This does not report the state of the remote container or business child.
+    pub fn local_cleanup(&self) -> crate::LocalCleanup {
+        self.attached.cleanup()
+    }
+}
+
 /// Private running target, including the local attach owner and durable create
 /// journal. It can only be assembled from the sealed start transition above.
 pub(crate) struct RunningTarget {
@@ -822,6 +830,9 @@ pub(crate) struct RunningTarget {
     attached: LocalAttached,
 }
 impl RunningTarget {
+    pub(crate) fn local_cleanup(&self) -> crate::LocalCleanup {
+        self.attached.cleanup()
+    }
     pub(crate) async fn verify_proxy(
         &self,
         deployment: &crate::InspectedDeployment,
@@ -1039,6 +1050,10 @@ pub enum BoundRunError {
     Deadline,
 }
 impl<'a> BoundLauncher<'a> {
+    /// Observe local attach process-group cleanup; remote processes are not affected.
+    pub fn local_cleanup(&self) -> crate::LocalCleanup {
+        self.transfer.local_cleanup()
+    }
     /// Perform the one-use transfer and run checked permit relay until capture
     /// closes. `ready` is sent only after the correlated CLR1/Y event. Dropping
     /// this future closes local capture/attach and does not stop the container.

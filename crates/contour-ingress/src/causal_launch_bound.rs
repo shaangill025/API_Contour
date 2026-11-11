@@ -406,6 +406,9 @@ pub struct BoundTransfer {
     epoch: u64,
 }
 impl BoundTransfer {
+    pub(crate) fn local_cleanup(&self) -> crate::LocalCleanup {
+        self.target.local_cleanup()
+    }
     /// Write once to the sealed owned attach. On cancellation or partial write,
     /// this consumed state and permit are dropped; no remote process is killed.
     pub(crate) async fn transfer(
