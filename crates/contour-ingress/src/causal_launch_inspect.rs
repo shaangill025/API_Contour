@@ -753,6 +753,7 @@ fn inventory_hash(domain: &[u8], sources: &[HeldMount]) -> Result<String, Inspec
 pub(crate) struct ActualExpected<'a> {
     pub(crate) cid: [u8; 32],
     pub(crate) image: [u8; 32],
+    pub(crate) image_labels: &'a std::collections::BTreeMap<String, String>,
     pub(crate) owner: [u8; 32],
     pub(crate) network_id: [u8; 32],
     pub(crate) network_name: &'a str,
@@ -803,21 +804,6 @@ fn strings_field(v: &serde_json::Value, k: &str) -> Result<Vec<String>, InspectE
         .collect::<Result<Vec<_>, _>>()?;
     result.sort();
     Ok(result)
-}
-fn string_pairs(value: &serde_json::Value) -> Result<Vec<String>, InspectError> {
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
-    let map = value.as_object().ok_or(InspectError::Invalid)?;
-    map.iter()
-        .map(|(k, v)| {
-            Ok(format!(
-                "{}={}",
-                k,
-                v.as_str().ok_or(InspectError::Invalid)?
-            ))
-        })
-        .collect()
 }
 fn nil_or_empty(value: &serde_json::Value) -> bool {
     value.is_null()
@@ -1102,15 +1088,21 @@ fn project_actual_container(
             options,
         });
     }
-    let labels = string_pairs(config.get("Labels").ok_or(InspectError::Invalid)?)?;
-    if labels
-        != [format!(
-            "org.apicontour.causal.owner={}",
-            value_hex(&expected.owner)
-        )]
+    let labels = object_field(config, "Labels")?;
+    let owner_label = "org.apicontour.causal.owner";
+    if labels.len() != expected.image_labels.len() + 1
+        || labels.get(owner_label).and_then(|v| v.as_str())
+            != Some(value_hex(&expected.owner).as_str())
+        || expected
+            .image_labels
+            .iter()
+            .any(|(key, value)| labels.get(key).and_then(|v| v.as_str()) != Some(value.as_str()))
     {
         return Err(InspectError::Drift);
     }
+    // The immutable image ID commits to its verified defaults. Keep the
+    // established canonical projection's owner-only label representation.
+    let labels = vec![format!("{owner_label}={}", value_hex(&expected.owner))];
     let security_opt = strings_field(host, "SecurityOpt")?;
     let restart = host.get("RestartPolicy").ok_or(InspectError::Invalid)?;
     let mut p = Projection {
@@ -1922,12 +1914,49 @@ mod tests {
             .unwrap()
             .extend(safety.as_object().unwrap().clone());
         host["LogConfig"]["Config"] = serde_json::json!({});
-        let config = serde_json::json!({"Image":IMAGE,"User":"1000:1000","AttachStdin":true,"AttachStdout":true,"AttachStderr":false,"OpenStdin":true,"Tty":false,"Cmd":["/adapter/live-integration/private-launch-proxy.js"],"Entrypoint":["/usr/local/bin/node"],"Env":p.env,"ExposedPorts":{"1880/tcp":{}},"Domainname":"","Hostname":"causal-live","Labels":{"org.apicontour.causal.owner":owner},"WorkingDir":"/data"});
+        // Stock labels from the fixed image's created-container inspection.
+        let image_labels: std::collections::BTreeMap<String, String> = [
+            (
+                "authors",
+                "Dave Conway-Jones, Nick O'Leary, James Thomas, Raymond Mouthaan",
+            ),
+            ("org.label-schema.arch", ""),
+            ("org.label-schema.build-date", "2026-10-21T15:52:22Z"),
+            (
+                "org.label-schema.description",
+                "Low-code programming for event-driven applications.",
+            ),
+            (
+                "org.label-schema.docker.dockerfile",
+                ".docker/Dockerfile.alpine",
+            ),
+            ("org.label-schema.license", "Apache-2.0"),
+            ("org.label-schema.name", "Node-RED"),
+            ("org.label-schema.url", "https://nodered.org"),
+            ("org.label-schema.vcs-ref", ""),
+            ("org.label-schema.vcs-type", "Git"),
+            (
+                "org.label-schema.vcs-url",
+                "https://github.com/node-red/node-red-docker",
+            ),
+            ("org.label-schema.version", "5.0.9"),
+            (
+                "org.opencontainers.image.source",
+                "https://github.com/node-red/node-red-docker",
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let mut container_labels = image_labels.clone();
+        container_labels.insert("org.apicontour.causal.owner".into(), owner.clone());
+        let config = serde_json::json!({"Image":IMAGE,"User":"1000:1000","AttachStdin":true,"AttachStdout":true,"AttachStderr":false,"OpenStdin":true,"Tty":false,"Cmd":["/adapter/live-integration/private-launch-proxy.js"],"Entrypoint":["/usr/local/bin/node"],"Env":p.env,"ExposedPorts":{"1880/tcp":{}},"Domainname":"","Hostname":"causal-live","Labels":container_labels,"WorkingDir":"/data"});
         let mut container = serde_json::json!([{ "Id":cid,"Image":format!("sha256:{}","22".repeat(32)),"Name":"/contour-causal-proxy","State":{"Status":"running","Running":true,"Pid":123,"StartedAt":"2026-11-07T00:00:00Z"},"Config":config,"HostConfig":host,"Mounts":raw_mounts,"NetworkSettings":{"Ports":{"1880/tcp":null},"Networks":{"causal-net":{"NetworkID":netid,"Aliases":["causal-node"]}}}}]);
         let mut network = serde_json::json!([{"Id":netid,"Name":"causal-net","Internal":true,"Labels":{"org.apicontour.causal.owner":netowner},"Containers":{cid.clone():{}}}]);
         let expected = ActualExpected {
             cid: [0x11; 32],
             image: [0x22; 32],
+            image_labels: &image_labels,
             owner: [0x33; 32],
             network_id: [0x44; 32],
             network_name: "causal-net",
@@ -1959,6 +1988,31 @@ mod tests {
             .is_ok()
         };
         assert!(check(&container, &network));
+        for mutation in 0..4 {
+            let mut bad = container.clone();
+            let labels = bad[0]["Config"]["Labels"].as_object_mut().unwrap();
+            match mutation {
+                0 => {
+                    labels.insert("unexpected".into(), serde_json::json!("extra"));
+                }
+                1 => {
+                    labels.insert(
+                        "org.label-schema.version".into(),
+                        serde_json::json!("changed"),
+                    );
+                }
+                2 => {
+                    labels.remove("org.label-schema.version");
+                }
+                _ => {
+                    labels.insert(
+                        "org.apicontour.causal.owner".into(),
+                        serde_json::json!("ff".repeat(32)),
+                    );
+                }
+            }
+            assert!(!check(&bad, &network));
+        }
         for (field, value) in [
             ("Init", serde_json::json!(false)),
             ("CapAdd", serde_json::json!(["SYS_ADMIN"])),

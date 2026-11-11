@@ -83,6 +83,7 @@ pub enum LaunchObserveError {
 pub struct VerifiedImage {
     id: [u8; 32],
     policy: [u8; 32],
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 // Preserve numbers and reject duplicate keys recursively. Input size is already
@@ -213,7 +214,44 @@ fn verified_image(
     Ok(VerifiedImage {
         id,
         policy: observation.policy_digest(),
+        labels: image_labels(observation.bytes())?,
     })
+}
+fn image_labels(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeMap<String, String>, LaunchObserveError> {
+    let item = one_object(bytes)?;
+    let labels = item
+        .get("Config")
+        .and_then(|v| v.get("Labels"))
+        .ok_or(LaunchObserveError::Invalid)?;
+    if labels.is_null() {
+        return Ok(Default::default());
+    }
+    let labels = labels.as_object().ok_or(LaunchObserveError::Invalid)?;
+    if labels.len() > 64 {
+        return Err(LaunchObserveError::Invalid);
+    }
+    let mut result = std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for (key, value) in labels {
+        let value = value.as_str().ok_or(LaunchObserveError::Invalid)?;
+        if key.is_empty()
+            || key.len() > 256
+            || value.len() > 4096
+            || key.starts_with("org.apicontour.")
+        {
+            return Err(LaunchObserveError::Invalid);
+        }
+        total = total
+            .checked_add(key.len() + value.len())
+            .ok_or(LaunchObserveError::Invalid)?;
+        if total > 16384 {
+            return Err(LaunchObserveError::Invalid);
+        }
+        result.insert(key.clone(), value.to_owned());
+    }
+    Ok(result)
 }
 impl Prelaunch503<'_> {
     /// Recheck signed preflight around an actual fixed image inspection.
@@ -523,7 +561,10 @@ impl Prelaunch503<'_> {
             return Err(LaunchObserveError::Invalid);
         }
         let observed = self.inspect_image(policy, image.id).await?;
-        if observed.id != image.id || observed.policy != image.policy {
+        if observed.id != image.id
+            || observed.policy != image.policy
+            || observed.labels != image.labels
+        {
             return Err(LaunchObserveError::Invalid);
         }
         self.revalidate_network(policy, &network).await?;
@@ -561,7 +602,10 @@ impl Prelaunch503<'_> {
             .map_err(|_| LaunchObserveError::Invalid)?;
         self.revalidate_network(policy, &network).await?;
         let observed = self.inspect_image(policy, image.id).await?;
-        if observed.id != image.id || observed.policy != image.policy {
+        if observed.id != image.id
+            || observed.policy != image.policy
+            || observed.labels != image.labels
+        {
             return Err(LaunchObserveError::Invalid);
         }
         self.revalidate().map_err(LaunchObserveError::Preflight)?;
@@ -624,7 +668,10 @@ impl InertCreated<'_> {
             .revalidate_network(policy, &self.network)
             .await?;
         let image = self.prelaunch.inspect_image(policy, self.image.id).await?;
-        if image.id != self.image.id || image.policy != self.image.policy {
+        if image.id != self.image.id
+            || image.policy != self.image.policy
+            || image.labels != self.image.labels
+        {
             return Err(LaunchObserveError::Invalid);
         }
         let container = policy
@@ -644,6 +691,7 @@ impl InertCreated<'_> {
         let expected = ActualExpected {
             cid: self.cid,
             image: self.image.id,
+            image_labels: &self.image.labels,
             owner: self.intent.token(),
             network_id: self.network.id,
             network_name: &self.network.name,
@@ -770,6 +818,7 @@ impl<'a> InertCreated<'a> {
             let expected = ActualExpected {
                 cid: self.cid,
                 image: self.image.id,
+                image_labels: &self.image.labels,
                 owner: self.intent.token(),
                 network_id: self.network.id,
                 network_name: &self.network.name,
@@ -859,6 +908,15 @@ impl RunningTarget {
         self.sources
             .revalidate()
             .map_err(|_| LaunchObserveError::Invalid)?;
+        let image = self
+            .policy
+            .observe(DockerInspect::Image, deadline.into())
+            .await
+            .map_err(LaunchObserveError::Process)?;
+        let image = verified_image(image, self.image.id)?;
+        if image.policy != self.image.policy || image.labels != self.image.labels {
+            return Err(LaunchObserveError::Invalid);
+        }
         for peer in &self.network.members {
             let observed = self
                 .policy
@@ -891,6 +949,7 @@ impl RunningTarget {
         let expected = ActualExpected {
             cid: self.cid,
             image: self.image.id,
+            image_labels: &self.image.labels,
             owner: self.owner,
             network_id: self.network.id,
             network_name: &self.network.name,
@@ -1311,6 +1370,60 @@ mod tests {
     use super::*;
     const PIN: &str =
         "nodered/node-red@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963";
+    #[test]
+    fn image_labels_reject_reserved_spoofs_and_malformed_or_unbounded_values() {
+        let mut image =
+            serde_json::json!([{"Config":{"Labels":{"org.label-schema.version":"5.0.9"}}}]);
+        let labels = image_labels(&serde_json::to_vec(&image).unwrap()).unwrap();
+        assert_eq!(
+            labels.get("org.label-schema.version").map(String::as_str),
+            Some("5.0.9")
+        );
+        for key in [
+            "org.apicontour.causal.owner",
+            "org.apicontour.fixture-owner",
+        ] {
+            let mut bad = image.clone();
+            bad[0]["Config"]["Labels"][key] = serde_json::json!("spoof");
+            assert_eq!(
+                image_labels(&serde_json::to_vec(&bad).unwrap()),
+                Err(LaunchObserveError::Invalid)
+            );
+        }
+        image[0]["Config"]["Labels"]["org.label-schema.version"] = serde_json::json!(false);
+        assert_eq!(
+            image_labels(&serde_json::to_vec(&image).unwrap()),
+            Err(LaunchObserveError::Invalid)
+        );
+        image[0]["Config"]["Labels"]["org.label-schema.version"] =
+            serde_json::json!("x".repeat(4097));
+        assert_eq!(
+            image_labels(&serde_json::to_vec(&image).unwrap()),
+            Err(LaunchObserveError::Invalid)
+        );
+    }
+    #[test]
+    fn sealed_image_observation_retains_label_values() {
+        let image = serde_json::json!([{"Id":format!("sha256:{}", "22".repeat(32)),
+            "RepoDigests":[PIN], "Config":{"Labels":{"org.label-schema.version":"5.0.9"}}}]);
+        let observed = |value: &serde_json::Value| {
+            verified_image(
+                ActualDockerObservation::fake(
+                    DockerInspect::Image,
+                    [0x66; 32],
+                    serde_json::to_vec(value).unwrap(),
+                ),
+                [0x22; 32],
+            )
+            .unwrap()
+        };
+        let first = observed(&image);
+        let mut changed = image.clone();
+        changed[0]["Config"]["Labels"]["org.label-schema.version"] = serde_json::json!("changed");
+        let second = observed(&changed);
+        assert_eq!(first.id, second.id);
+        assert_ne!(first.labels, second.labels);
+    }
     #[test]
     fn creation_receipt_requires_exact_full_cid_line() {
         let text = format!("{}\n", "ab".repeat(32));
