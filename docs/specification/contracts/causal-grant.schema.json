@@ -134,25 +134,30 @@
     "queue_ttl_seconds"
   ],
   "additionalProperties": false,
-  "allOf": [
+  "anyOf": [
     {
-      "if": {
-        "properties": {
-          "causal_profile": {
-            "const": "nodered_5_0_9_wire_v1"
-          }
-        },
-        "required": [
-          "causal_profile"
-        ]
-      },
-      "then": {
-        "properties": {
-          "profile_sha256": {
-            "const": "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"
-          }
+      "properties": {
+        "causal_profile": {
+          "const": "nodered_5_0_9_v1"
         }
-      }
+      },
+      "required": [
+        "causal_profile"
+      ]
+    },
+    {
+      "properties": {
+        "causal_profile": {
+          "const": "nodered_5_0_9_wire_v1"
+        },
+        "profile_sha256": {
+          "const": "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"
+        }
+      },
+      "required": [
+        "causal_profile",
+        "profile_sha256"
+      ]
     }
   ]
 }
