@@ -37,6 +37,8 @@ def _owned_worktree(head,receipt):
     if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o700: raise ValueError('qualification owner invalid')
     raw=origin_credentials._file(owner/'intent.json',4096); value=capture_renew.exact_json(raw)
     if type(value) is not dict or set(value)!={'version','head','tag','token','worktree'} or value['version']!=1 or value['head']!=head or value['worktree']!=str(root) or not re.fullmatch('[0-9a-f]{32}',value['token']) or value['tag']!='apicontour-origin21-build:'+value['token'] or _bytes(value)!=raw: raise ValueError('qualification worktree intent invalid')
+    from deploy.local import qualification_git
+    if qualification_git.registration_if_active(root,head): return
     data=init.origin21_transport._run(['git','worktree','list','--porcelain','-z'],'',deadline=15)
     entries=[]; item={}
     for field in data.split('\0'):

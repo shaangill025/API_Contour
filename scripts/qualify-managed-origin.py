@@ -28,7 +28,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py', 'deploy/local/qualification_git.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -170,7 +170,7 @@ def cleanup_private(run,child,owner,head,*,profile_readiness=False):
     if os.path.lexists(base): raise RuntimeError('private state remains')
 
 
-def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False):
+def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,fresh_source=False):
     global _PHASE
     _PHASE="worktree"
     head,source=h['snapshot'](run,ROOT); child=owner.path/'worktree'; tag='apicontour-origin21-build:'+token
@@ -191,6 +191,7 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False):
     inner=[sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest]
     if fresh_metadata: inner.append('--fresh-metadata')
     if profile_readiness: inner.append('--profile-readiness')
+    if fresh_source: inner.append('--fresh-source')
     inner_output=run(inner,cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
     profile_output=profile_lines(inner_output) if profile_readiness else ()
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
@@ -213,8 +214,8 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False):
 def main():
     global _PHASE
     flags=sys.argv[1:]
-    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness') for flag in flags): raise ValueError('invalid arguments')
-    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--fresh-source') for flag in flags): raise ValueError('invalid arguments')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags
     if not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in ('P_PID','WEXITED','WNOHANG','WNOWAIT')):
         print('qualification requires configured Python 3.13 with POSIX waitid/WNOWAIT',file=sys.stderr)
         raise RuntimeError('qualification runtime unavailable')
@@ -228,6 +229,7 @@ def main():
         options={}
         if fresh_metadata: options['fresh_metadata']=True
         if profile_readiness: options['profile_readiness']=True
+        if fresh_source: options['fresh_source']=True
         qualify(run,owner,uuid.uuid4().hex,h,**options)
         owner.remove()
     except BaseException as error:

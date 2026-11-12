@@ -19,7 +19,7 @@ import threading
 import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from deploy.local import docker_metadata,origin21_managed_controller as controller,origin21_products as products,origin21_profile as profiles,origin21_ready,origin21_state,origin21_transport
+from deploy.local import docker_metadata,qualification_git,origin21_managed_controller as controller,origin21_products as products,origin21_profile as profiles,origin21_ready,origin21_state,origin21_transport
 
 ROOT=profiles.ROOT
 FIXTURE=ROOT/'tests/fixtures/managed-origin-qualification'
@@ -35,7 +35,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py', 'deploy/local/qualification_git.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -84,7 +84,7 @@ def failure_lines(error,phase):
 
 
 def _source_guard():
-    required={SOURCE,M5_HELPER,'deploy/local/docker_metadata.py','deploy/local/origin21_readiness_profile.py','deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
+    required={SOURCE,M5_HELPER,'deploy/local/docker_metadata.py','deploy/local/qualification_git.py','deploy/local/origin21_readiness_profile.py','deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
     if not required.issubset(set(origin21_state.MANAGED_SOURCE_FILES)): raise RuntimeError('qualification source closure incomplete')
     return origin21_state._source_identity(context=profiles.MANAGED)
 
@@ -544,15 +544,17 @@ def main(argv):
     global _PHASE
     if len(argv)<4: raise ValueError('build evidence required')
     flags=argv[4:]
-    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness') for flag in flags): raise ValueError('invalid qualification flags')
-    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--fresh-source') for flag in flags): raise ValueError('invalid qualification flags')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags
     image,head,receipt,digest=argv[:4]
     _set_phase('source-check')
     source=_source_guard()
     _set_phase('qualification-begin')
     proof=qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest)
     try:
-        with docker_metadata.qualification_scope(proof) if fresh_metadata else contextlib.nullcontext():
+        with contextlib.ExitStack() as stack:
+            if fresh_source: stack.enter_context(qualification_git.qualification_scope(proof))
+            if fresh_metadata: stack.enter_context(docker_metadata.qualification_scope(proof))
             _set_phase('initialize')
             path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
             _set_phase('topology-up')
