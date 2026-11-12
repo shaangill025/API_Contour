@@ -402,12 +402,16 @@ ENVOY='envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708a
 COMPANIONS=('destination','origin21-capture-ingress','origin21-capture-worker','native-gateway','native-envoy')
 
 
-def _image(ref):
-    value=_objects(['docker','image','inspect',ref]); ident=value.get('Id',''); config=value.get('Config') or {}
+def _image_metadata(value):
+    ident=value.get('Id',''); config=value.get('Config') or {}
     if not re.fullmatch('sha256:[0-9a-f]{64}',ident): raise ValueError('invalid companion image')
     env=config.get('Env') or []
     if not isinstance(env,list) or any(not isinstance(x,str) or '=' not in x for x in env): raise ValueError('invalid image environment')
     return {'id':ident,'env':env,'cmd':config.get('Cmd'),'entrypoint':config.get('Entrypoint'),'workdir':config.get('WorkingDir')}
+
+
+def _image(ref):
+    return _image_metadata(_objects(['docker','image','inspect',ref]))
 
 
 def _companion_mounts(service,*,selected=origin21_profile.STATIC,qualification=None):
@@ -530,6 +534,24 @@ def _recorded_products(intent,record,*,selected=origin21_profile.STATIC):
     return ids
 
 
+def _companion_images(intent,pending):
+    images=pending.get('images')
+    if type(images) is not dict or set(images)!=set(COMPANIONS) or type(images.get('native-envoy')) is not dict:
+        raise ValueError('invalid companion images')
+    expected=(intent['app_image_id'],intent['image_id'],images['native-envoy'].get('id'))
+    if any(type(ident) is not str or not re.fullmatch('sha256:[0-9a-f]{64}',ident) for ident in expected) or len(set(expected))!=3:
+        raise ValueError('invalid companion image identities')
+    values=json.loads(_command(['docker','image','inspect',intent['app_image_id'],origin21_evidence.IMAGE,ENVOY]))
+    if type(values) is not list or len(values)!=3 or any(type(value) is not dict for value in values):
+        raise RuntimeError('invalid product inspection')
+    result=[]
+    for value,ident in zip(values,expected):
+        image=_image_metadata(value)
+        if image['id']!=ident: raise ValueError('companion image role drift')
+        result.append(image)
+    return tuple(result)
+
+
 def _companion_record(intent,products,*,selected=origin21_profile.STATIC,qualification=None):
     origin21_profile.require_context(selected)
     project=PROJECT if selected is origin21_profile.STATIC else selected.project
@@ -545,7 +567,7 @@ def _companion_record(intent,products,*,selected=origin21_profile.STATIC,qualifi
     current=origin21_transport._run(['git','rev-parse','HEAD'],'',deadline=15)
     dirty=origin21_transport._run(['git','status','--porcelain','--untracked-files=all'],'',deadline=15)
     if current!=intent['build_head'] or dirty: raise ValueError('app source changed')
-    app=_image(intent['app_image_id']); node=_image(origin21_evidence.IMAGE); envoy=_image(ENVOY)
+    app,node,envoy=_companion_images(intent,pending)
     expected_images={name:(node if name=='destination' else envoy if name=='native-envoy' else app) for name in COMPANIONS}
     if app['id']!=intent['app_image_id'] or node['id']!=intent['image_id'] or pending['images']!=expected_images: raise ValueError('companion image drift')
     capture=_context_call(selected,_capture_network,intent['deployment'])

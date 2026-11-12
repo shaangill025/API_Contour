@@ -164,6 +164,66 @@ class ManagedContextTests(unittest.TestCase):
 
 
 class Origin21Tests(unittest.TestCase):
+    def test_companion_record_reobserves_images_across_profiles(self):
+        from deploy.local import origin21_managed_controller
+        ids=['sha256:'+c*64 for c in 'abc']; token='1'*32; head='2'*40
+        image_values=[{'Id':ident,'Config':{'Env':['A=B'],'Cmd':None,'Entrypoint':None,'WorkingDir':None}} for ident in ids]
+        metadata=[origin21_products._image_metadata(value) for value in image_values]
+        images={name:metadata[1] if name=='destination' else metadata[2] if name=='native-envoy' else metadata[0] for name in origin21_products.COMPANIONS}
+        intent={'token':token,'app_image_id':ids[0],'image_id':ids[1],'build_head':head,'build_receipt_sha256':'3'*64,'deployment':{'name':'network'},'model_sha256':'4'*64}
+        pending={'version':1,'token':token,'image_id':ids[0],'build_head':head,'build_receipt_sha256':'3'*64,'capture_network':'capture','images':images,'services':list(origin21_products.COMPANIONS),'model_sha256':'5'*64}
+        services={name:{'id':str(i)*64,'started_at':'started'} for i,name in enumerate(origin21_products.COMPANIONS,1)}
+        record={'version':1,'services':services}; products=['6'*64,'7'*64]; calls=[]
+        def command(args,timeout=30):
+            if args[:3]==['docker','image','inspect']:
+                calls.append(args); return json.dumps(image_values).encode()
+            return ' '.join(products+[services[name]['id'] for name in origin21_products.COMPANIONS]).encode()
+        def read(name,**kwargs): return pending if name=='companions-intent.json' else record
+        with mock.patch.object(origin21_products,'_read_record',side_effect=read),mock.patch.object(origin21_products,'_verify_model'),mock.patch.object(origin21_products.origin21_transport,'_run',side_effect=lambda args,*a,**k:head if args[1]=='rev-parse' else ''),mock.patch.object(origin21_products,'_capture_network',return_value='capture'),mock.patch.object(origin21_products,'_network',return_value='business'),mock.patch.object(origin21_products,'_objects',return_value={}),mock.patch.object(origin21_products,'_validate_companion',return_value={'StartedAt':'started'}),mock.patch.object(origin21_products,'_command',side_effect=command),mock.patch.object(origin21_managed_controller,'verify_recorded_topology'):
+            for selected in (origin21_profile.STATIC,origin21_profile.MANAGED):
+                self.assertEqual(origin21_products._companion_record(intent,products,selected=selected),'business')
+            image_values[1]['Config']['Env']=['A=changed']
+            with self.assertRaises(ValueError): origin21_products._companion_record(intent,products,selected=origin21_profile.MANAGED)
+        self.assertEqual(len(calls),3)
+
+    def test_companion_images_reject_ambiguous_or_wrong_roles(self):
+        ids=['sha256:'+c*64 for c in 'abc']
+        intent={'app_image_id':ids[0],'image_id':ids[1]}
+        pending={'images':{name:{'id':ids[1] if name=='destination' else ids[2] if name=='native-envoy' else ids[0]} for name in origin21_products.COMPANIONS}}
+        values=[{'Id':ident,'Config':{'Env':['A=B']}} for ident in ids]
+        invalid=[[],values[:2],values+[values[0]],[values[1],values[0],values[2]],
+                 [values[0],values[0],values[2]],[values[0],None,values[2]],
+                 [values[0],{'Id':ids[1],'Config':{'Env':['missing-equals']}},values[2]],
+                 [values[0],values[1],{'Id':'sha256:'+'d'*64,'Config':{}}]]
+        for payload in invalid:
+            with self.subTest(payload=payload), mock.patch.object(origin21_products,'_command',return_value=json.dumps(payload).encode()):
+                with self.assertRaises((ValueError,RuntimeError)): origin21_products._companion_images(intent,pending)
+        with mock.patch.object(origin21_products,'_command',side_effect=RuntimeError('failed CLI')):
+            with self.assertRaisesRegex(RuntimeError,'failed CLI'): origin21_products._companion_images(intent,pending)
+        for malformed in ({}, {'images':{}}, {'images':{**pending['images'],'native-envoy':{'id':ids[0]}}}):
+            with mock.patch.object(origin21_products,'_command') as command:
+                with self.assertRaises(ValueError): origin21_products._companion_images(intent,malformed)
+                command.assert_not_called()
+
+    def test_companion_images_one_fresh_ordered_observation(self):
+        ids=['sha256:'+c*64 for c in 'abc']
+        intent={'app_image_id':ids[0],'image_id':ids[1]}
+        images={name:{'id':ids[1] if name=='destination' else ids[2] if name=='native-envoy' else ids[0]} for name in origin21_products.COMPANIONS}
+        pending={'images':images}
+        def objects():
+            return [{'Id':ident,'Config':{'Env':['X=1'],'Cmd':['run'],'Entrypoint':['entry'],'WorkingDir':'/work'}} for ident in ids]
+        payload=objects(); calls=[]
+        def command(args,timeout=30):
+            calls.append((args,timeout)); refs=[ids[0],origin21_evidence.IMAGE,origin21_products.ENVOY]
+            return json.dumps([payload[refs.index(ref)] for ref in args[3:]]).encode()
+        with mock.patch.object(origin21_products,'_command',side_effect=command):
+            app,node,envoy=origin21_products._companion_images(intent,pending)
+            self.assertEqual([app['id'],node['id'],envoy['id']],ids)
+            self.assertEqual(calls,[(['docker','image','inspect',ids[0],origin21_evidence.IMAGE,origin21_products.ENVOY],30)])
+            payload[1]['Config']['Env']=['X=changed']
+            self.assertEqual(origin21_products._companion_images(intent,pending)[1]['env'],['X=changed'])
+            self.assertEqual(len(calls),2)
+
     def test_compose_models_close_transitive_dependencies_and_detect_drift(self):
         services={name:{'networks':{'default':{}},'volumes':[{'type':'bind','source':'/private/input','target':'/input','read_only':True}]} for name in origin21_products.PRODUCTS+origin21_products.COMPANIONS}
         services['replica1']['depends_on']={'native-envoy':{'condition':'service_started'}}
