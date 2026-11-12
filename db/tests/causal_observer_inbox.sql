@@ -43,23 +43,23 @@ END $$;
 RESET ROLE;
 SET ROLE contour_causal_observer_writer;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; x contour.causal_session_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_seed; x:=p.producer_claim; x.policy_expires:=clock_timestamp()-interval '1 second'; p.producer_claim:=x;
+ SELECT raw INTO STRICT r FROM observer_seed; SELECT (proof).* INTO STRICT p FROM observer_seed; x:=p.producer_claim; x.policy_expires:=clock_timestamp()-interval '1 second'; p.producer_claim:=x;
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'stale authority leaked receipt'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_seed; p.marker_public:=decode(repeat('ff',32),'hex');
+ SELECT raw INTO STRICT r FROM observer_seed; SELECT (proof).* INTO STRICT p FROM observer_seed; p.marker_public:=decode(repeat('ff',32),'hex');
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'wrong key admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_seed; p.marker_generation:=decode(repeat('dd',32),'hex');
+ SELECT raw INTO STRICT r FROM observer_seed; SELECT (proof).* INTO STRICT p FROM observer_seed; p.marker_generation:=decode(repeat('dd',32),'hex');
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'wrong generation admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_seed; p.marker_wire_digest:=decode(repeat('cc',32),'hex');
+ SELECT raw INTO STRICT r FROM observer_seed; SELECT (proof).* INTO STRICT p FROM observer_seed; p.marker_wire_digest:=decode(repeat('cc',32),'hex');
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'wrong marker digest admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_seed; p.gateway_peer_leaf:=decode(repeat('ee',32),'hex');
+ SELECT raw INTO STRICT r FROM observer_seed; SELECT (proof).* INTO STRICT p FROM observer_seed; p.gateway_peer_leaf:=decode(repeat('ee',32),'hex');
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'wrong gateway admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 RESET ROLE;
@@ -94,7 +94,7 @@ UPDATE contour.origin_logical_usage SET used_bytes=1073741824 WHERE tenant_id=(S
 RESET ROLE;
 SET ROLE contour_causal_observer_writer;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_retry;
+ SELECT raw INTO STRICT r FROM observer_retry; SELECT (proof).* INTO STRICT p FROM observer_retry;
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'full quota admitted retry'; EXCEPTION WHEN program_limit_exceeded THEN NULL; END;
 END $$;
 RESET ROLE;
@@ -130,17 +130,17 @@ INSERT INTO observer_graph_cases
 RESET ROLE;
 SET ROLE contour_causal_observer_writer;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_graph_cases WHERE name='second-first';
+ SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='second-first'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='second-first';
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'second first delivery admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_graph_cases WHERE name='self-loop';
+ SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='self-loop'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='self-loop';
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'self-loop admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 -- A missing predecessor is stored unresolved; its later cycle-forming predecessor is refused.
 INSERT INTO observer_receipts SELECT contour.accept_causal_observer(raw,proof) FROM observer_graph_cases WHERE name='pending-parent';
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_graph_cases WHERE name='close-cycle';
+ SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='close-cycle'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='close-cycle';
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'retry cycle admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 RESET ROLE;
@@ -148,12 +148,12 @@ RESET ROLE;
 SET ROLE contour_causal_observer_writer;
 INSERT INTO observer_receipts SELECT contour.accept_causal_observer(raw,proof) FROM observer_graph_cases WHERE name='fork-a1';
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_graph_cases WHERE name='fork-a2';
+ SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='fork-a2'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='fork-a2';
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'missing-parent fork accepted'; EXCEPTION WHEN unique_violation THEN NULL; END;
 END $$;
 INSERT INTO observer_receipts SELECT contour.accept_causal_observer(raw,proof) FROM observer_graph_cases WHERE name='fork-b2';
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_graph_cases WHERE name='fork-b1';
+ SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='fork-b1'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='fork-b1';
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'reverse missing-parent fork accepted'; EXCEPTION WHEN unique_violation THEN NULL; END;
 END $$;
 RESET ROLE;
@@ -189,7 +189,7 @@ CREATE TEMP TABLE observer_chain_usage AS SELECT used_bytes FROM contour.origin_
 GRANT SELECT ON observer_chain_usage TO contour_owner;
 SET ROLE contour_causal_observer_writer;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_chain_cases WHERE seq=65;
+ SELECT raw INTO STRICT r FROM observer_chain_cases WHERE seq=65; SELECT (proof).* INTO STRICT p FROM observer_chain_cases WHERE seq=65;
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION '65th delivery admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 RESET ROLE;
@@ -216,7 +216,7 @@ RESET ROLE;
 SET ROLE contour_causal_observer_writer;
 SELECT format('INSERT INTO observer_receipts SELECT contour.accept_causal_observer(raw,proof) FROM observer_chain_cases WHERE seq=%s;',seq) FROM observer_chain_cases WHERE seq BETWEEN 101 AND 164 ORDER BY seq \gexec
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
- SELECT raw,proof INTO STRICT r,p FROM observer_chain_cases WHERE seq=165;
+ SELECT raw INTO STRICT r FROM observer_chain_cases WHERE seq=165; SELECT (proof).* INTO STRICT p FROM observer_chain_cases WHERE seq=165;
  BEGIN PERFORM contour.accept_causal_observer(r,p); RAISE EXCEPTION 'late parent joined oversized fragments'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 RESET ROLE;

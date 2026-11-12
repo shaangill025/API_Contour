@@ -20,4 +20,6 @@ class Shape(unittest.TestCase):
         self.assertIn('trusted synthetic observer seed required',FIXTURE)
         self.assertIn('exact retry changed receipt',FIXTURE)
         self.assertIn('wrong key admitted',FIXTURE)
+        # Composite row variables cannot be mixed with scalar targets in PL/pgSQL INTO.
+        self.assertNotRegex(FIXTURE, r'(?i)INTO\s+STRICT\s+r\s*,\s*p\b')
 if __name__=='__main__': unittest.main()
