@@ -17,6 +17,7 @@ mod causal_launch_protocol;
 mod causal_owner;
 #[cfg(unix)]
 mod causal_permit;
+mod causal_receiver_metadata;
 mod causal_service;
 pub mod gateway;
 mod pool;
@@ -48,6 +49,7 @@ pub use causal_permit::CausalPermitOwner;
 pub use causal_receiver_material::{
     LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
 };
+pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_metadata};
 pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
 use rustls::{
