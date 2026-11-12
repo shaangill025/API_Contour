@@ -21,7 +21,7 @@ class ContainerTests(unittest.TestCase):
                 'SecurityOpt':['no-new-privileges'],'Memory':536870912,'PidsLimit':32,
                 'Tmpfs':{'/data':'rw,noexec,nosuid,size=16m','/tmp':'rw,noexec,nosuid,size=16m'},
                 'Privileged':False,'CapAdd':None,'Devices':None,'PidMode':'','IpcMode':'private',
-                'UTSMode':'','UsernsMode':'','PortBindings':None,'PublishAllPorts':False},
+                'UTSMode':'','UsernsMode':'','PortBindings':None,'PublishAllPorts':False,'OomKillDisable':False},
                 'Mounts':[],'Created':'created','RestartCount':0,
                 'State':{'Running':False,'Status':'created','StartedAt':'0001-01-01T00:00:00Z','ExitCode':0}}
 
@@ -37,7 +37,7 @@ class ContainerTests(unittest.TestCase):
             ('root','Mounts',[{}]),('root','RestartCount',1),('HostConfig','Privileged',True),
             ('HostConfig','CapAdd',['SYS_ADMIN']),('HostConfig','Devices',[{}]),
             ('HostConfig','PidMode','host'),('HostConfig','IpcMode','host'),
-            ('HostConfig','PortBindings',{'80/tcp':[{}]})]:
+            ('HostConfig','PortBindings',{'80/tcp':[{}]}),('HostConfig','OomKillDisable',True),('HostConfig','OomKillDisable',0),('HostConfig','OomKillDisable','false')]:
             with self.subTest(key=key):
                 obj=copy.deepcopy(self.container)
                 (obj if section=='root' else obj[section])[key]=value
@@ -59,6 +59,18 @@ class GenerationTests(ContainerTests):
             if change=='start': value['State']['StartedAt']='0001-01-01T00:00:00Z'
             with self.subTest(change=change), self.assertRaises(ValueError):
                 m.generation(value,self.cid,self.token,self.image,frozen)
+
+    def test_enabled_oom_default_null_false_transition_only(self):
+        frozen=m.created_signature(self.container,self.cid,self.token,self.image)
+        stopped=copy.deepcopy(self.container)
+        stopped['State'].update(Status='exited',StartedAt='2026-11-12T01:02:03Z',ExitCode=0)
+        stopped['HostConfig']['OomKillDisable']=None
+        self.assertEqual(m.generation(stopped,self.cid,self.token,self.image,frozen),'2026-11-12T01:02:03Z')
+        for bad in (True,0,'false'):
+            stopped['HostConfig']['OomKillDisable']=bad
+            with self.assertRaises(ValueError):m.generation(stopped,self.cid,self.token,self.image,frozen)
+        stopped['HostConfig'].pop('OomKillDisable')
+        with self.assertRaises((ValueError,KeyError)):m.generation(stopped,self.cid,self.token,self.image,frozen)
 
     def test_iid_regular_private_file_only(self):
         with tempfile.TemporaryDirectory() as directory:

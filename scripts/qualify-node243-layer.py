@@ -156,7 +156,12 @@ def image_id_file(path):
 
 
 def signature(c):
-    return copy.deepcopy({key:c[key] for key in ('Id','Image','Config','HostConfig','Mounts','Created')})
+    value = copy.deepcopy({key:c[key] for key in ('Id','Image','Config','HostConfig','Mounts','Created')})
+    oom = value['HostConfig']['OomKillDisable']
+    if oom is not None and oom is not False: raise ValueError('OOM kill must remain enabled')
+    # Docker serializes the enabled default as false at create and null after start.
+    value['HostConfig']['OomKillDisable'] = None
+    return value
 
 
 def validate_container(c, cid, token, image):
@@ -171,6 +176,7 @@ def validate_container(c, cid, token, image):
         or host['UTSMode'] not in ('', 'private') or host['UsernsMode'] not in ('', 'private')
         or host['PortBindings'] not in (None, {}) or host['PublishAllPorts'] is not False): raise ValueError('isolation')
     if host['Tmpfs'] != {'/data':'rw,noexec,nosuid,size=16m', '/tmp':'rw,noexec,nosuid,size=16m'} or any(x.get('Type') != 'tmpfs' or x.get('Destination') not in ('/data','/tmp') for x in c['Mounts']): raise ValueError('mounts')
+    if 'OomKillDisable' not in host or (host['OomKillDisable'] is not None and host['OomKillDisable'] is not False): raise ValueError('OOM kill must remain enabled')
     if c['RestartCount'] != 0: raise ValueError('restart')
 
 
