@@ -3,9 +3,9 @@
 const fs=require('node:fs'),crypto=require('node:crypto'),https=require('node:https'),net=require('node:net'),{spawn}=require('node:child_process');
 const bootstrap=require('/adapter/receiver-integration/private-bootstrap-504');
 const KEYS=['backend_cert','backend_key','gateway_cert','gateway_key','ingress_cert','ingress_key','seed'];
-const STAGES=new Set(['input','material','metadata','listeners','proxy','bootstrap','readiness','request','batch','cleanup','complete']);
-const diag={stage:'input',failure:undefined,hello:false,spawned:false,ready:false,refresh:0,proxy:'none'};
-function diagnostic(){const stage=STAGES.has(diag.failure)?diag.failure:STAGES.has(diag.stage)?diag.stage:'input';const proxy=['none','zero','nonzero','signal','other'].includes(diag.proxy)?diag.proxy:'other';const count=Number.isSafeInteger(diag.refresh)?Math.max(0,Math.min(16,diag.refresh)):0;return `FAIL phase=${stage} hello=${diag.hello===true?1:0} spawned=${diag.spawned===true?1:0} ready=${diag.ready===true?1:0} refresh=${count} proxy=${proxy}`;}
+const STAGES=new Set(['input','material','metadata','listeners','preflight','proxy','bootstrap','readiness','request','batch','cleanup','complete']);
+const diag={stage:'input',failure:undefined,hello:false,spawned:false,ready:false,refresh:0,proxy:'none',probe:undefined};
+function diagnostic(){const stage=STAGES.has(diag.failure)?diag.failure:STAGES.has(diag.stage)?diag.stage:'input';const proxy=['none','zero','nonzero','signal','other'].includes(diag.proxy)?diag.proxy:'other';const count=Number.isSafeInteger(diag.refresh)?Math.max(0,Math.min(16,diag.refresh)):0;const p=diag.probe||{},state=['none','ok','nonzero','signal','timeout','other'].includes(p.state)?p.state:'none',boot=['ok','module_not_found','dlopen','syntax','other','unknown'].includes(p.bootstrap)?p.bootstrap:'unknown';return `FAIL phase=${stage} hello=${diag.hello===true?1:0} spawned=${diag.spawned===true?1:0} ready=${diag.ready===true?1:0} refresh=${count} proxy=${proxy} preflight=${state} env=${p.env_keys===true?1:0} exec=${p.exec_path===true?1:0} args=${p.exec_argv===true?1:0} tty=${p.pipe_tty===true?1:0} argv_probe=${p.argv_probe===true?1:0} bootstrap=${boot}`;}
 function readPrivate(){return new Promise((resolve,reject)=>{
  let socket;try{socket=new net.Socket({fd:3,readable:true,writable:false,allowHalfOpen:true});}catch(_){return reject(Error('input'));}
  let size=0,parts=[],expected,closing=false,done=false,output={},failure,closeTimer;const timer=setTimeout(()=>finish(Error('input deadline')),5000);
@@ -26,6 +26,22 @@ function leaf(bytes){return crypto.createHash('sha256').update(new crypto.X509Ce
 function boundedFile(name){const b=fs.readFileSync('/run/apicontour/live/'+name);if(!b.length||b.length>65536)throw Error('file');return b;}
 function listen(server,port){return new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});}
 function shutdown(server){return new Promise(resolve=>{if(!server)return resolve();server.closeAllConnections();server.close(()=>resolve());});}
+function runPreflight(env){return new Promise((resolve,reject)=>{
+ let child,settled=false,expired=false,size=0,stderrSize=0,chunks=[],killTimer;const result={state:'other',bootstrap:'unknown'};
+ function finish(state){if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);result.state=state;
+  if(state==='ok'){try{const raw=Buffer.concat(chunks,size),value=JSON.parse(raw.toString('utf8')),keys=['env_keys','exec_path','exec_argv','pipe_tty','argv_probe','bootstrap'];if(!value||Object.keys(value).join(',')!==keys.join(',')||keys.slice(0,5).some(k=>typeof value[k]!=='boolean')||!['ok','module_not_found','dlopen','syntax','other'].includes(value.bootstrap))throw Error('probe');Object.assign(result,value);}catch(_){result.state='other';}}
+  for(const x of chunks)x.fill(0);chunks=[];resolve(result);
+ }
+ const timer=setTimeout(()=>{expired=true;if(child){try{child.kill('SIGKILL');}catch(_){}killTimer=setTimeout(()=>{if(!settled){settled=true;for(const x of chunks)x.fill(0);chunks=[];reject(Error('preflight cleanup'));}},1000);}else finish('timeout');},3000);
+ try{
+  child=spawn('/usr/local/bin/node',['/work/tests/fixtures/receiver504-actual/proxy-preflight.js'],{env,stdio:['pipe','pipe','pipe']});child.stdin.end();
+  child.stdin.on('error',()=>{expired=true;try{child.kill('SIGKILL');}catch(_){}});
+  child.stdout.on('error',()=>{expired=true;try{child.kill('SIGKILL');}catch(_){}});child.stderr.on('error',()=>{expired=true;try{child.kill('SIGKILL');}catch(_){}});
+  child.stdout.on('data',part=>{if(!Buffer.isBuffer(part)||part.length>512-size){expired=true;try{child.kill('SIGKILL');}catch(_){}return;}size+=part.length;chunks.push(Buffer.from(part));});
+  child.stderr.on('data',part=>{stderrSize+=part.length;if(stderrSize>4096){expired=true;try{child.kill('SIGKILL');}catch(_){}}});
+  child.on('error',()=>finish('other'));child.on('close',(code,signal)=>finish(expired?'timeout':signal?'signal':code===0?'ok':Number.isInteger(code)?'nonzero':'other'));
+ }catch(_){finish('other');}
+});}
 function processStart(pid){
  try{const raw=fs.readFileSync('/proc/'+pid+'/stat','utf8'),end=raw.lastIndexOf(') ');if(end<0)throw Error('process');const value=raw.slice(end+2).split(' ')[19];if(!/^[0-9]{1,20}(?![\s\S])/.test(value))throw Error('process');return BigInt(value);}
  catch(error){if(error.code==='ENOENT')return undefined;throw error;}
@@ -46,6 +62,7 @@ async function stopChild(child){
   backend=https.createServer({key:privateInput.backend_key,cert:privateInput.backend_cert,ca,requestCert:true,rejectUnauthorized:true},(req,res)=>{req.resume();req.on('end',()=>{res.writeHead(200);res.end('ok');});});
   ingress=https.createServer({key:privateInput.ingress_key,cert:privateInput.ingress_cert,ca,requestCert:true,rejectUnauthorized:true},(req,res)=>{let size=0,chunks=[];req.on('data',part=>{size+=part.length;if(size>65536)req.destroy();else chunks.push(part);});req.on('end',()=>{try{const raw=Buffer.concat(chunks,size),batch=JSON.parse(raw),digest=crypto.createHash('sha256').update('apicontour/causal-events/1\n').update(raw).digest('hex');if(!Array.isArray(batch.events)||batch.runtime_id!==d.runtime)throw Error('batch');rootSeen ||= batch.events.some(x=>x.kind==='root');if(!firstId){firstId=batch.batch_id;firstDigest=digest;res.destroy();return;}if(batch.batch_id===firstId&&digest===firstDigest)duplicate=true;const result=JSON.stringify({batch_id:batch.batch_id,runtime_id:d.runtime,session_epoch:1,batch_digest:digest,receipt_id:'00000000-0000-4000-8000-000000000001',accepted_at:'2026-11-12T00:00:00Z',status:duplicate?'duplicate':'accepted'});res.writeHead(200,{'content-type':'application/json'});res.end(result);}catch(_){res.destroy();}});});
   diag.stage='listeners';await listen(backend,9443);await listen(ingress,8443);
+  diag.stage='preflight';diag.probe=await runPreflight(manifest.env);
   diag.stage='proxy';proxy=spawn('/usr/local/bin/node',['/adapter/receiver-integration/private-launch-proxy-504.js'],{env:manifest.env,stdio:['pipe','pipe','ignore']});
   let ready=false,hello=false,spawned=false,frameFailed=false,resolveReady,rejectReady,counter=0n;const helloToken=crypto.randomBytes(32);const readiness=new Promise((resolve,reject)=>{resolveReady=resolve;rejectReady=reject;});proxy.on('error',()=>rejectReady(Error('proxy')));proxy.on('exit',(code,signal)=>{diag.proxy=signal?'signal':code===0?'zero':Number.isInteger(code)?'nonzero':'other';if(!ready)rejectReady(Error('proxy'));});
   proxy.stdout.on('data',part=>{try{if(!Buffer.isBuffer(part)||part.length>16433-pending.length)throw Error('frame');pending=Buffer.concat([pending,part]);while(pending.length>=9){if(pending.subarray(0,4).toString()!=='CBP2')throw Error('frame');const n=pending.readUInt32BE(5);if(n>16424)throw Error('frame');if(pending.length<9+n)break;const kind=pending[4],body=Buffer.from(pending.subarray(9,9+n)),old=pending;pending=Buffer.from(old.subarray(9+n));old.fill(0);

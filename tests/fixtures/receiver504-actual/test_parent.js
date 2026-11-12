@@ -29,10 +29,35 @@ function diagnostic(){
  const section=source.slice(source.indexOf('const STAGES='),source.indexOf('function readPrivate()'));
  const api=vm.runInNewContext(section+'\n({diag,diagnostic})',{Set,Number,Math});
  api.diag.stage='metadata';api.diag.hello=true;api.diag.spawned=true;api.diag.refresh=123;api.diag.proxy='nonzero';
- assert.equal(api.diagnostic(),'FAIL phase=metadata hello=1 spawned=1 ready=0 refresh=16 proxy=nonzero');
+ assert.equal(api.diagnostic(),'FAIL phase=metadata hello=1 spawned=1 ready=0 refresh=16 proxy=nonzero preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown');
  api.diag.failure='private-path-secret';api.diag.stage='unknown-secret';api.diag.proxy='private-error';api.diag.refresh=Infinity;api.diag.hello='private';
- const value=api.diagnostic();assert.equal(value,'FAIL phase=input hello=0 spawned=1 ready=0 refresh=0 proxy=other');assert(!value.includes('private'));
+ const value=api.diagnostic();assert.equal(value,'FAIL phase=input hello=0 spawned=1 ready=0 refresh=0 proxy=other preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown');assert(!value.includes('private'));
  api.diag.failure='request';api.diag.stage='cleanup';assert(api.diagnostic().includes('phase=request'));
+}
+async function preflight(mode){
+ let child,args,options;const timers=[];function spawn(...values){[args,options]=[values[1],values[2]];child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};return child;}
+ const section=source.slice(source.indexOf('function runPreflight('),source.indexOf('function processStart('));
+ const run=vm.runInNewContext(section+'\nrunPreflight',{spawn,Buffer,JSON,Object,Number,Promise,Error,setTimeout(fn,ms){const t={fn,ms};timers.push(t);return t;},clearTimeout(){}});
+ const result=run({synthetic:'environment'});assert.deepEqual(Array.from(args),['/work/tests/fixtures/receiver504-actual/proxy-preflight.js']);assert.deepEqual(Array.from(options.stdio),['pipe','pipe','pipe']);
+ if(mode==='ok')child.stdout.emit('data',Buffer.from(JSON.stringify({env_keys:true,exec_path:true,exec_argv:true,pipe_tty:true,argv_probe:true,bootstrap:'ok'})));
+ if(mode==='bad')child.stdout.emit('data',Buffer.from('{"secret":"do-not-copy"}'));
+ child.emit('close',0,null);const value=await result;assert.equal(value.state,mode==='ok'?'ok':'other');assert(!JSON.stringify(value).includes('secret'));
+}
+async function preflightFailure(mode){
+ let child,kills=0;const timers=[];function spawn(){child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.kill=signal=>{assert.equal(signal,'SIGKILL');kills++;};return child;}
+ const section=source.slice(source.indexOf('function runPreflight('),source.indexOf('function processStart('));
+ const run=vm.runInNewContext(section+'\nrunPreflight',{spawn,Buffer,JSON,Object,Number,Promise,Error,setTimeout(fn,ms){const t={fn,ms,cleared:false};timers.push(t);return t;},clearTimeout(t){if(t)t.cleared=true;}});
+ let settled=false,continued=false;const result=run({}).then(value=>{settled=true;continued=true;return value;},error=>{settled=true;throw error;});
+ assert.equal(timers[0].ms,3000);
+ if(mode==='stdout')child.stdout.emit('data',Buffer.alloc(513,65));
+ if(mode==='stderr')child.stderr.emit('data',Buffer.alloc(4097,65));
+ if(mode==='timeout'||mode==='missing-close')timers[0].fn();
+ assert.equal(kills,1);await Promise.resolve();assert.equal(settled,false);
+ if(mode==='missing-close'){
+  const watchdog=timers.find(x=>x.ms===1000);assert(watchdog);watchdog.fn();await assert.rejects(result);assert.equal(continued,false);
+ }else{
+  child.emit('close',null,'SIGKILL');const value=await result;assert.equal(value.state,'timeout');assert(!JSON.stringify(value).includes('A'));assert(!JSON.stringify(value).includes('PASS'));assert.equal(continued,true);
+ }
 }
 async function tail(failure){
  const start=source.lastIndexOf(' }catch(error){diag.failure=diag.stage;throw error;}finally{\n  clearTimeout(timeout)');assert(start>0);const tail=source.slice(start);
@@ -41,4 +66,4 @@ async function tail(failure){
  vm.runInNewContext(program,context);await new Promise(resolve=>setImmediate(resolve));
  assert.equal(labels.filter(x=>x.startsWith('PASS')).length,failure?0:1);if(failure)assert.equal(context.process.exitCode,1);
 }
-(async()=>{diagnostic();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
+(async()=>{diagnostic();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await preflight('ok');await preflight('bad');for(const mode of ['stdout','stderr','timeout','missing-close'])await preflightFailure(mode);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});

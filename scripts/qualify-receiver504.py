@@ -211,7 +211,8 @@ def material_snapshot(material):
 
 def mount_map(source,material):
     source=Path(source);material=Path(material)
-    result={'/work/tests/fixtures/receiver504-actual/parent.js':str(source/'tests/fixtures/receiver504-actual/parent.js'),
+    result={'/work/tests/fixtures/receiver504-actual/proxy-preflight.js':str(source/'tests/fixtures/receiver504-actual/proxy-preflight.js'),
+            '/work/tests/fixtures/receiver504-actual/parent.js':str(source/'tests/fixtures/receiver504-actual/parent.js'),
             '/work/tests/fixtures/receiver504-bootstrap/vector.json':str(source/'tests/fixtures/receiver504-bootstrap/vector.json'),
             '/work/docs/specification/fixtures/causal-evidence-v1.json':str(source/'docs/specification/fixtures/causal-evidence-v1.json'),
             '/data/flows.json':str(source/'collectors/nodered/live-integration/flows.json'),
@@ -364,7 +365,7 @@ def qualify(args, shared, run, owner, progress=None):
     source_receipt = receipt(raw)
     phase('source')
     head, sources = shared.snapshot(run,root)
-    fixtures = ('tests/fixtures/receiver504-actual/parent.js','tests/fixtures/receiver504-actual/exec_input.py')
+    fixtures = ('tests/fixtures/receiver504-actual/parent.js','tests/fixtures/receiver504-actual/proxy-preflight.js','tests/fixtures/receiver504-actual/exec_input.py')
     if any(name not in sources or not HEX.fullmatch(sources[name]) for name in fixtures): fail('fixture source missing')
     snapshot_hash = hashlib.sha256(json.dumps(sources,sort_keys=True,separators=(',',':')).encode('ascii')).hexdigest()
     record(owner,'source-before.json',{'head':head,'source_sha256':snapshot_hash,'files':sources})
