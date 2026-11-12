@@ -1072,8 +1072,28 @@ fn drive(
         return (Err(ProcessError::CleanupUnknown), false);
     }
     // SAFETY: signal zero only probes the already-owned group; it sends no signal.
-    let absent = unsafe { libc::kill(-pid, 0) } != 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    let probe_result = unsafe { libc::kill(-pid, 0) };
+    let probe_errno = if probe_result != 0 {
+        std::io::Error::last_os_error().raw_os_error()
+    } else {
+        None
+    };
+    let absent = probe_result != 0 && probe_errno == Some(libc::ESRCH);
+    #[cfg(test)]
+    if !absent || !(signaled || exited) {
+        // Restrict diagnostic output to predicates and allowlisted errno values.
+        let safe_errno = |value| match value {
+            Some(libc::ESRCH) => "ESRCH",
+            Some(libc::EPERM) => "EPERM",
+            None => "none",
+            _ => "other",
+        };
+        eprintln!(
+            "cleanup diagnostic: owned={owned} already_absent={already_absent} signaled={signaled} exited={exited} absent={absent} kill_errno={} probe_errno={}",
+            safe_errno(kill_errno),
+            safe_errno(probe_errno)
+        );
+    }
     // An already-observed exited leader plus post-reap ESRCH also proves
     // group absence on Darwin, where killing a zombie-only group returns EPERM.
     let clean = absent && (signaled || exited);
