@@ -853,7 +853,10 @@ def main():
         raise BaseExceptionGroup('qualification and cleanup', ([primary] if primary else []) + failures)
     if primary:
         raise primary
-    print('PASS: factory startup and incoming listener mTLS component; outbound completion, exporter ACK and wire graph unqualified')
+    if exporter_inbox:
+        print('PASS: authenticated producer inbox component; bad receipt tested offline; observer, receiver and graph unqualified')
+    else:
+        print('PASS: factory startup and incoming listener mTLS component; outbound completion, exporter ACK and wire graph unqualified')
 
 
 if __name__ == '__main__':
