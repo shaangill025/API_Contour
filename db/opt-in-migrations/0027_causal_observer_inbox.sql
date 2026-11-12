@@ -85,7 +85,7 @@ END $$;
 CREATE FUNCTION contour.accept_causal_observer(raw bytea, proof contour.verified_observer_claim) RETURNS bytea
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE j jsonb; b jsonb; x contour.causal_session_claim; t uuid; gwid uuid; gen text; handle text; prev text;
- collector uuid; rec uuid; bid uuid; runtime uuid; ep numeric; attempt text; md text; leaf bytea; col uuid;
+ collector uuid; rec uuid; bid uuid; runtime uuid; ep numeric; attempt_value text; md text; leaf bytea; col uuid;
  gateway contour.causal_gateway_enrollments; gateway2 contour.causal_gateway_enrollments;
  binding contour.causal_runtime_bindings; marker contour.causal_marker_bindings; w contour.observation_windows;
  origin contour.origin_proofs; verified record; batch_payload bytea; record_json jsonb; old contour.causal_observer_inbox;
@@ -95,12 +95,12 @@ BEGIN
  j:=contour.observer_wire(raw); b:=j->'binding'; x:=proof.producer_claim;
  t:=(b->>'tenant_id')::uuid; gwid:=(b->>'gateway_id')::uuid; gen:=b->>'gateway_generation'; handle:=b->>'delivery_handle'; prev:=b->>'retry_of';
  collector:=(b->>'collector_id')::uuid; rec:=(b->>'record_id')::uuid; bid:=(j->>'batch_id')::uuid;
- runtime:=(b->>'producer_runtime_id')::uuid; ep:=(b->>'producer_session_epoch')::numeric; attempt:=b->>'producer_attempt_id'; md:=b->>'marker_digest';
+ runtime:=(b->>'producer_runtime_id')::uuid; ep:=(b->>'producer_session_epoch')::numeric; attempt_value:=b->>'producer_attempt_id'; md:=b->>'marker_digest';
  PERFORM contour.begin_origin_operation(t);
  IF x IS NULL OR proof.gateway_peer_leaf IS NULL OR octet_length(proof.gateway_peer_leaf)<>32 OR proof.marker_public IS NULL OR octet_length(proof.marker_public)<>32
  OR proof.marker_generation IS NULL OR octet_length(proof.marker_generation)<>32 OR proof.marker_wire_digest IS NULL OR octet_length(proof.marker_wire_digest)<>32
  OR proof.marker_root IS NULL OR proof.marker_root COLLATE "C" !~ '^[0-9a-f]{32}$' OR proof.marker_activity IS NULL OR proof.marker_activity COLLATE "C" !~ '^[0-9a-f]{32}$'
- OR proof.marker_attempt IS DISTINCT FROM attempt OR encode(proof.marker_wire_digest,'hex') IS DISTINCT FROM md
+ OR proof.marker_attempt IS DISTINCT FROM attempt_value OR encode(proof.marker_wire_digest,'hex') IS DISTINCT FROM md
  OR sha256(convert_to(E'apicontour/causal-marker-wire/1\n'||(j->>'signed_marker'),'UTF8')) IS DISTINCT FROM proof.marker_wire_digest
  OR x.tenant_id IS DISTINCT FROM t OR x.runtime_id IS DISTINCT FROM runtime OR proof.producer_epoch IS DISTINCT FROM ep OR prev=handle
  THEN RAISE EXCEPTION 'observer authority unavailable' USING ERRCODE='23514'; END IF;
@@ -142,14 +142,14 @@ BEGIN
  OR (verified.origin_project_id,verified.origin_service_id,verified.origin_environment_id,verified.origin_deployment_id,verified.instance_id,verified.lifecycle_id,verified.credential_id)
  IS DISTINCT FROM (origin.origin_project_id,origin.origin_service_id,origin.origin_environment_id,origin.origin_deployment_id,origin.instance_id,origin.lifecycle_id,origin.credential_id)
  THEN RAISE EXCEPTION 'observer origin unavailable' USING ERRCODE='23514'; END IF;
- IF EXISTS(SELECT 1 FROM contour.causal_inbox_events e WHERE (e.tenant_id,e.runtime_id,e.session_epoch,e.kind,e.attempt)=(t,runtime,ep,'attempt',attempt) AND (e.root,e.activity,e.marker_digest) IS DISTINCT FROM (proof.marker_root,proof.marker_activity,md))
+ IF EXISTS(SELECT 1 FROM contour.causal_inbox_events e WHERE (e.tenant_id,e.runtime_id,e.session_epoch,e.kind,e.attempt)=(t,runtime,ep,'attempt',attempt_value) AND (e.root,e.activity,e.marker_digest) IS DISTINCT FROM (proof.marker_root,proof.marker_activity,md))
  THEN RAISE EXCEPTION 'observer attempt unavailable' USING ERRCODE='23514'; END IF;
  SELECT * INTO old FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.delivery_handle)=(t,gwid,gen,handle);
  IF FOUND THEN
-  IF old.canonical_fact IS DISTINCT FROM raw OR (old.runtime_id,old.session_epoch,old.attempt,old.collector_id,old.batch_id,old.record_id,old.retry_of) IS DISTINCT FROM (runtime,ep,attempt,collector,bid,rec,prev) OR old.marker_root IS DISTINCT FROM proof.marker_root OR old.marker_activity IS DISTINCT FROM proof.marker_activity OR old.marker_public IS DISTINCT FROM proof.marker_public OR initial_at>=old.expires_at
+  IF old.canonical_fact IS DISTINCT FROM raw OR (old.runtime_id,old.session_epoch,old.attempt,old.collector_id,old.batch_id,old.record_id,old.retry_of) IS DISTINCT FROM (runtime,ep,attempt_value,collector,bid,rec,prev) OR old.marker_root IS DISTINCT FROM proof.marker_root OR old.marker_activity IS DISTINCT FROM proof.marker_activity OR old.marker_public IS DISTINCT FROM proof.marker_public OR initial_at>=old.expires_at
   THEN RAISE EXCEPTION 'observer unavailable' USING ERRCODE='23505'; END IF;
-  SELECT * INTO STRICT reservation FROM contour.causal_observer_attempt_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch,r.attempt)=(t,runtime,ep,attempt);
-  meta:=convert_to(contour.causal_json_canonical(jsonb_build_object('tenant_id',t,'runtime_id',runtime,'session_epoch',ep::text,'attempt',attempt,'gateway_id',gwid,'gateway_generation',gen,'collector_id',collector,'batch_id',bid,'record_id',rec,'marker_digest',md,'marker_root',proof.marker_root,'marker_activity',proof.marker_activity)),'UTF8');
+  SELECT * INTO STRICT reservation FROM contour.causal_observer_attempt_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch,r.attempt)=(t,runtime,ep,attempt_value);
+  meta:=convert_to(contour.causal_json_canonical(jsonb_build_object('tenant_id',t,'runtime_id',runtime,'session_epoch',ep::text,'attempt',attempt_value,'gateway_id',gwid,'gateway_generation',gen,'collector_id',collector,'batch_id',bid,'record_id',rec,'marker_digest',md,'marker_root',proof.marker_root,'marker_activity',proof.marker_activity)),'UTF8');
   IF (reservation.gateway_id,reservation.gateway_generation,reservation.collector_id,reservation.batch_id,reservation.record_id,reservation.marker_digest,reservation.marker_root,reservation.marker_activity) IS DISTINCT FROM (gwid,gen,collector,bid,rec,md,proof.marker_root,proof.marker_activity)
   OR reservation.metadata IS DISTINCT FROM meta OR reservation.charged_bytes<>octet_length(meta)+256
   OR NOT EXISTS(SELECT 1 FROM contour.causal_observer_epoch_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch,r.charged_bytes)=(t,runtime,ep,1024))
@@ -160,18 +160,18 @@ BEGIN
   THEN RAISE EXCEPTION 'observer unavailable' USING ERRCODE='23514'; END IF;
   stored_receipt:=old.receipt; receipt_cutoff:=old.expires_at;
  ELSE
-  meta:=convert_to(contour.causal_json_canonical(jsonb_build_object('tenant_id',t,'runtime_id',runtime,'session_epoch',ep::text,'attempt',attempt,'gateway_id',gwid,'gateway_generation',gen,'collector_id',collector,'batch_id',bid,'record_id',rec,'marker_digest',md,'marker_root',proof.marker_root,'marker_activity',proof.marker_activity)),'UTF8');
-  SELECT * INTO reservation FROM contour.causal_observer_attempt_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch,r.attempt)=(t,runtime,ep,attempt);
+  meta:=convert_to(contour.causal_json_canonical(jsonb_build_object('tenant_id',t,'runtime_id',runtime,'session_epoch',ep::text,'attempt',attempt_value,'gateway_id',gwid,'gateway_generation',gen,'collector_id',collector,'batch_id',bid,'record_id',rec,'marker_digest',md,'marker_root',proof.marker_root,'marker_activity',proof.marker_activity)),'UTF8');
+  SELECT * INTO reservation FROM contour.causal_observer_attempt_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch,r.attempt)=(t,runtime,ep,attempt_value);
   IF FOUND THEN
    IF (reservation.gateway_id,reservation.gateway_generation,reservation.collector_id,reservation.batch_id,reservation.record_id,reservation.marker_digest,reservation.marker_root,reservation.marker_activity) IS DISTINCT FROM (gwid,gen,collector,bid,rec,md,proof.marker_root,proof.marker_activity) OR reservation.metadata IS DISTINCT FROM meta OR reservation.charged_bytes<>octet_length(meta)+256
    THEN RAISE EXCEPTION 'observer unavailable' USING ERRCODE='23505'; END IF;
   ELSE
    extra:=octet_length(meta)+256;
   END IF;
-  IF prev IS NULL AND EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.runtime_id,q.session_epoch,q.attempt)=(t,runtime,ep,attempt) AND q.retry_of IS NULL) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
+  IF prev IS NULL AND EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.runtime_id,q.session_epoch,q.attempt)=(t,runtime,ep,attempt_value) AND q.retry_of IS NULL) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
   IF prev IS NOT NULL AND EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.retry_of)=(t,gwid,gen,prev)) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23505'; END IF;
-  IF prev IS NOT NULL AND EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.delivery_handle)=(t,gwid,gen,prev) AND (q.runtime_id,q.session_epoch,q.attempt,q.collector_id,q.batch_id,q.record_id) IS DISTINCT FROM (runtime,ep,attempt,collector,bid,rec)) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
-  IF EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.retry_of)=(t,gwid,gen,handle) AND (q.runtime_id,q.session_epoch,q.attempt,q.collector_id,q.batch_id,q.record_id) IS DISTINCT FROM (runtime,ep,attempt,collector,bid,rec)) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
+  IF prev IS NOT NULL AND EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.delivery_handle)=(t,gwid,gen,prev) AND (q.runtime_id,q.session_epoch,q.attempt,q.collector_id,q.batch_id,q.record_id) IS DISTINCT FROM (runtime,ep,attempt_value,collector,bid,rec)) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
+  IF EXISTS(SELECT 1 FROM contour.causal_observer_inbox q WHERE (q.tenant_id,q.gateway_id,q.gateway_generation,q.retry_of)=(t,gwid,gen,handle) AND (q.runtime_id,q.session_epoch,q.attempt,q.collector_id,q.batch_id,q.record_id) IS DISTINCT FROM (runtime,ep,attempt_value,collector,bid,rec)) THEN RAISE EXCEPTION 'observer retry unavailable' USING ERRCODE='23514'; END IF;
   -- At most 64 stored deliveries in any connected retry chain. Count both
   -- sides when a late predecessor joins existing fragments; never traverse
   -- more than 64 rows on either side, including in corrupt cyclic state.
@@ -190,9 +190,9 @@ BEGIN
   charge:=octet_length(raw)+octet_length(stored_receipt)+512+extra;
   IF NOT EXISTS(SELECT 1 FROM contour.causal_observer_epoch_reservations r WHERE (r.tenant_id,r.runtime_id,r.session_epoch)=(t,runtime,ep)) THEN charge:=charge+1024; END IF;
   IF charge>1073741824-used THEN RAISE EXCEPTION 'origin logical quota exhausted' USING ERRCODE='54000',CONSTRAINT='origin_logical_quota_exhausted'; END IF;
-  IF extra>0 THEN INSERT INTO contour.causal_observer_attempt_reservations VALUES(t,runtime,ep,attempt,gwid,gen,collector,bid,rec,md,proof.marker_root,proof.marker_activity,meta,extra); END IF;
+  IF extra>0 THEN INSERT INTO contour.causal_observer_attempt_reservations VALUES(t,runtime,ep,attempt_value,gwid,gen,collector,bid,rec,md,proof.marker_root,proof.marker_activity,meta,extra); END IF;
   INSERT INTO contour.causal_observer_epoch_reservations VALUES(t,runtime,ep,1024) ON CONFLICT DO NOTHING;
-  INSERT INTO contour.causal_observer_inbox VALUES(t,gwid,gen,handle,runtime,ep,attempt,collector,bid,rec,prev,raw,fact_hash,proof.marker_root,proof.marker_activity,proof.marker_public,origin.proof_id,receipt_id,stored_receipt,initial_at,initial_at+interval '24 hours',octet_length(raw)+octet_length(stored_receipt)+512);
+  INSERT INTO contour.causal_observer_inbox VALUES(t,gwid,gen,handle,runtime,ep,attempt_value,collector,bid,rec,prev,raw,fact_hash,proof.marker_root,proof.marker_activity,proof.marker_public,origin.proof_id,receipt_id,stored_receipt,initial_at,initial_at+interval '24 hours',octet_length(raw)+octet_length(stored_receipt)+512);
   UPDATE contour.origin_logical_usage SET used_bytes=used+charge WHERE tenant_id=t;
   receipt_cutoff:=initial_at+interval '24 hours';
  END IF;
