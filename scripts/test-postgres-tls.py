@@ -48,6 +48,43 @@ def bounded_git(args,limit):
         process.stdout.close();process.stderr.close()
 
 
+def runtime_source_snapshot():
+    """Bind all tracked and nonignored source, including uncommitted task files."""
+    head = bounded_git(['rev-parse', 'HEAD'], 128).decode('ascii').strip()
+    if len(head) != 40 or any(c not in '0123456789abcdef' for c in head):
+        raise ValueError('fixture source head invalid')
+    names = bounded_git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], 16_777_216).split(b'\0')
+    for optional in ('.cargo/config', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml'):
+        if (ROOT/optional).exists() and optional.encode() not in names:
+            names.append(optional.encode())
+    result = {}
+    for raw in names:
+        if not raw: continue
+        name = raw.decode('utf-8')
+        path = ROOT / name
+        if name in result or Path(name).is_absolute() or '..' in Path(name).parts:
+            raise ValueError('fixture source path invalid')
+        if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
+            raise ValueError('fixture source unavailable')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > 134_217_728:
+                raise ValueError('fixture source size invalid')
+            digest = hashlib.sha256()
+            with os.fdopen(fd, 'rb', closefd=False) as source:
+                for chunk in iter(lambda: source.read(1_048_576), b''):
+                    digest.update(chunk)
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                raise ValueError('fixture source changed during hashing')
+            result[name] = digest.hexdigest()
+        finally:
+            os.close(fd)
+    if not result: raise ValueError('fixture source empty')
+    return head, result
+
+
 def checked_history_loader():
     """Check clean source and exact committed bytes before executing fixture code."""
     name='scripts/test-human-observation-history.py'; path=ROOT/name
@@ -81,6 +118,9 @@ def fixture_environment(password, target, sensor_image=None):
     environment.pop('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', None)
     environment.pop('CONTOUR_ORIGIN_ADMISSION_FIXTURE', None)
     environment.pop('CONTOUR_TLS_DISCOVERY_MATRIX', None)
+    environment.pop('CONTOUR_RUNTIME_CAPTURE_FIXTURE', None)
+    environment.pop('CONTOUR_RUNTIME_CAPTURE_PROBE', None)
+    environment.pop('CONTOUR_RUNTIME_POSTGRES_PORT', None)
     if sensor_image is not None:
         environment['CONTOUR_ORIGIN_SENSOR_IMAGE'] = sensor_image
     return environment
@@ -188,7 +228,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     admission = flags == ['--origin-admission-only']
     replacement = flags == ['--origin-replacement-only'] or admission
@@ -197,13 +237,15 @@ def main():
     if origin_sensor:
         sys.dont_write_bytecode = True
     human_history = flags == ['--human-observation-history']
-    if human_history: sys.dont_write_bytecode = True
+    runtime_capture = flags == ['--runtime-capture']
+    supervised = human_history or runtime_capture
+    if supervised: sys.dont_write_bytecode = True
     human_origin = flags == ['--human-origin'] or human_history
-    authority_mode = '--authority' in flags or origin_sensor or human_origin
-    history_fixture = checked_history_loader() if human_history else None
-    history_source = history_fixture['source_snapshot']() if human_history else None
+    authority_mode = '--authority' in flags or origin_sensor or human_origin or runtime_capture
+    history_fixture = checked_history_loader() if human_history else (runpy.run_path(str(ROOT/'scripts/test-human-observation-history.py')) if runtime_capture else None)
+    history_source = history_fixture['source_snapshot']() if human_history else (runtime_source_snapshot() if runtime_capture else None)
     fixture_image = None
-    if human_history:
+    if supervised:
         fixture_directory=history_fixture['OwnedFixtureDirectory']()
         target=fixture_directory.path/'cargo-target'
         fixture_directory.intent('target',{'version':1,'path':str(target)})
@@ -214,12 +256,12 @@ def main():
         if not shutil.which(tool):
             raise RuntimeError("required fixture tool missing")
     run(["docker", "image", "inspect", IMAGE])  # Never download images here.
-    if human_history:
+    if supervised:
         initial_metadata=json.loads(run(['cargo','metadata','--format-version','1','--no-deps','--offline']))
         if initial_metadata.get('target_directory')!=str(target): raise ValueError('fixture target mismatch')
         package_ids={item['name']:item['id'] for item in initial_metadata['packages']}
     def build(argv,timeout=30):
-        if not human_history: return run(argv,timeout=timeout)
+        if not supervised: return run(argv,timeout=timeout)
         expected=[argv[i+1] for i,item in enumerate(argv[:-1]) if item=='--example']
         package=argv[argv.index('-p')+1]
         if package not in package_ids: raise ValueError('fixture package unavailable')
@@ -228,6 +270,8 @@ def main():
         selected=history_fixture['select_artifacts'](output,expected,package_ids[package],target)
         history_artifacts.update(selected)
     build(["cargo", "build", "-p", "contour-postgres", "--example", "tls_probe", "--locked", "--offline"], timeout=180)
+    if runtime_capture:
+        build(["cargo", "build", "-p", "contour-ingress", "--example", "runtime_capture_probe", "--locked", "--offline"], timeout=180)
     if origin_sensor:
         # Separate opt-in qualification: never add image builds or Node-RED to
         # the existing authority check's 240-second command budget.
@@ -269,18 +313,22 @@ def main():
         build(["cargo", "build", "-p", "contour-delivery", "--example", "delivery_probe", "--example", "owner_probe", "--example", "pool_probe", "--locked", "--offline"], timeout=180)
         build(["cargo", "build", "-p", "contour-postgres", "--example", "catalog_probe", "--locked", "--offline"], timeout=180)
     metadata = json.loads(run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]))
-    if human_history:
+    if supervised:
         if metadata['target_directory']!=str(target): raise ValueError('fixture cargo target changed')
         sys.addaudithook(history_fixture['artifact_guard'](target,history_artifacts))
+        if runtime_capture and runtime_source_snapshot()!=history_source: raise ValueError('fixture source changed during build')
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = volume = None
     servers = []
     os.umask(0o077)
-    if not human_history: fixture_directory = tempfile.TemporaryDirectory(prefix="contour-tls-")
+    if not supervised: fixture_directory = tempfile.TemporaryDirectory(prefix="contour-tls-")
     with fixture_directory as folder:
         directory = Path(folder)
         password = secrets.token_hex(24)
         environment = fixture_environment(password, metadata['target_directory'], fixture_image)
+        if runtime_capture:
+            environment['CONTOUR_RUNTIME_CAPTURE_FIXTURE'] = '1'
+            environment['CONTOUR_RUNTIME_CAPTURE_PROBE'] = str(target/'debug/examples/runtime_capture_probe')
         if matrix: environment['CONTOUR_TLS_DISCOVERY_MATRIX'] = '1'
         if replacement: environment['CONTOUR_ORIGIN_REPLACEMENT_FIXTURE'] = '1'
         if admission: environment['CONTOUR_ORIGIN_ADMISSION_FIXTURE'] = '1'
@@ -288,7 +336,7 @@ def main():
             environment['CONTOUR_HUMAN_ORIGIN_FIXTURE'] = '1'
         if human_history:
             environment['CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE'] = '1'
-        fixture_owner=secrets.token_hex(16) if human_history else None
+        fixture_owner=secrets.token_hex(16) if supervised else None
         history_uncertain=False; history_image_id=None; network_name=None; history_started=None
         try:
             (directory/"request.cnf").write_text("[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
@@ -303,15 +351,15 @@ def main():
             run(["openssl", "x509", "-req", "-in", str(directory/"server.csr"), "-CA", str(directory/"ca.crt"),
                  "-CAkey", str(directory/"ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(directory/"extensions"), "-out", str(directory/"server.crt")])
             network_name="contour-tls-"+secrets.token_hex(6)
-            if human_history:
+            if supervised:
                 history_image_id=json.loads(run(['docker','image','inspect',IMAGE]))[0]['Id']
                 if not history_image_id.startswith('sha256:') or len(history_image_id)!=71: raise ValueError('fixture image identity invalid')
                 fixture_directory.intent('network',{'version':1,'name':network_name,'owner':fixture_owner})
                 history_uncertain=True
-            network = run(["docker", "network", "create", *(['--internal'] if origin_sensor else []), *(['--label','org.apicontour.observation-owner='+fixture_owner] if human_history else []), "--driver", "bridge", "--opt",
+            network = run(["docker", "network", "create", *(['--internal'] if origin_sensor else []), *(['--label','org.apicontour.observation-owner='+fixture_owner] if supervised else []), "--driver", "bridge", "--opt",
                            "com.docker.network.bridge.enable_ip_masquerade=false", network_name])
             network_settings = json.loads(run(["docker", "network", "inspect", network]))[0]
-            if human_history:
+            if supervised:
                 if len(network)!=64 or any(c not in '0123456789abcdef' for c in network) or network_settings.get('Id')!=network or network_settings.get('Name')!=network_name or (network_settings.get('Labels') or {}).get('org.apicontour.observation-owner')!=fixture_owner or (network_settings.get('Containers') or {}): raise ValueError('fixture network identity uncertain')
                 history_uncertain=False
             if network_settings["Driver"] != "bridge" or network_settings["Options"].get("com.docker.network.bridge.enable_ip_masquerade") != "false":
@@ -321,30 +369,30 @@ def main():
             data_mount = ["--tmpfs", "/var/lib/postgresql/data:rw,nosuid,noexec,size=256m"]
             if authority_mode or "--https-only" in sys.argv or "--delivery-only" in sys.argv or "--refresh-only" in sys.argv or "--catalog-reader" in sys.argv or "--comparison-store" in sys.argv or "--service-import-store" in sys.argv or "--review-store" in sys.argv:
                 volume = "contour-recovery-" + secrets.token_hex(12)
-                if human_history:
+                if supervised:
                     fixture_directory.intent('volume',{'version':1,'name':volume,'owner':fixture_owner}); history_uncertain=True
-                created_volume=run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, *(['--label','org.apicontour.observation-owner='+fixture_owner] if human_history else []), volume])
-                if human_history:
+                created_volume=run(["docker", "volume", "create", "--label", "contour.fixture=" + volume, *(['--label','org.apicontour.observation-owner='+fixture_owner] if supervised else []), volume])
+                if supervised:
                     obj=json.loads(run(['docker','volume','inspect',volume]))[0]
                     if created_volume!=volume or obj.get('Name')!=volume or (obj.get('Labels') or {}).get('org.apicontour.observation-owner')!=fixture_owner: raise ValueError('fixture volume identity uncertain')
                     history_uncertain=False
                 data_mount = ["--mount", "type=volume,source=" + volume + ",target=/var/lib/postgresql/data"]
-            if not human_history: fixture_owner = secrets.token_hex(16)
-            if human_history:
+            if not supervised: fixture_owner = secrets.token_hex(16)
+            if supervised:
                 fixture_directory.intent('container',{'version':1,'owner':fixture_owner,'network':network,'volume':volume,'image_id':history_image_id}); history_uncertain=True
-            container = run(["docker", "create", *(['--init'] if human_history else []), "--label", "org.apicontour.fixture-owner="+fixture_owner, "--network", network,
+            container = run(["docker", "create", *(['--init'] if supervised else []), "--label", "org.apicontour.fixture-owner="+fixture_owner, "--network", network,
                              *([] if origin_sensor else ['--publish', '127.0.0.1::5432']),
                              "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
                              *data_mount,
                              "-e", "POSTGRES_DB=contour_fixture", "-e", "POSTGRES_PASSWORD="+password,
                              "-e", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256", IMAGE, "sh", "-c",
                              "chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key"])
-            if human_history:
+            if supervised:
                 obj=json.loads(run(['docker','inspect',container]))[0]
                 mounts=obj.get('Mounts') or []; selected=[m for m in mounts if m.get('Destination')=='/var/lib/postgresql/data']
                 if len(container)!=64 or any(c not in '0123456789abcdef' for c in container) or obj.get('Id')!=container or obj.get('Image')!=history_image_id or (obj.get('Config') or {}).get('Image')!=IMAGE or ((obj.get('Config') or {}).get('Labels') or {}).get('org.apicontour.fixture-owner')!=fixture_owner or (obj.get('HostConfig') or {}).get('Init') is not True or len(selected)!=1 or selected[0].get('Name')!=volume: raise ValueError('fixture container identity uncertain')
                 history_uncertain=False
-            if '--authority' in flags or human_history:
+            if '--authority' in flags or supervised:
                 environment['CONTOUR_FIXTURE_PSQL_OWNER'] = fixture_owner
             if volume:
                 mounts = json.loads(run(["docker", "inspect", container]))[0]["Mounts"]
@@ -353,9 +401,9 @@ def main():
                     raise AssertionError("recovery volume mount mismatch")
             for file in ["server.key", "server.crt"]:
                 run(["docker", "cp", str(directory/file), container+":/tmp/"+file])
-            if human_history: history_uncertain=True
+            if supervised: history_uncertain=True
             run(["docker", "start", container])
-            if human_history:
+            if supervised:
                 current=json.loads(run(['docker','inspect',container]))[0]
                 state=current.get('State') or {}; attached=(current.get('NetworkSettings') or {}).get('Networks') or {}
                 if current.get('Id')!=container or state.get('Running') is not True or not isinstance(state.get('StartedAt'),str) or state['StartedAt'].startswith('0001-') or len(attached)!=1 or next(iter(attached.values())).get('NetworkID')!=network: raise ValueError('fixture start identity uncertain')
@@ -368,7 +416,7 @@ def main():
                 if remaining <= 0:
                     raise TimeoutError("PostgreSQL TLS startup timed out")
                 try:
-                    readiness = ("""test "$(cat /proc/1/comm)" = docker-init && p=$(head -n 1 /var/lib/postgresql/data/postmaster.pid) && case "$p" in *[!0-9]*|'') exit 1;; esac && test "$p" -gt 1 && test "$(cat /proc/$p/comm)" = postgres && psql -XqAt -v ON_ERROR_STOP=1 -U postgres -d contour_fixture -c "SELECT current_database()='contour_fixture' AND current_setting('listen_addresses')='*' AND current_setting('ssl')='on';" | grep -qx t""" if human_history else 'test "$(cat /proc/1/comm)" = postgres && pg_isready -U postgres -d contour_fixture')
+                    readiness = ("""test "$(cat /proc/1/comm)" = docker-init && p=$(head -n 1 /var/lib/postgresql/data/postmaster.pid) && case "$p" in *[!0-9]*|'') exit 1;; esac && test "$p" -gt 1 && test "$(cat /proc/$p/comm)" = postgres && psql -XqAt -v ON_ERROR_STOP=1 -U postgres -d contour_fixture -c "SELECT current_database()='contour_fixture' AND current_setting('listen_addresses')='*' AND current_setting('ssl')='on';" | grep -qx t""" if supervised else 'test "$(cat /proc/1/comm)" = postgres && pg_isready -U postgres -d contour_fixture')
                     ready = subprocess.run(["docker", "exec", container, "sh", "-c", readiness],
                                            capture_output=True, timeout=min(5,remaining))
                 except subprocess.TimeoutExpired:
@@ -402,6 +450,13 @@ def main():
             if len(bindings) != 1 or bindings[0]["HostIp"] != "127.0.0.1":
                 raise AssertionError("fixture port is not loopback-only: " + repr(bindings))
             port = bindings[0]["HostPort"]
+
+            if runtime_capture:
+                environment['CONTOUR_RUNTIME_POSTGRES_PORT'] = port
+                runpy.run_path(str(ROOT/'scripts/test-postgres-authority.py'))['run_cases'](
+                    container,sql,probe,port,directory,environment,origin_sensor_only=True)
+                print('Runtime capture record checks passed; cleanup pending')
+                return
 
             def check(host, port, ca, mode, milliseconds=3000):
                 output = run([probe, host, str(port), str(directory/ca), str(milliseconds), mode], timeout=12, env=environment)
@@ -510,7 +565,7 @@ def main():
                     server.close()
                 except Exception as error:
                     cleanup_errors.append(error)
-            if human_history:
+            if supervised:
                 primary = sys.exception()
                 try:
                     if history_uncertain: raise RuntimeError('fixture creation outcome uncertain; resources retained')
@@ -518,7 +573,7 @@ def main():
                 except BaseException as error:
                     cleanup_errors.append(error)
                 try:
-                    if history_fixture['source_snapshot']()!=history_source: raise RuntimeError('fixture source changed')
+                    if (history_fixture['source_snapshot']() if human_history else runtime_source_snapshot())!=history_source: raise RuntimeError('fixture source changed')
                 except BaseException as error:
                     cleanup_errors.append(error)
                 if cleanup_errors:

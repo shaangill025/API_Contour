@@ -20,6 +20,7 @@ mod causal_permit;
 mod causal_service;
 pub mod gateway;
 mod pool;
+pub mod runtime_capture;
 mod service;
 #[cfg(unix)]
 pub use causal_launch_bound::{BoundLaunchError, BoundLaunchInputs, BoundTransfer};

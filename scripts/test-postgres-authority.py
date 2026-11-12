@@ -115,7 +115,9 @@ def _run_cases(container, sql, probe, port, directory, environment, https_only=F
         execute("CREATE ROLE contour_origin_ingress_test LOGIN PASSWORD '%s'; GRANT contour_origin_ingress TO contour_origin_ingress_test;" % environment['CONTOUR_FIXTURE_PASSWORD'])
         if environment.get('CONTOUR_TLS_DISCOVERY_MATRIX') == '1':
             execute("CREATE ROLE contour_catalog_tls LOGIN PASSWORD '%s'; GRANT contour_catalog_worker TO contour_catalog_tls;" % environment['CONTOUR_FIXTURE_PASSWORD'])
-        runpy.run_path(str(ROOT/'scripts/test-postgres-origin-sensor.py'))['run_cases'](
+        fixture = ('test-runtime-capture.py' if environment.get('CONTOUR_RUNTIME_CAPTURE_FIXTURE') == '1'
+                   else 'test-postgres-origin-sensor.py')
+        runpy.run_path(str(ROOT/'scripts'/fixture))['run_cases'](
             container,execute,setup,directory,environment)
         return
 
