@@ -386,7 +386,7 @@ class DriverTests(unittest.TestCase):
 
 
 class HistoricalSourceInventoryTests(unittest.TestCase):
-    def test_all_old_profiles_hash_25_without_applying_it(self):
+    def test_all_old_profiles_hash_25_and_26_without_applying_them(self):
         import hashlib
         root_repo=Path(__file__).resolve().parents[3]
         cases=(('bridge',19),('sessions',19),('inbox',20),('generation',22),
@@ -419,24 +419,30 @@ class HistoricalSourceInventoryTests(unittest.TestCase):
                         paths.append(root/'crates/contour-ingress/Cargo.toml')
                         for crate in ('contour-ingress','contour-delivery','contour-platform','contour-abi','contour-wasm'):
                             (root/'crates'/crate/'src').mkdir(parents=True,exist_ok=True)
+                paths.append(root/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql')
                 for path in paths:
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 bridge={'source_paths':lambda:[], 'digest_file':lambda path:hashlib.sha256(path.read_bytes()).hexdigest()}
                 with mock.patch.dict(g,patches):
                     def snapshot(): return fn(bridge) if name in ('permits','marker-bridge','live-profile') else fn()
-                    before=snapshot(); target=root/'db/opt-in-migrations/0025_historical_origin.sql'
-                    key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
-                    self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
-                    target.write_bytes(b'changed');self.assertNotEqual(before[key],snapshot()[key]);target.unlink()
+                    before=snapshot()
+                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql'):
+                        target=root/'db/opt-in-migrations'/filename
+                        key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
+                        self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
+                        target.write_bytes(b'changed');self.assertNotEqual(before[key],snapshot()[key]);target.unlink()
+                        with self.assertRaises(ValueError): snapshot()
+                        target.write_bytes(b'original');target.unlink();target.symlink_to(root/'elsewhere')
+                        with self.assertRaises(ValueError): snapshot()
+                        target.unlink();target.write_bytes(b'original')
+                    unexpected=root/'db/opt-in-migrations/0099_unexpected.sql';unexpected.write_bytes(b'x')
                     with self.assertRaises(ValueError): snapshot()
-                    target.write_bytes(b'original'); unexpected=target.parent/'0099_unexpected.sql';unexpected.write_bytes(b'x')
-                    with self.assertRaises(ValueError): snapshot()
-                    unexpected.unlink();target.unlink();target.symlink_to(root/'elsewhere')
-                    with self.assertRaises(ValueError): snapshot()
+
                 applied=module.get('OPT',module.get('OPT_INS'))
                 if name=='marker-binding': applied=module['GEN']['OPT_INS']+('0023_causal_marker_bindings',)
                 self.assertEqual([int(item[:4]) for item in applied],list(range(15,last+1)))
                 self.assertNotIn('0025_historical_origin',applied)
+                self.assertNotIn('0026_causal_evidence_enrollment',applied)
 
 
 if __name__=='__main__': unittest.main()
