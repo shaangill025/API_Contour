@@ -362,12 +362,29 @@ fn checked_path(path: &Path) -> Result<std::fs::Metadata, ProcessError> {
         return Err(ProcessError::Unsafe);
     }
     let m = std::fs::symlink_metadata(path).map_err(|_| ProcessError::Unsafe)?;
+    // libc's device, mode and link-count types differ on Linux and Darwin.
+    #[cfg(target_os = "linux")]
+    let (device, inode, mode, links) = (st.st_dev, st.st_ino, st.st_mode, st.st_nlink);
+    #[cfg(target_os = "macos")]
+    let (device, inode, mode, links) = (
+        st.st_dev as u64,
+        st.st_ino,
+        st.st_mode as u32,
+        st.st_nlink as u64,
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (device, inode, mode, links) = (
+        st.st_dev as u64,
+        st.st_ino as u64,
+        st.st_mode as u32,
+        st.st_nlink as u64,
+    );
     if m.file_type().is_symlink()
-        || m.dev() != st.st_dev as u64
-        || m.ino() != st.st_ino as u64
-        || m.mode() != st.st_mode as u32
+        || m.dev() != device
+        || m.ino() != inode
+        || m.mode() != mode
         || m.uid() != st.st_uid
-        || m.nlink() != st.st_nlink as u64
+        || m.nlink() != links
     {
         return Err(ProcessError::Unsafe);
     }
