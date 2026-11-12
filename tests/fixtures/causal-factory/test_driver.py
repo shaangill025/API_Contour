@@ -15,11 +15,16 @@ class DriverTests(unittest.TestCase):
         classify = DRIVER['probe_stage']
         source = DRIVER['EXAMPLE'].read_text()
         emitted = set(re.findall(r'(?:map_err\(\|_\|\s*|Err\()"([A-Za-z ]+)"', source))
+        bind_emitted = set(re.findall(r'=> "(bind_[a-z_]+)"', source))
+        self.assertEqual(bind_emitted, {stage for stage in DRIVER['PROBE_STAGES']
+                                        if stage.startswith('bind_')})
+        emitted.update(bind_emitted)
         self.assertTrue(emitted)
         self.assertLessEqual(emitted, DRIVER['PROBE_STAGES'])
         for stage in DRIVER['PROBE_STAGES']:
             self.assertEqual(classify(b'factory probe: ' + stage.encode('ascii') + b'\n'), stage)
-        for unknown in (b'factory probe: private-secret\n', b'factory probe: bind\nprivate-secret',
+        for unknown in (b'factory probe: private-secret\n', b'factory probe: bind_invalid\nprivate-secret',
+                        b'factory probe: bind_database_deadline: secret\n',
                         b'factory probe: bind', b'private-secret', b'x' * 10000,
                         b'factory probe: \xff\n', 'factory probe: bind\n'):
             self.assertIsNone(classify(unknown))

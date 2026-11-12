@@ -3,10 +3,12 @@
 //! does not prove exporter admission, causal wire propagation, or graph output.
 use contour_core::{CausalGrantKeys, PolicyKeys};
 use contour_ingress::{
-    CandidateSources, CausalIssueOwner, DockerPolicy, LaunchConfig, OwnerLabel, Prelaunch503,
+    BoundLaunchError, CandidateSources, CausalIssueOwner, CausalJournalError, DockerPolicy,
+    LaunchConfig, OwnerLabel, Prelaunch503,
 };
 use contour_postgres::{
-    CausalBinding, CausalIssue, CausalIssuer, CausalMarkerBinder, DatabaseSettings, TrustedCa,
+    CausalBinding, CausalError, CausalIssue, CausalIssuer, CausalMarkerBinder, DatabaseSettings,
+    TrustedCa,
 };
 use serde::Deserialize;
 use std::{
@@ -91,6 +93,35 @@ fn hex(value: &str) -> Result<[u8; 32], &'static str> {
 }
 fn public(path: &Path) -> Result<[u8; 32], &'static str> {
     read(path)?.try_into().map_err(|_| "public key")
+}
+fn bind_error(error: BoundLaunchError) -> &'static str {
+    match error {
+        BoundLaunchError::Invalid => "bind_invalid",
+        BoundLaunchError::Expired => "bind_expired",
+        BoundLaunchError::Transfer => "bind_transfer",
+        BoundLaunchError::Journal(error) => match error {
+            CausalJournalError::Io => "bind_journal_io",
+            CausalJournalError::Unsafe => "bind_journal_unsafe",
+            CausalJournalError::Busy => "bind_journal_busy",
+            CausalJournalError::Mismatch => "bind_journal_mismatch",
+            CausalJournalError::Corrupt => "bind_journal_corrupt",
+        },
+        BoundLaunchError::Database(error) => match error {
+            CausalError::Identity => "bind_database_identity",
+            CausalError::Signature => "bind_database_signature",
+            CausalError::Scope => "bind_database_scope",
+            CausalError::Expired => "bind_database_expired",
+            CausalError::InvalidBatch => "bind_database_invalid_batch",
+            CausalError::Conflict => "bind_database_conflict",
+            CausalError::Corrupt => "bind_database_corrupt",
+            CausalError::LogicalQuota => "bind_database_logical_quota",
+            CausalError::HistoryLimit => "bind_database_history_limit",
+            CausalError::Busy => "bind_database_busy",
+            CausalError::Database => "bind_database_database",
+            CausalError::Deadline => "bind_database_deadline",
+            CausalError::OutcomeUnknown => "bind_database_outcome_unknown",
+        },
+    }
 }
 async fn wait_cleanup(
     result: impl Fn() -> Option<bool>,
@@ -232,7 +263,7 @@ fn run() -> Result<(), &'static str> {
                     },
                 )
                 .await
-                .map_err(|_| "bind")?;
+                .map_err(bind_error)?;
             let cleanup = bound.local_cleanup();
             let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
             let mut work = Box::pin(bound.run(&mut issuer, &mut binder, ready_tx));
@@ -285,6 +316,89 @@ fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bind_errors_have_fixed_distinct_classes() {
+        let cases = [
+            (BoundLaunchError::Invalid, "bind_invalid"),
+            (BoundLaunchError::Expired, "bind_expired"),
+            (BoundLaunchError::Transfer, "bind_transfer"),
+            (
+                BoundLaunchError::Journal(CausalJournalError::Io),
+                "bind_journal_io",
+            ),
+            (
+                BoundLaunchError::Journal(CausalJournalError::Unsafe),
+                "bind_journal_unsafe",
+            ),
+            (
+                BoundLaunchError::Journal(CausalJournalError::Busy),
+                "bind_journal_busy",
+            ),
+            (
+                BoundLaunchError::Journal(CausalJournalError::Mismatch),
+                "bind_journal_mismatch",
+            ),
+            (
+                BoundLaunchError::Journal(CausalJournalError::Corrupt),
+                "bind_journal_corrupt",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Identity),
+                "bind_database_identity",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Signature),
+                "bind_database_signature",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Scope),
+                "bind_database_scope",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Expired),
+                "bind_database_expired",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::InvalidBatch),
+                "bind_database_invalid_batch",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Conflict),
+                "bind_database_conflict",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Corrupt),
+                "bind_database_corrupt",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::LogicalQuota),
+                "bind_database_logical_quota",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::HistoryLimit),
+                "bind_database_history_limit",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Busy),
+                "bind_database_busy",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Database),
+                "bind_database_database",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::Deadline),
+                "bind_database_deadline",
+            ),
+            (
+                BoundLaunchError::Database(CausalError::OutcomeUnknown),
+                "bind_database_outcome_unknown",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(bind_error(error), expected);
+        }
+    }
     #[test]
     fn cleanup_requires_positive_acknowledgement() {
         let rt = tokio::runtime::Builder::new_current_thread()

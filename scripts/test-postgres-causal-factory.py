@@ -38,6 +38,14 @@ PROBE_STAGES = frozenset({
     'local cleanup deadline', 'local cleanup unproved', 'network', 'output',
     'password', 'peer', 'policy key', 'preflight', 'public key', 'relay closed',
     'runtime', 'sources', 'start', 'startup closed', 'unexpected completion',
+    'bind_invalid', 'bind_expired', 'bind_transfer',
+    'bind_journal_io', 'bind_journal_unsafe', 'bind_journal_busy',
+    'bind_journal_mismatch', 'bind_journal_corrupt',
+    'bind_database_identity', 'bind_database_signature', 'bind_database_scope',
+    'bind_database_expired', 'bind_database_invalid_batch', 'bind_database_conflict',
+    'bind_database_corrupt', 'bind_database_logical_quota', 'bind_database_history_limit',
+    'bind_database_busy', 'bind_database_database', 'bind_database_deadline',
+    'bind_database_outcome_unknown',
 })
 
 
