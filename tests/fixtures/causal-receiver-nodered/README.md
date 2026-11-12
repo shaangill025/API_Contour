@@ -21,6 +21,7 @@ same native request identity across the original message and cloneMessage;
 pre-delivery observations require the same identity across actual fanout
 messages. The two private roots and requests must differ. A duplicate carrier
 must be scrubbed and forwarded once without registration. All requests require
-reserved-header scrubbing. Output consists only of fixed phase/count labels.
+reserved-header scrubbing. Output consists only of fixed phase/count labels and an allowlisted failure code;
+no error messages, stacks, headers or certificate contents are printed.
 The fixture bounds requests, startup and shutdown and removes its temporary flow
 state. A passing syntax check alone is not runtime evidence.

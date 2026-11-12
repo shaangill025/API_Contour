@@ -1,6 +1,18 @@
 'use strict';
-process.on('uncaughtException', () => { process.stderr.write('FAIL phase=unexpected\n'); process.exit(1); });
-process.on('unhandledRejection', () => { process.stderr.write('FAIL phase=unexpected\n'); process.exit(1); });
+let phase = 'imports', fatalCleanup, diagnostics;
+try { diagnostics = require('./diagnostics'); }
+catch (_) { process.stderr.write('FAIL phase=imports code=OTHER\n'); process.exit(1); }
+const result = diagnostics.state();
+function diagnostic(error, failedPhase=phase) {
+    process.stderr.write(diagnostics.format(error, failedPhase));
+}
+function fatal(error) {
+    result.mark(error,phase);
+    if (fatalCleanup) fatalCleanup().catch(() => { diagnostic(null,'cleanup'); process.exit(1); });
+    else { diagnostic(error); process.exit(1); }
+}
+process.on('uncaughtException', fatal);
+process.on('unhandledRejection', fatal);
 // Runs only in an owned, pinned Node-RED image; no synthetic IncomingMessage.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -19,6 +31,7 @@ const incoming = require('../../../collectors/nodered/receiver-integration/priva
 const bindingFixture = require('../../../docs/specification/fixtures/causal-evidence-v1.json')[0];
 const binding = bindingFixture.body;
 const epoch = BigInt(binding.receiver_session_epoch);
+phase = 'pki';
 const material = path.join(__dirname, '../causal-receiver-material');
 const read = name => fs.readFileSync(path.join(material, name));
 const ca = read('ca.pem'), cert = read('server.pem'), key = read('server.key');
@@ -30,6 +43,7 @@ const scope = () => ({ allowed:true, deadline:performance.now()+60000,
     gateway_generation:binding.gateway_generation, receiver_runtime_id:binding.receiver_runtime_id,
     receiver_session_epoch:binding.receiver_session_epoch,
     gateway_backend_leaf:fingerprint(clientCert), receiver_backend_leaf:fingerprint(cert) });
+phase = 'handoff';
 const base = baseApi.create({ tenantId:binding.tenant_id, runtimeId:binding.receiver_runtime_id,
     epoch, authority:auth, maxBatchEvents:8, maxBatchBytes:4096, queueBytes:8192, queueTtlMs:10000 });
 const roots = rootApi.create({ base, authority:auth, tenantId:binding.tenant_id,
@@ -37,8 +51,9 @@ const roots = rootApi.create({ base, authority:auth, tenantId:binding.tenant_id,
 const app = express();
 const records = new Map(), byRequest = new WeakMap();
 const held = [];
-let phase = 'setup', failure = false, receiver, redInitAttempted = false;
-function check(fn) { try { fn(); } catch (_) { failure = true; } }
+let receiver, redInitAttempted = false;
+function remember(error) { result.mark(error,phase); }
+function check(fn) { try { fn(); } catch (error) { remember(error); } }
 function scrubbed(req) {
     for (const view of [req.headers, req.headersDistinct]) {
         assert(view && typeof view === 'object');
@@ -66,7 +81,7 @@ const server = https.createServer({ ca, cert, key, requestCert:true, rejectUnaut
 server.requestTimeout = 3000; server.headersTimeout = 3000;
 server.setTimeout(3000, socket => socket.destroy());
 const watchdog = setTimeout(() => {
-    process.stderr.write('FAIL phase=deadline\n');
+    diagnostic(null,'deadline');
     server.closeAllConnections(); process.exit(1);
 }, 20000);
 const flow = [
@@ -77,6 +92,7 @@ const flow = [
     { id:'two', type:'function', z:'tab', func:'return null;', outputs:1, wires:[[]] },
     { id:'response', type:'http response', z:'tab', statusCode:'200', headers:{}, wires:[] }
 ];
+phase = 'flow-file';
 const temp = fs.mkdtempSync('/data/receiver-identity-');
 const flowFile = path.join(temp, 'flows.json');
 fs.writeFileSync(flowFile, JSON.stringify(flow), { mode:0o600 });
@@ -155,7 +171,7 @@ async function main() {
     const deadline = Date.now()+3000;
     while ([...records.values()].some(r => r.deliveries.length < 3) && Date.now() < deadline)
         await new Promise(resolve => setTimeout(resolve, 20));
-    phase = 'assertions'; assert.equal(failure,false); assert.equal(records.size,3);
+    phase = 'assertions'; assert.equal(result.failed(),false); assert.equal(records.size,3);
     for (const record of records.values()) {
         assert.equal(record.appCount,1); assert.equal(record.inbound,1); assert(record.cloneChecked);
         assert.deepEqual(record.deliveries.map(x => x.id).sort(), ['one','response','two']);
@@ -165,13 +181,24 @@ async function main() {
     assert.notEqual(records.get('first').root, records.get('second').root);
     assert.equal(records.get('duplicate').root,undefined);
 }
+let cleanupPromise;
+function finish() {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+        phase = 'cleanup';
+        try { receiver.close(); } catch (error) { remember(error); }
+        try { roots.close(); } catch (error) { remember(error); }
+        try { if (redInitAttempted) await RED.stop(); } catch (error) { remember(error); }
+        try { await close(); } catch (error) { remember(error); }
+        try { fs.rmSync(temp,{recursive:true,force:true}); } catch (error) { remember(error); }
+        clearTimeout(watchdog);
+        if (result.failed()) { process.stderr.write(result.diagnostic()); process.exitCode = 1; }
+        else process.stdout.write('PASS phase=identity counts=3,3,3\n');
+    })();
+    return cleanupPromise;
+}
+fatalCleanup = () => finish().then(() => process.exit(1));
 (async () => {
-    try { await main(); } catch (_) { failure = true; }
-    receiver.close(); roots.close();
-    try { if (redInitAttempted) await RED.stop(); } catch (_) { failure = true; }
-    try { await close(); } catch (_) { failure = true; }
-    try { fs.rmSync(temp,{recursive:true,force:true}); } catch (_) { failure = true; }
-    clearTimeout(watchdog);
-    if (failure) { process.stderr.write(`FAIL phase=${phase}\n`); process.exitCode = 1; }
-    else process.stdout.write('PASS phase=identity counts=3,3,3\n');
+    try { await main(); } catch (error) { remember(error); }
+    await finish();
 })();
