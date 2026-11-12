@@ -198,3 +198,53 @@ def inspect_local_ca(path, openssl):
     receipt = _LocalCaReceipt(_TOKEN, path, data, file_id, openssl, tool_id, before, after)
     receipt.revalidate()
     return receipt
+
+
+class _LocalLeafUsageReceipt:
+    """Local point observation; not a certificate or deployment authority."""
+    __slots__ = ('_path', '_data', '_file_id', '_tool', '_tool_id')
+
+    def __init__(self, token, path, data, file_id, tool, tool_id):
+        if token is not _TOKEN:
+            raise ValueError('private receipt')
+        self._path, self._data, self._file_id = path, data, file_id
+        self._tool, self._tool_id = tool, tool_id
+
+    def revalidate(self):
+        data, identity = _snapshot(self._path)
+        if data != self._data or identity != self._file_id or _tool(self._tool) != self._tool_id:
+            raise ValueError('leaf receipt drift')
+        return hashlib.sha256(data).digest()
+
+
+def inspect_local_leaf_usage(path, openssl):
+    """Check explicit digitalSignature KU on one captured PEM, without granting authority.
+
+    This does not check a leaf's chain, key, EKU, name, or validity. A future
+    factory must bind those independent checks to these exact captured bytes.
+    """
+    path, openssl = Path(path), Path(openssl)
+    tool_id = _tool(openssl)
+    data, file_id = _snapshot(path)
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / 'leaf.pem'
+        fd = os.open(local, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+        local_id = _identity(os.lstat(local))
+        version = _run(openssl, ['version'], local)
+        if not re.fullmatch(rb'OpenSSL 3\.6\.3 9 Jun 2026(?: \(Library: OpenSSL 3\.6\.3 9 Jun 2026\))?\n', version):
+            raise ValueError('unqualified OpenSSL version')
+        usage = _run(openssl, ['x509', '-noout', '-ext', 'keyUsage'], local)
+        match = re.fullmatch(rb'X509v3 Key Usage:(?: critical)?\n    ([A-Za-z ,]+)\n', usage)
+        allowed = {b'Digital Signature', b'Non Repudiation', b'Key Encipherment',
+                   b'Data Encipherment', b'Key Agreement', b'Certificate Sign',
+                   b'CRL Sign', b'Encipher Only', b'Decipher Only'}
+        values = match.group(1).split(b', ') if match else []
+        if not values or len(values) != len(set(values)) or any(v not in allowed for v in values) or b'Digital Signature' not in values:
+            raise ValueError('invalid leaf key usage')
+        if _identity(os.lstat(local)) != local_id or local.read_bytes() != data:
+            raise ValueError('temporary leaf drift')
+    receipt = _LocalLeafUsageReceipt(_TOKEN, path, data, file_id, openssl, tool_id)
+    receipt.revalidate()
+    return receipt

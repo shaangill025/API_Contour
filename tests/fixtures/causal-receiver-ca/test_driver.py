@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from deploy.pilot.receiver_ca import inspect_local_ca
+from deploy.pilot.receiver_ca import inspect_local_ca, inspect_local_leaf_usage
 
 TOOL = Path(os.environ['CONTOUR_QUALIFIED_OPENSSL'])
 FIXTURE = Path(__file__).resolve().parent.parent / 'causal-receiver-material/ca.pem'
@@ -21,7 +21,7 @@ class ReceiverCaTests(unittest.TestCase):
         self.cert.chmod(0o600)
 
     def run_tool(self, *args):
-        subprocess.run([str(TOOL), *map(str, args)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([str(TOOL), *map(str, args)], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def test_positive_and_receipt_drift(self):
         receipt = inspect_local_ca(self.cert, TOOL)
@@ -76,6 +76,40 @@ class ReceiverCaTests(unittest.TestCase):
                 self.run_tool('req', '-x509', '-key', key, '-out', self.cert, '-days', '1', '-subj', '/CN=synthetic', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
                 self.cert.chmod(0o600)
                 self.assertEqual(len(inspect_local_ca(self.cert, TOOL).revalidate()), 32)
+
+    def test_leaf_explicit_signing_usage_with_same_key_and_issuer(self):
+        ca, ca_key, key, csr = (self.root/x for x in ('issuer.pem', 'issuer.key', 'leaf.key', 'leaf.csr'))
+        self.run_tool('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', ca_key,
+                      '-out', ca, '-days', '1', '-subj', '/CN=synthetic issuer',
+                      '-addext', 'basicConstraints=critical,CA:TRUE',
+                      '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
+        self.run_tool('req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', key,
+                      '-out', csr, '-subj', '/CN=synthetic leaf')
+        paths = []
+        for index, usage in enumerate(('keyUsage=critical,digitalSignature,keyEncipherment',
+                                       None, 'keyUsage=critical,keyEncipherment')):
+            ext = self.root / ('leaf%d.ext' % index)
+            ext.write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n' +
+                           ((usage + '\n') if usage else ''))
+            leaf = self.root / ('leaf%d.pem' % index)
+            self.run_tool('x509', '-req', '-in', csr, '-CA', ca, '-CAkey', ca_key,
+                          '-set_serial', str(index + 1), '-days', '1', '-extfile', ext, '-out', leaf)
+            leaf.chmod(0o600)
+            self.run_tool('verify', '-CAfile', ca, leaf)
+            paths.append(leaf)
+        def output(*args):
+            return subprocess.run([str(TOOL), *map(str, args)], check=True, timeout=10,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        public = [output('x509', '-in', p, '-noout', '-pubkey') for p in paths]
+        issuer = [output('x509', '-in', p, '-noout', '-issuer') for p in paths]
+        self.assertTrue(public[0] and all(x == public[0] for x in public))
+        self.assertTrue(issuer[0] and all(x == issuer[0] for x in issuer))
+        for leaf in paths:
+            self.assertIn(b'TLS Web Client Authentication', output('x509', '-in', leaf, '-noout', '-ext', 'extendedKeyUsage'))
+        self.assertEqual(len(inspect_local_leaf_usage(paths[0], TOOL).revalidate()), 32)
+        for leaf in paths[1:]:
+            with self.assertRaisesRegex(ValueError, 'invalid leaf key usage'):
+                inspect_local_leaf_usage(leaf, TOOL)
 
 
 if __name__ == '__main__': unittest.main()
