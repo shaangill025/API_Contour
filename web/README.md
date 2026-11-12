@@ -25,7 +25,7 @@ mark a fresh import draft stale. No mutation is retried automatically. A failed 
 success. Start a new comparison or reselect an operation to reset a failed draft.
 
 The pinned manifest and lockfile use React/ReactDOM 19.3.1, React types 19.3.0,
-TypeScript 5.9.3 and esbuild 0.28.2. Use Node 22.23.1. Run `npm ci --ignore-scripts`,
+TypeScript 5.9.3 and esbuild 0.28.2. Use Node 22.23.5. Run `npm ci --ignore-scripts`,
 `npm run typecheck`, `npm test`, then `npm run build` inside this directory. The
 builder resolves the locked native esbuild platform package directly; missing
 platform packages fail rather than triggering installer downloads. No dependency
