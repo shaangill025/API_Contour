@@ -109,8 +109,9 @@ if(require('/usr/src/node-red/node_modules/node-red/package.json').version!=='5.
 const b=require('/usr/src/node-red/node_modules/@node-rs/bcrypt');
 const s='synthetic-node243-probe', h=b.hashSync(s,4);
 if(!b.verifySync(s,h) || b.verifySync(s+'x',h)) throw Error('bcrypt');
-const p='/usr/local/bin/node', st=fs.statSync(p);
-console.log(JSON.stringify({sha256:crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),mode:st.mode&4095,uid:st.uid,gid:st.gid,user:process.getuid()}));"""
+const p='/usr/local/bin/node', st=fs.statSync(p), bytes=fs.readFileSync(p);
+if(!st.isFile() || bytes.length!==st.size) throw Error('binary');
+console.log(JSON.stringify({sha256:crypto.createHash('sha256').update(bytes).digest('hex'),size:st.size,mode:st.mode&4095,uid:st.uid,gid:st.gid,user:process.getuid()}));"""
 
 
 def load_runner():
@@ -209,7 +210,7 @@ def run_probe(docker, owner, arch, cid, token, image, frozen):
         record(owner,'generation-'+arch+'.json',{'cid':cid,'started_at':observed})
         observed_generation = observed
         result = json.loads(output)
-        if set(result) != {'sha256','mode','uid','gid','user'} or not re.fullmatch(r'[0-9a-f]{64}',result['sha256']) or not all(type(result[k]) is int for k in ('mode','uid','gid','user')) or result['user'] == 0: raise ValueError('probe result')
+        if set(result) != {'sha256','size','mode','uid','gid','user'} or not re.fullmatch(r'[0-9a-f]{64}',result['sha256']) or not all(type(result[k]) is int for k in ('size','mode','uid','gid','user')) or not 0 < result['size'] <= 512*1024*1024 or result['user'] == 0: raise ValueError('probe result')
     finally:
         # If execution identity was not observed, retain the object for review.
         if observed_generation is not None:
