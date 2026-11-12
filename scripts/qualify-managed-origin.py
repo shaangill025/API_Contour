@@ -70,7 +70,10 @@ def child_failure_lines(owner):
     names='|'.join(re.escape(name) for name in sorted(_ALLOWED_FRAMES))
     location='(?:unavailable|(?:'+names+'):[1-9][0-9]{0,6}(?:,(?:'+names+'):[1-9][0-9]{0,6}){0,5})'
     pattern=re.compile(('managed-failure phase=(?:'+phases+') role=(?:primary|cleanup) type=(?:'+kinds+') location='+location).encode())
-    return [line.decode('ascii') for line in raw.splitlines() if pattern.fullmatch(line)][:16]
+    failures=[line.decode('ascii') for line in raw.splitlines() if pattern.fullmatch(line)][:16]
+    diagnostic=re.compile(rb'managed-ready name=(?:transport|setup|policy_before|descriptors|worker|quiescence|probe|capture|post_slot|policy_after) event=(?:start|end) ms=(?:0|[1-9][0-9]{0,8}) count=(?:[1-9]|[1-9][0-9]|1[0-5][0-9]|160)')
+    timings=[line.decode('ascii') for line in raw.splitlines() if diagnostic.fullmatch(line)][:160]
+    return failures+timings
 
 
 def helper():

@@ -270,9 +270,11 @@ def qualify_positive_streams(transport,proof):
     if type(transport) is not origin21_transport.ManagedTransport or type(proof) is not origin21_managed_qualification.OwnedManagedQualification: raise ValueError('owned qualification required')
     proof.verify(); source=_source_guard(); helper=_helper(); transport.verify(); destination=_destination()
     original=_products(proof); expected=_commitments()
+    diagnostics=(origin21_ready._QualificationDiagnostics(proof,lambda line:print(line,file=sys.stderr,flush=True))
+                 if os.environ.get('CONTOUR_MANAGED_READY_DIAGNOSTICS')=='1' else None)
     global _PHASE
     _set_phase('initial-readiness')
-    origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport)
+    origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
     transitions=[]
     for mode,index,transition in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')):
         _set_phase('stream-capture-baseline')
@@ -283,7 +285,7 @@ def qualify_positive_streams(transport,proof):
         _wait_capture(transport,before,original[index-1],expected[index-1],revision,index)
         if _products(proof)!=original: raise ValueError('qualification product generation changed')
         _set_phase('stream-readiness')
-        origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport)
+        origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
         if _source_guard()!=source: raise ValueError('qualification source changed')
     for first,second in ((transitions[0],transitions[1]),(transitions[2],transitions[3])):
         if first[0]!=second[1] or first[1]!=second[0]: raise ValueError('qualification rollback fingerprint mismatch')

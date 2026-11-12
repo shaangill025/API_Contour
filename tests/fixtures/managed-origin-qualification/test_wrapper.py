@@ -116,6 +116,15 @@ class DiagnosticTests(unittest.TestCase):
         self.assertTrue(any('role=cleanup type=OSError' in line for line in lines))
         self.assertTrue(any('type=OtherError' in line for line in lines))
         self.assertNotIn('secret',' '.join(lines))
+    def test_private_log_timing_grammar_rejects_untrusted_and_bounds_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner=mock.Mock(); owner.path=Path(directory)
+            valid=b'managed-ready name=setup event=end ms=12 count=2'
+            bad=[b'managed-ready name=secret event=end ms=12 count=2',b'managed-ready name=setup event=end ms=1000000000 count=2',b'managed-ready name=setup event=end ms=1 count=161',b'managed-ready name=setup event=end ms=1 count=1 secret']
+            (owner.path/'qualification.log').write_bytes(b'\n'.join([valid]*170+bad))
+            lines=wrapper.child_failure_lines(owner)
+            self.assertEqual(lines,[valid.decode()]*160)
+
     def test_private_log_accepts_only_closed_child_diagnostics(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

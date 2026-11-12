@@ -1,7 +1,35 @@
 """Explicit bounded product-to-catalog verification, not a UI readiness claim."""
 import json
+from contextlib import contextmanager, nullcontext
 import time
 from deploy.local import origin21_evidence, origin21_products, origin21_profile, origin21_setup, origin21_transport, provision
+
+
+_DIAGNOSTIC_NAMES=frozenset(('transport','setup','policy_before','descriptors','worker','quiescence','probe','capture','post_slot','policy_after'))
+
+class _QualificationDiagnostics:
+    """Best-effort bounded timings, never an authority or a qualification result."""
+    def __init__(self, proof, sink, clock=time.monotonic_ns):
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        if type(proof) is not OwnedManagedQualification or not callable(sink): raise ValueError('owned qualification required')
+        self.proof, self.sink, self.clock, self.lines = proof, sink, clock, 0
+    def emit(self, name, event, duration):
+        if name not in _DIAGNOSTIC_NAMES or event not in ('start','end') or type(duration) is not int or not 0 <= duration <= 999999999 or self.lines >= 160: return
+        self.lines += 1
+        try: self.sink('managed-ready name='+name+' event='+event+' ms='+str(duration)+' count='+str(self.lines))
+        except BaseException: pass
+    @contextmanager
+    def measure(self, name):
+        try: start=self.clock()
+        except BaseException: start=None
+        self.emit(name,'start',0)
+        try: yield
+        finally:
+            try:
+                end=self.clock()
+                if type(start) is int and type(end) is int and end>=start:
+                    self.emit(name,'end',min((end-start)//1000000,999999999))
+            except BaseException: pass
 
 
 def snapshot(psql,*,selected=origin21_profile.STATIC):
@@ -55,11 +83,14 @@ def validate_fresh(rows,before,index,leaf,evidence,revision,*,selected=origin21_
     return True
 
 
-def check(expected, *, psql=None, sensitive_execute=None, authenticate=None, selected=origin21_profile.STATIC, transport=None):
+def check(expected, *, psql=None, sensitive_execute=None, authenticate=None, selected=origin21_profile.STATIC, transport=None, _diagnostics=None):
     origin21_profile.require_context(selected)
+    if _diagnostics is not None and (type(_diagnostics) is not _QualificationDiagnostics or selected is not origin21_profile.MANAGED or type(transport) is not origin21_transport.ManagedTransport or transport.qualification is not _diagnostics.proof): raise ValueError('qualification diagnostics required')
+    def measure(name): return nullcontext() if _diagnostics is None else _diagnostics.measure(name)
     if selected is origin21_profile.MANAGED or selected is origin21_profile.HUMAN:
         if type(transport) is not origin21_transport.ManagedTransport or transport._selected is not selected or any(x is not None for x in (psql,sensitive_execute,authenticate)): raise ValueError('managed transport required')
-        transport.verify(); psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
+        with measure('transport'): transport.verify()
+        psql,sensitive_execute,authenticate=transport.admin,transport.sensitive,transport.authenticate
         inspect_slot=lambda i:origin21_products.inspect_slot(i,selected=selected,**({'qualification':transport.qualification} if transport.qualification is not None else {}))
     else:
         if transport is not None: raise ValueError('unexpected managed transport')
@@ -71,31 +102,34 @@ def check(expected, *, psql=None, sensitive_execute=None, authenticate=None, sel
     if selected is origin21_profile.STATIC:
         origin21_setup.prepare(psql=psql,sensitive_execute=sensitive_execute,authenticate=authenticate,inspect_slot=inspect_slot,expected_evidence=expected,check_only=True)
     else:
-        origin21_setup.prepare(transport=transport,expected_evidence=expected,check_only=True,selected=selected)
-    revision=context_call(origin21_products.require_current_policy,psql,sensitive_execute)
+        with measure('setup'): origin21_setup.prepare(transport=transport,expected_evidence=expected,check_only=True,selected=selected)
+    with measure('policy_before'): revision=context_call(origin21_products.require_current_policy,psql,sensitive_execute)
     # The inspector rechecks all fixed companion/product ownership and generation.
-    descriptors=[inspect_slot(i) for i in (1,2)]
+    with measure('descriptors'): descriptors=[inspect_slot(i) for i in (1,2)]
     if any(origin21_evidence.digest(v)!=expected[i] for i,v in enumerate(descriptors)): raise ValueError('operator evidence drift')
     record=context_call(origin21_products._read_record,'companions.json')
     worker=record['services']['origin21-capture-worker']['id']
-    origin21_products._command(['docker','exec',worker,'/usr/local/bin/local_capture','check','/run/capture/worker.json'],20)
+    with measure('worker'): origin21_products._command(['docker','exec',worker,'/usr/local/bin/local_capture','check','/run/capture/worker.json'],20)
     for index,desc in enumerate(descriptors,1):
         # Quiesce existing asynchronous projections before selecting fresh IDs.
-        previous={row[0] for row in context_call(snapshot,psql)}; stable=time.monotonic(); deadline=stable+15
-        while time.monotonic()<deadline:
-            time.sleep(.25); now={row[0] for row in context_call(snapshot,psql)}
-            if now!=previous: previous,stable=now,time.monotonic()
-            if time.monotonic()-stable>=2: break
-        else: raise RuntimeError('catalog did not quiesce')
-        raw=origin21_products._command(['docker','exec',desc['container_id'],'node','/pilot/probe.js','normal'],10)
+        with measure('quiescence'):
+            previous={row[0] for row in context_call(snapshot,psql)}; stable=time.monotonic(); deadline=stable+15
+            while time.monotonic()<deadline:
+                time.sleep(.25); now={row[0] for row in context_call(snapshot,psql)}
+                if now!=previous: previous,stable=now,time.monotonic()
+                if time.monotonic()-stable>=2: break
+            else: raise RuntimeError('catalog did not quiesce')
+        with measure('probe'): raw=origin21_products._command(['docker','exec',desc['container_id'],'node','/pilot/probe.js','normal'],10)
         if len(raw)>1024: raise RuntimeError('product probe output bound')
         result=json.loads(raw)
         if not isinstance(result,dict) or set(result)!={'status','expected_body','exception','admin_status','admin_exception'} or result['status']!=200 or result['expected_body'] is not True or result['exception']!='none' or result['admin_status'] not in (400,404) or result['admin_exception']!='none': raise RuntimeError('product probe failed')
-        until=time.monotonic()+30
-        while time.monotonic()<until:
-            if context_call(validate_fresh,context_call(snapshot,psql),previous,index,desc['leaf_sha256'],expected[index-1],revision): break
-            time.sleep(.25)
-        else: raise RuntimeError('catalog projection deadline')
-        inspect_slot(index)
-    if context_call(origin21_products.require_current_policy,psql,sensitive_execute)!=revision: raise RuntimeError('policy changed during verification')
+        with measure('capture'):
+            until=time.monotonic()+30
+            while time.monotonic()<until:
+                if context_call(validate_fresh,context_call(snapshot,psql),previous,index,desc['leaf_sha256'],expected[index-1],revision): break
+                time.sleep(.25)
+            else: raise RuntimeError('catalog projection deadline')
+        with measure('post_slot'): inspect_slot(index)
+    with measure('policy_after'):
+        if context_call(origin21_products.require_current_policy,psql,sensitive_execute)!=revision: raise RuntimeError('policy changed during verification')
     return {'product_tls_and_catalog_verified':True,'ui_verified':False}

@@ -10,6 +10,25 @@ spec=importlib.util.spec_from_file_location('managed_origin_qualification',ROOT/
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class QualificationDriverTests(unittest.TestCase):
+    def test_readiness_timing_is_bounded_redacted_and_best_effort(self):
+        from deploy.local.origin21_managed_qualification import OwnedManagedQualification
+        ready=driver.origin21_ready; proof=object.__new__(OwnedManagedQualification); lines=[]
+        with mock.patch.object(OwnedManagedQualification,'verify'):
+            diag=ready._QualificationDiagnostics(proof,lines.append,clock=iter([1_000_000,9_000_000]).__next__)
+        with diag.measure('setup'): pass
+        self.assertEqual(lines,['managed-ready name=setup event=start ms=0 count=1','managed-ready name=setup event=end ms=8 count=2'])
+        diag.emit('secret','end',1); diag.emit('setup','end',-1); diag.emit('setup','end',True)
+        self.assertEqual(len(lines),2)
+        with mock.patch.object(OwnedManagedQualification,'verify'):
+            broken=ready._QualificationDiagnostics(proof,lambda _: (_ for _ in ()).throw(RuntimeError('secret')),clock=lambda: (_ for _ in ()).throw(RuntimeError('clock')))
+        with self.assertRaisesRegex(ValueError,'primary'):
+            with broken.measure('setup'): raise ValueError('primary')
+        for _ in range(200): diag.emit('probe','start',0)
+        self.assertEqual(len(lines),160); self.assertEqual(diag.lines,160)
+        self.assertNotIn('secret',' '.join(lines))
+    def test_readiness_diagnostics_reject_unowned_proof(self):
+        with self.assertRaises(ValueError): driver.origin21_ready._QualificationDiagnostics(object(),lambda _:None)
+
     def test_incomplete_source_closure_stops_before_source_or_process(self):
         with mock.patch.object(driver.origin21_state,'MANAGED_SOURCE_FILES',()),mock.patch.object(driver.origin21_state,'_source_identity') as source,mock.patch.object(driver.products,'_command') as command:
             with self.assertRaises(RuntimeError): driver._source_guard()
