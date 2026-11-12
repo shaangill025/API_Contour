@@ -93,4 +93,106 @@ class QualificationTests(unittest.TestCase):
         self.assertFalse(hooks.complete)
         with self.assertRaises(RuntimeError): hooks.receipt()
 
+class RaceTests(unittest.TestCase):
+    def test_claim_is_typed_and_uses_fresh_database_time(self):
+        call=driver.gateway('fe000000-0000-4000-8000-000000000011',driver.leaf(1),driver.leaf(2),driver.leaf(3))
+        query=driver.session(driver.T1,call)
+        self.assertIn('clock_timestamp()',query)
+        self.assertIn('::contour.gateway_enrollment_claim',query)
+        self.assertIn("n+interval '10 minutes'",query)
+        self.assertNotIn('pg_temp',query)
+        with self.assertRaises(ValueError): driver.gateway('untrusted',driver.leaf(1),driver.leaf(2),driver.leaf(3))
+
+    def test_barrier_and_exception_classes_are_closed(self):
+        call=driver.product('fa000000-0000-4000-8000-000000000011',driver.leaf(3))
+        busy=driver.classify(driver.T2,call,'busy','gateway_product')
+        self.assertIn("wait_event='advisory'",busy)
+        self.assertIn("IF NOT observed THEN RAISE EXCEPTION",busy)
+        self.assertIn('WHEN serialization_failure',busy)
+        self.assertIn("m IS DISTINCT FROM 'credential gate busy'",busy)
+        duplicate=driver.classify(driver.T2,call,'duplicate')
+        self.assertIn('WHEN unique_violation',duplicate)
+        self.assertIn("m IS DISTINCT FROM 'credential unavailable'",duplicate)
+        for kind,marker in [('other',None),('busy','arbitrary')]:
+            with self.assertRaises(ValueError): driver.classify(driver.T2,call,kind,marker)
+
+    def test_races_require_collision_and_successful_retry(self):
+        pair=driver.leaf(1000000)+'|'+driver.leaf(1000001)+'|1'
+        calls=[];held=[]
+        def execute(sql):
+            calls.append(sql)
+            if sql==driver.COLLISION_SQL: return pair
+            if sql.startswith('SELECT used_bytes'): return '1234'
+            if "SELECT 'DUPLICATE'" in sql: return 'DUPLICATE'
+            if sql.startswith('SELECT ('): return 'true'
+            return ''
+        with mock.patch.object(driver,'held_case',side_effect=lambda *args: held.append(args)):
+            driver.run_races(execute)
+        self.assertEqual([item[-1] for item in held],['gateway_product','product_gateway','collision'])
+        self.assertEqual(sum("SELECT 'DUPLICATE'" in x for x in calls),2)
+        self.assertTrue(any('causal_gateway_enrollments' in x and 'used_bytes' in x for x in calls))
+        self.assertTrue(any('hashtext(' in x and 'true' not in x for x in calls if x!=driver.COLLISION_SQL))
+        def malformed(sql):
+            if sql==driver.COLLISION_SQL: return driver.leaf(3)+'|'+driver.leaf(3)+'|1'
+            return execute(sql)
+        with mock.patch.object(driver,'held_case'):
+            with self.assertRaisesRegex(RuntimeError,'collision unavailable'): driver.run_races(malformed)
+
+    def test_control_is_exactly_cancelled_and_futures_reaped_on_failure(self):
+        for contender_result in ('BUSY','wrong'):
+            with self.subTest(contender=contender_result):
+                futures=[];queries=[]
+                class Future:
+                    def done(self): return False
+                    def result(self,timeout): self.timeout=timeout;return ''
+                class Pool:
+                    def __init__(self,**kwargs): pass
+                    def submit(self,*args):
+                        future=Future();futures.append(future);return future
+                    def shutdown(self,**kwargs): self.closed=kwargs
+                def execute(sql):
+                    queries.append(sql)
+                    if sql.startswith('SELECT pid::text'): return '42|123456'
+                    if 'pg_cancel_backend' in sql: return 'true'
+                    return contender_result
+                with mock.patch.object(driver.concurrent.futures,'ThreadPoolExecutor',Pool):
+                    if contender_result=='BUSY': driver.held_case(execute,driver.T1,'fixed','contender','collision')
+                    else:
+                        with self.assertRaises(RuntimeError): driver.held_case(execute,driver.T1,'fixed','contender','collision')
+                self.assertEqual([f.timeout for f in futures],[150,150])
+                cancel=next(q for q in queries if 'pg_cancel_backend' in q)
+                for required in ("pid=42", "=123456", "wait_event='PgSleep'", "datname='contour_local'", "usename='postgres'", 'race_control_collision'):
+                    self.assertIn(required,cancel)
+
+    def test_executor_joins_completed_futures_and_does_not_wait_on_unknown(self):
+        for hung in (False,True):
+            with self.subTest(hung=hung):
+                futures=[]; shutdown=[]
+                class Future:
+                    def done(self): return not hung
+                    def result(self,timeout):
+                        if hung: raise TimeoutError('unresolved')
+                        return ''
+                class Pool:
+                    def __init__(self,**kwargs): pass
+                    def submit(self,*args):
+                        result=Future(); futures.append(result); return result
+                    def shutdown(self,**kwargs): shutdown.append(kwargs)
+                def execute(sql):
+                    if sql.startswith('SELECT pid::text'): return '42|123456'
+                    if 'pg_cancel_backend' in sql: return 'true'
+                    return 'BUSY'
+                with mock.patch.object(driver.concurrent.futures,'ThreadPoolExecutor',Pool):
+                    if hung:
+                        with self.assertRaises(RuntimeError): driver.held_case(execute,driver.T1,'fixed','contender','collision')
+                    else: driver.held_case(execute,driver.T1,'fixed','contender','collision')
+                self.assertEqual(shutdown,[{'wait':not hung,'cancel_futures':True}])
+
+    def test_race_hook_failure_never_completes(self):
+        hooks=driver.QualificationHooks('gateway26-races',mock.Mock(),{})
+        hooks.seeded=True;hooks.next_stage=25
+        with mock.patch.object(hooks,'_gateway'),mock.patch.object(driver,'run_races',side_effect=RuntimeError('race failed')):
+            with self.assertRaisesRegex(RuntimeError,'race failed'): hooks.after_forward(25,mock.Mock())
+        with self.assertRaises(RuntimeError): hooks.receipt()
+
 if __name__=='__main__': unittest.main()

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Closed disposable schema25/gateway26 SQL fixture; no mTLS or issuer claim."""
+import concurrent.futures
 import hashlib
+import re
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT=Path(__file__).resolve().parents[1]
 LEDGER='SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;'
@@ -30,17 +33,138 @@ def guard_probe(migration):
             "EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $origin25_retry$;\nSELECT '42501';")
 
 
+# These constants are synthetic fixture identities. No caller-supplied SQL is accepted.
+T1='f0000000-0000-4000-8000-000000000001'
+T2='f0000000-0000-4000-8000-000000000002'
+LIFECYCLE='f9000000-0000-4000-8000-000000000002'
+COLLISION_SQL="""WITH groups AS (
+ SELECT hashtext(lpad(to_hex(i),64,'0')) AS h,min(i) AS a,max(i) AS b
+ FROM generate_series(1000000,1499999) i GROUP BY 1 HAVING count(*)>1
+ ORDER BY min(i) LIMIT 1)
+ SELECT lpad(to_hex(a),64,'0')||'|'||lpad(to_hex(b),64,'0')||'|'||h::text FROM groups;"""
+
+def leaf(n):
+    if type(n) is not int or not 0<=n<2**256: raise ValueError('invalid fixed leaf')
+    return format(n,'064x')
+
+def gateway(gateway_id,nonce,observer,backend):
+    if not all(re.fullmatch('[0-9a-f]{64}',x) for x in (nonce,observer,backend)): raise ValueError('invalid fixed gateway leaf')
+    if gateway_id not in ('fe000000-0000-4000-8000-000000000011','fe000000-0000-4000-8000-000000000012','fe000000-0000-4000-8000-000000000013'): raise ValueError('invalid fixture gateway')
+    fields=[T1,gateway_id]+[f'f{x}000000-0000-4000-8000-000000000001' for x in (6,7,1,2,3,4,5)]
+    return ("contour.enroll_causal_gateway(ROW("+','.join("'%s'::uuid"%x for x in fields)+
+        ",decode('%s','hex'),decode('%s','hex'),decode('%s','hex'),1::numeric,decode('01','hex'),n-interval '1 minute',n+interval '10 minutes',900000000::bigint)::contour.gateway_enrollment_claim)"%(nonce,observer,backend))
+
+def product(credential,sha):
+    if credential not in ('fa000000-0000-4000-8000-000000000011','fa000000-0000-4000-8000-000000000012','fa000000-0000-4000-8000-000000000013') or not re.fullmatch('[0-9a-f]{64}',sha): raise ValueError('invalid fixture credential')
+    return "contour.enroll_origin_credential('%s'::uuid,'%s'::uuid,'%s'::uuid,decode('%s','hex'))"%(T2,credential,LIFECYCLE,sha)
+
+def session(tenant,call,tail=''):
+    return ("BEGIN; SET LOCAL statement_timeout='15s'; DO $race$ DECLARE n timestamptz:=clock_timestamp(); BEGIN "
+        "PERFORM set_config('apicontour.tenant_id','%s',true); PERFORM %s; END $race$; %s COMMIT;"%(tenant,call,tail))
+
+def classify(tenant,call,kind,marker=None):
+    if kind not in ('busy','duplicate'): raise ValueError('invalid classification')
+    barrier=''
+    if marker is not None:
+        if marker not in ('gateway_product','product_gateway','collision'): raise ValueError('invalid barrier')
+        # Wait and contend inside one server command: fences still surround this
+        # operation, but cannot consume the holder's five-second sleep window.
+        barrier=("FOR i IN 1..150 LOOP IF EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
+          "WHERE datname='contour_local' AND usename='postgres' AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%%race_winner_%s%%') THEN observed:=true; EXIT; END IF; PERFORM pg_sleep(0.02); END LOOP; "
+          "IF NOT observed THEN RAISE EXCEPTION 'barrier unavailable'; END IF; " % marker)
+    state='serialization_failure' if kind=='busy' else 'unique_violation'
+    expected='credential gate busy' if kind=='busy' else ('gateway enrollment unavailable' if tenant==T1 else 'credential unavailable')
+    return ("BEGIN; SET LOCAL statement_timeout='8s'; DO $race$ DECLARE n timestamptz:=clock_timestamp(); m text; observed boolean:=false; BEGIN "
+      "PERFORM set_config('apicontour.tenant_id','%s',true); %s BEGIN PERFORM %s; "
+      "RAISE EXCEPTION 'unexpected acceptance' USING ERRCODE='P0001'; EXCEPTION WHEN %s THEN "
+      "GET STACKED DIAGNOSTICS m=MESSAGE_TEXT; IF m IS DISTINCT FROM '%s' THEN RAISE EXCEPTION 'wrong class'; END IF; END; END $race$; COMMIT; SELECT '%s';"
+      %(tenant,barrier,call,state,expected,kind.upper()))
+
+def held_case(execute,tenant,holder,contender,marker):
+    if marker not in ('gateway_product','product_gateway','collision'): raise ValueError('invalid barrier')
+    control_marker='race_control_'+marker
+    identity_sql=("SELECT pid::text||'|'||(extract(epoch FROM backend_start)*1000000)::numeric(20,0)::text "
+      "FROM pg_catalog.pg_stat_activity WHERE datname='contour_local' AND usename='postgres' "
+      "AND wait_event='PgSleep' AND query LIKE '%%%s%%';"%control_marker)
+    # Namespace 1330792272 belongs exclusively to this disposable test.
+    control=("BEGIN; SELECT pg_advisory_xact_lock(1330792272,1); "
+      "DO $control$ BEGIN BEGIN PERFORM pg_sleep(15); /* %s */ "
+      "EXCEPTION WHEN query_canceled THEN NULL; END; END $control$; COMMIT;"%control_marker)
+    winner=session(tenant,holder,"SELECT pg_advisory_xact_lock(1330792272,1) /* race_winner_%s */;"%marker)
+    pool=concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futures=[pool.submit(execute,control)]; identity=None; cancelled=False
+    try:
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            found=execute(identity_sql)
+            if found:
+                if not re.fullmatch('[1-9][0-9]{0,9}\|[0-9]{1,20}',found): raise RuntimeError('control identity invalid')
+                identity=found; break
+            if futures[0].done(): raise RuntimeError('control ended before barrier')
+        if identity is None: raise RuntimeError('control barrier unavailable')
+        futures.append(pool.submit(execute,winner))
+        if execute(contender)!='BUSY': raise RuntimeError('race busy classification failed')
+    finally:
+        errors=[]
+        try:
+            try:
+                if identity is not None:
+                    pid,started=identity.split('|')
+                    cancel=("SELECT CASE WHEN count(*)=1 THEN bool_and(pg_cancel_backend(pid)) ELSE false END::text "
+                      "FROM pg_catalog.pg_stat_activity WHERE datname='contour_local' AND usename='postgres' "
+                      "AND wait_event='PgSleep' AND query LIKE '%%%s%%' AND pid=%s "
+                      "AND (extract(epoch FROM backend_start)*1000000)::numeric(20,0)=%s;"%(control_marker,pid,started))
+                    cancelled=execute(cancel)=='true'
+            except Exception as error: errors.append(error)
+            # Reap both even if cancellation or one callback fails; a missed
+            # cancellation falls back to the control's finite sleep.
+            for future in futures:
+                try: future.result(timeout=150)
+                except Exception as error: errors.append(error)
+            if errors or (identity is not None and not cancelled): raise RuntimeError('control cleanup unavailable')
+        finally: pool.shutdown(wait=all(f.done() for f in futures),cancel_futures=True)
+
+
+def run_races(execute):
+    # Each winner is committed before the loser retries in a new psql session.
+    g1='fe000000-0000-4000-8000-000000000011'; g2='fe000000-0000-4000-8000-000000000012'; g3='fe000000-0000-4000-8000-000000000013'
+    c1='fa000000-0000-4000-8000-000000000011'; c2='fa000000-0000-4000-8000-000000000012'; c3='fa000000-0000-4000-8000-000000000013'
+    first=leaf(10001); second=leaf(10002); other=leaf(10003); nonce=leaf(10004)
+    p1=product(c1,first); gw1=gateway(g1,leaf(10005),first,leaf(10006))
+    held_case(execute,T1,gw1,classify(T2,p1,'busy','gateway_product'),'gateway_product')
+    if execute(classify(T2,p1,'duplicate'))!='DUPLICATE': raise RuntimeError('product duplicate classification failed')
+    quota=execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s';"%T1)
+    if not re.fullmatch('[0-9]{1,12}',quota): raise RuntimeError('quota unavailable')
+    p2=product(c2,second);gw2=gateway(g2,nonce,second,other)
+    held_case(execute,T2,p2,classify(T1,gw2,'busy','product_gateway'),'product_gateway')
+    if execute(classify(T1,gw2,'duplicate'))!='DUPLICATE': raise RuntimeError('gateway duplicate classification failed')
+    check=("SELECT ((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s')=%s "
+      "AND NOT EXISTS(SELECT 1 FROM contour.origin_credentials WHERE credential_id='%s') "
+      "AND NOT EXISTS(SELECT 1 FROM contour.causal_gateway_enrollments WHERE gateway_id='%s' OR (claim).provision_nonce=decode('%s','hex')) "
+      "AND NOT EXISTS(SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode('%s','hex')))::text;"%(T1,quota,c1,g2,nonce,other))
+    if execute(check)!='true': raise RuntimeError('losing mutation remained')
+    pair=execute(COLLISION_SQL)
+    match=re.fullmatch('([0-9a-f]{64})\|([0-9a-f]{64})\|(-?[0-9]{1,10})',pair)
+    if not match or match[1]==match[2]: raise RuntimeError('collision unavailable')
+    a,b=match[1],match[2]
+    if execute("SELECT (hashtext('%s')=hashtext('%s'))::text;"%(a,b))!='true': raise RuntimeError('collision invalid')
+    gw3=gateway(g3,leaf(10007),a,leaf(10008));p3=product(c3,b)
+    held_case(execute,T1,gw3,classify(T2,p3,'busy','collision'),'collision')
+    execute(session(T2,p3))
+    if execute("SELECT (EXISTS(SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode('%s','hex') AND leaf_class='gateway_observer') AND EXISTS(SELECT 1 FROM contour.origin_credentials WHERE credential_id='%s' AND leaf_sha256=decode('%s','hex')))::text;"%(a,c3,b))!='true': raise RuntimeError('collision retry failed')
+
+
 class QualificationHooks:
     def __init__(self,mode,schema,files=None):
-        if mode not in ('schema25','gateway26'): raise ValueError('unsupported qualification mode')
+        if mode not in ('schema25','gateway26','gateway26-races'): raise ValueError('unsupported qualification mode')
         self.mode,self.schema,self.files=mode,schema,files
         self.seeded=False;self.next_stage=22;self.complete=False
     def preflight(self,sources):
         required=['scripts/test-causal-evidence-enrollment.py','deploy/local/origin25_schema.py',
                   *['deploy/local/origin25_reference_%d_enrolled.json'%n for n in (22,23,24,25)]]
-        if self.mode=='gateway26': required+=list(FILES.values())
+        if self.mode in ('gateway26','gateway26-races'): required+=list(FILES.values())
         if any(name not in sources for name in required): raise ValueError('qualification source missing')
-        if self.mode=='gateway26':
+        if self.mode in ('gateway26','gateway26-races'):
             self.files={}
             for key,name in FILES.items():
                 path=ROOT/name
@@ -51,7 +175,7 @@ class QualificationHooks:
     def after_stage17(self,execute):
         if self.seeded: raise ValueError('duplicate qualification seed')
         self.seeded=True
-        if self.mode=='gateway26': execute(self.files['seed'].decode('utf-8'))
+        if self.mode in ('gateway26','gateway26-races'): execute(self.files['seed'].decode('utf-8'))
     def after_forward(self,stage,execute):
         if not self.seeded or stage!=self.next_stage: raise ValueError('qualification stage order')
         if stage in (22,23,24): self.schema._require_migration_stage(execute,stage)
@@ -61,14 +185,15 @@ class QualificationHooks:
             try: origin21_schema.require_ledger(list(range(1,26)))
             except ValueError: pass
             else: raise RuntimeError('legacy 21 accepted stage 25')
-            if self.mode=='gateway26': self._gateway(execute)
+            if self.mode in ('gateway26','gateway26-races'): self._gateway(execute)
+            if self.mode=='gateway26-races': run_races(execute)
             self.complete=True
         else: raise ValueError('invalid qualification stage')
         self.next_stage+=1
     def receipt(self):
         if not self.complete: raise RuntimeError('qualification incomplete')
         return {'mode':self.mode,'schema_stage':25 if self.mode=='schema25' else 26,
-                'scope':'synthetic-sql-only','authenticated_transport':False}
+                'scope':'synthetic-sql-races-only' if self.mode=='gateway26-races' else 'synthetic-sql-only','authenticated_transport':False}
     def _gateway(self,execute):
         migration=self.files['migration'];fixture=self.files['fixture']
         # One execute is one fresh psql session: temp fixture state cannot leak
@@ -102,7 +227,7 @@ def load_capture():
 
 
 def main(argv):
-    if len(argv)!=2 or argv[0] not in ('schema25','gateway26'): raise ValueError('expected closed mode and private output')
+    if len(argv)!=2 or argv[0] not in ('schema25','gateway26','gateway26-races'): raise ValueError('expected closed mode and private output')
     path=Path(argv[1])
     if not path.is_absolute() or '..' in path.parts or any(part.is_symlink() for part in (path,*path.parents)): raise ValueError('invalid output')
     if path.exists(): raise ValueError('output already exists')
