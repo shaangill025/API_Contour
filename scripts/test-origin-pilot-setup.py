@@ -17,6 +17,48 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = ROOT/'tests/fixtures/origin-setup'
 IMAGE = 'postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4'
+_PHASE = 'arguments'
+_FAILURES = []
+_PHASES = frozenset({'arguments','source','image','container','bootstrap','credentials',
+                     'setup','audit','cleanup','source-final'})
+_FRAMES = frozenset({
+    'scripts/test-origin-pilot-setup.py',
+    'tests/fixtures/origin-setup/concurrency.py', 'tests/fixtures/origin-setup/login_transport.py',
+    'deploy/pilot/origin_credentials.py', 'deploy/pilot/origin_credentials_fixture.py',
+    'deploy/pilot/origin_setup_fixture.py', 'deploy/pilot/origin_schema_fixture.py',
+    'deploy/pilot/origin_renewal_fixture.py', 'deploy/pilot/origin_enrollment_fixture.py',
+    'deploy/pilot/origin_setup.py', 'deploy/pilot/origin_setup_state.py',
+    'deploy/pilot/origin_enrollment.py', 'deploy/pilot/origin_renewal.py',
+    'deploy/pilot/origin_logins.py', 'deploy/pilot/origin_profile.py',
+    'deploy/local/capture_renew.py', 'deploy/local/capture_provision.py',
+    'deploy/local/provision.py',
+})
+_ERROR_TYPES = frozenset({ValueError, RuntimeError, TimeoutError, AssertionError, OSError,
+                          KeyError, IndexError, TypeError, AttributeError,
+                          subprocess.TimeoutExpired, subprocess.CalledProcessError})
+
+
+def failure_line(error, phase, role):
+    """Only fixed classifications and exact owned source locations leave the fixture."""
+    if phase not in _PHASES or role not in ('primary','cleanup'): return None
+    kind=type(error).__name__ if type(error) in _ERROR_TYPES else 'OtherError'
+    known={str(ROOT/path):path for path in _FRAMES}
+    frames=[]; current=error.__traceback__; count=0
+    while current is not None and count<128:
+        path=known.get(current.tb_frame.f_code.co_filename)
+        if path is not None and 0<current.tb_lineno<10000000:
+            frames.append(path+':'+str(current.tb_lineno))
+        current=current.tb_next; count+=1
+    location=','.join(frames[-6:]) or 'unavailable'
+    line='origin-setup-failure phase='+phase+' role='+role+' type='+kind+' location='+location
+    return line if len(line.encode('ascii'))<=2048 else None
+
+
+def failure_lines(error):
+    entries=list(_FAILURES[:7])
+    if not any(item[0] is error for item in entries):
+        entries.append((error,_PHASE,'cleanup' if entries else 'primary'))
+    return [line for exc,phase,role in entries if (line:=failure_line(exc,phase,role)) is not None][:8]
 
 
 def command(args, data=None, timeout=60):
@@ -65,9 +107,14 @@ def synthetic_profile(directory, base):
 
 
 def main():
+    global _PHASE
+    _FAILURES.clear()
+    _PHASE='arguments'
     if len(sys.argv)!=1: raise ValueError('this qualification accepts no arguments')
     os.umask(0o077)
+    _PHASE='source'
     before=source_snapshot()
+    _PHASE='image'
     ensure_image()
     owner = uuid.uuid4().hex
     name = 'apicontour-origin-setup-'+owner
@@ -77,6 +124,7 @@ def main():
     ca_cleanup = False
     concurrency = None
     try:
+        _PHASE='container'
         container_id=command(['docker','run','-d','--name',name,'--label','apicontour.fixture='+owner,
             '--pull','never','--network','none','--memory','512m','--cpus','1','--pids-limit','128',
             '--tmpfs','/var/lib/postgresql/data:rw,nosuid,noexec,size=256m',
@@ -97,6 +145,7 @@ def main():
             time.sleep(.5)
         else: raise RuntimeError('owned PostgreSQL not ready')
         sys.path.insert(0,str(ROOT))
+        _PHASE='bootstrap'
         from deploy.local import capture_profiles, provision
         def raw_sql(query):
             return command(['docker','exec','-i',container_id,'psql','-X','-qAt','-v','ON_ERROR_STOP=1',
@@ -137,8 +186,10 @@ def main():
                 credential_root=scratch/'credential-profile'; credential_root.mkdir(mode=0o700)
                 profile=synthetic_profile(credential_root,capture_profiles.ORIGIN_PILOT)
                 credential_fixture=runpy.run_path(str(ROOT/'deploy/pilot/origin_credentials_fixture.py'))['run_cases']
+                _PHASE='credentials'
                 if credential_fixture(profile,cert,key,wrong_ca_cert=wrong_cert)!='synthetic origin credential fixture passed':
                     raise RuntimeError('credential negative matrix incomplete')
+                _PHASE='setup'
                 if fixture(sql,cert,key,sensitive_execute=sensitive_with_schema_check,authenticate=authenticate,
                            wrong_database_execute=wrong_database,enrollment=True,renewal=True)!='origin schema preparation fault fixture passed':
                     raise RuntimeError('combined PostgreSQL setup matrix incomplete')
@@ -148,14 +199,21 @@ def main():
         if not schema_checked: raise RuntimeError('schema negative matrix did not execute')
         if not concurrency or not all(value is True for value in concurrency.values()):
             raise RuntimeError('owned observer concurrency checks incomplete')
+        _PHASE='audit'
         result=audit(); audit=None
         if not all(result[key] for key in ('logging_positive_control','private_session_absent','sensitive_values_absent')):
             raise RuntimeError('private-session audit failed')
+    except Exception as error:
+        _FAILURES.append((error,_PHASE,'primary'))
+        raise
     finally:
+        _PHASE='cleanup'
         audit_failed=False
         if audit is not None:
             try: audit()
-            except Exception: audit_failed=True
+            except Exception as error:
+                _FAILURES.append((error,'cleanup','cleanup'))
+                audit_failed=True
         owned=find_owned(name,owner)
         if owned is not None and (container_id is None or owned==container_id):
             container_id=owned
@@ -167,12 +225,14 @@ def main():
             # propagates; never remove an unowned name collision.
             cleanup_ok=True
         if not cleanup_ok or audit_failed: raise RuntimeError('owned fixture cleanup or logging audit failed')
+    _PHASE='source-final'
     if source_snapshot()!=before: raise RuntimeError('qualification source changed during execution')
     print('Synthetic internal origin setup and committed renewal qualification passed; runtime capture and platform attestation are not qualified.')
 
 
 if __name__=='__main__':
     try: main()
-    except Exception:
+    except Exception as error:
+        for line in failure_lines(error): print(line,file=sys.stderr)
         print('Synthetic internal origin setup qualification failed; see local prerequisites and fixture status.',file=sys.stderr)
         raise SystemExit(1)
