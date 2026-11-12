@@ -376,14 +376,24 @@ impl Platform {
             ("GET", "/app.js") => Ok(response(200, "text/javascript; charset=utf-8", SCRIPT)),
             ("GET", "/auth/login") => self.login(),
             ("GET", "/auth/callback") => self.callback(&request).await,
-            ("GET", "/auth/session") => self
-                .identity(request.headers())
-                .map(|_| response(200, "application/json", r#"{"authenticated":true}"#)),
+            ("GET", "/auth/session") => self.session_view(request.headers()),
             ("POST", "/auth/logout") => self.logout(&request),
-            (_, path) if path.starts_with("/v1/") => match self.identity(request.headers()) {
-                Ok(identity) => Ok(business(request, identity).await),
-                Err(error) => Err(error),
-            },
+            (_, path) if path.starts_with("/v1/") => {
+                match self.identity_with_view(request.headers()) {
+                    Ok((identity, view)) => {
+                        let mut result = business(request, identity).await;
+                        view.parse()
+                            .map_err(|_| PlatformError::Unavailable)
+                            .map(|header| {
+                                result
+                                    .headers_mut()
+                                    .insert("x-contour-session-view", header);
+                                result
+                            })
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             _ => Ok(response(
                 404,
                 "application/json",
@@ -473,12 +483,14 @@ impl Platform {
             .verify(&token, &login.nonce, unix_now()?)
             .map_err(|_| PlatformError::Unauthenticated)?;
         let session_id = random()?;
+        let session_view = format!("sv1_{}", random()?);
         let now = Instant::now();
         let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
         memory.insert_session(
             session_id.clone(),
             Session {
                 token,
+                view: session_view,
                 nonce: login.nonce,
                 expires: now + SESSION_LIFETIME,
             },
@@ -514,6 +526,35 @@ impl Platform {
             .ok_or(PlatformError::Unauthenticated)?;
         let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
         memory.verified_session(session_id, &self.verifier, unix_now()?, Instant::now())
+    }
+
+    fn identity_with_view(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Result<(VerifiedIdentity, String), PlatformError> {
+        let cookies = wire::cookies(headers)?;
+        let session_id = cookies
+            .get(SESSION_COOKIE)
+            .filter(|id| wire::opaque(id))
+            .ok_or(PlatformError::Unauthenticated)?;
+        let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
+        memory.verified_session_with_view(session_id, &self.verifier, unix_now()?, Instant::now())
+    }
+
+    fn session_view(&self, headers: &hyper::HeaderMap) -> Result<PlatformResponse, PlatformError> {
+        let cookies = wire::cookies(headers)?;
+        let id = cookies
+            .get(SESSION_COOKIE)
+            .filter(|id| wire::opaque(id))
+            .ok_or(PlatformError::Unauthenticated)?;
+        let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
+        let view = memory.verified_session_view(id, &self.verifier, unix_now()?, Instant::now())?;
+        let mut result = response(200, "application/json", r#"{"authenticated":true}"#);
+        result.headers_mut().insert(
+            "x-contour-session-view",
+            view.parse().map_err(|_| PlatformError::Unavailable)?,
+        );
+        Ok(result)
     }
 
     fn logout(&self, request: &BusinessRequest) -> Result<PlatformResponse, PlatformError> {
@@ -902,6 +943,11 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(values.len(), 100);
         assert!(values.iter().all(|value| wire::opaque(value)));
+        assert!(
+            values
+                .iter()
+                .all(|value| !wire::opaque(&format!("sv1_{value}")))
+        );
     }
     #[test]
     fn host_cookie_attributes_and_explicit_deletion() {

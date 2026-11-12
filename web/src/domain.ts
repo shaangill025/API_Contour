@@ -32,6 +32,8 @@ export type Shape = {kind: 'null'|'boolean'|'integer'|'number'|'string'|'binary'
   {kind: 'unknown'; reason: 'empty'|'unsupported'|'limit'|'malformed'|'encrypted'} |
   {kind: 'object'; fields: Record<string,Shape>; additional: Shape | null} |
   {kind: 'array'; items: Shape} | {kind: 'union'; alternatives: Shape[]};
+export type HistoricalOrigin = { observation_id: string; operation_id: string; status: 'unavailable'; origin: null } |
+  { observation_id: string; operation_id: string; status: 'verified'; origin: { project_id: string; service_id: string; environment_id: string; deployment_id: string; instance_id: string; lifecycle_id: string; credential_id: string; grant_id: string } };
 export interface Observation {
   id: string; operation_id: string; structure: Shape; structure_fingerprint: string;
   canonicalization_version: 1; origin_evidence: 'unavailable'; policy_revision: string;

@@ -9,6 +9,7 @@ pub(crate) struct Login {
 }
 pub(crate) struct Session {
     pub token: String,
+    pub view: String,
     pub nonce: String,
     pub expires: Instant,
 }
@@ -84,6 +85,32 @@ impl Memory {
         }
         result
     }
+    pub fn verified_session_with_view(
+        &mut self,
+        id: &str,
+        verifier: &contour_auth::IdTokenVerifier,
+        unix_now: u64,
+        now: Instant,
+    ) -> Result<(contour_auth::VerifiedIdentity, String), PlatformError> {
+        let identity = self.verified_session(id, verifier, unix_now, now)?;
+        let view = self
+            .sessions
+            .get(id)
+            .ok_or(PlatformError::Unauthenticated)?
+            .view
+            .clone();
+        Ok((identity, view))
+    }
+    pub fn verified_session_view(
+        &mut self,
+        id: &str,
+        verifier: &contour_auth::IdTokenVerifier,
+        unix_now: u64,
+        now: Instant,
+    ) -> Result<String, PlatformError> {
+        self.verified_session_with_view(id, verifier, unix_now, now)
+            .map(|(_, view)| view)
+    }
     pub fn remove_session(&mut self, id: &str) {
         self.sessions.remove(id);
     }
@@ -104,6 +131,7 @@ mod tests {
     fn session(expires: Instant) -> Session {
         Session {
             token: "private".into(),
+            view: "sv1_test".into(),
             nonce: "nonce".into(),
             expires,
         }
@@ -148,6 +176,7 @@ mod tests {
                 "id".into(),
                 Session {
                     token: token.clone(),
+                    view: "test-view".into(),
                     nonce: "nonce".into(),
                     expires: now + Duration::from_secs(1800),
                 },
@@ -161,8 +190,49 @@ mod tests {
                 .subject(),
             "synthetic"
         );
+        let (identity, view) = memory
+            .verified_session_with_view("id", &verifier, 1_800_000_000, now)
+            .unwrap();
+        assert_eq!(identity.subject(), "synthetic");
+        assert_eq!(view, "test-view");
+        assert_eq!(
+            memory
+                .verified_session_view("id", &verifier, 1_800_000_000, now)
+                .unwrap(),
+            "test-view"
+        );
+        memory
+            .insert_session(
+                "other".into(),
+                Session {
+                    token: token.clone(),
+                    view: "other-view".into(),
+                    nonce: "nonce".into(),
+                    expires: now + Duration::from_secs(1800),
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            memory
+                .verified_session_view("other", &verifier, 1_800_000_000, now)
+                .unwrap(),
+            "other-view"
+        );
+        assert_eq!(
+            memory
+                .verified_session_view("id", &verifier, 1_800_000_000, now)
+                .unwrap(),
+            "test-view"
+        );
+        memory.remove_session("other");
+        assert!(
+            memory
+                .verified_session_view("other", &verifier, 1_800_000_000, now)
+                .is_err()
+        );
         assert!(matches!(
-            memory.verified_session("id", &verifier, 1_800_000_010, now),
+            memory.verified_session_view("id", &verifier, 1_800_000_010, now),
             Err(PlatformError::Unauthenticated)
         ));
         assert!(!memory.sessions.contains_key("id"));
@@ -171,6 +241,7 @@ mod tests {
                 "wrong-nonce".into(),
                 Session {
                     token,
+                    view: "test-view".into(),
                     nonce: "different".into(),
                     expires: now + Duration::from_secs(1800),
                 },
@@ -179,7 +250,7 @@ mod tests {
             .unwrap();
         assert!(
             memory
-                .verified_session("wrong-nonce", &verifier, 1_800_000_000, now)
+                .verified_session_view("wrong-nonce", &verifier, 1_800_000_000, now)
                 .is_err()
         );
         assert!(!memory.sessions.contains_key("wrong-nonce"));

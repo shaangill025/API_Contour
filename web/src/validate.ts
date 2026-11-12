@@ -1,4 +1,4 @@
-import type {Comparison, Contract, Observation, Operation, Page, Review, Shape} from './domain.ts';
+import type {Comparison, Contract, HistoricalOrigin, Observation, Operation, Page, Review, Shape} from './domain.ts';
 import {validUuid} from './domain.ts';
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
@@ -46,6 +46,18 @@ function shape(value: unknown, depth = 1, budget = {nodes: 0}): Shape {
     o.alternatives.forEach(item => shape(item,depth+1,budget));
   } else exact(o,['kind']);
   return value as Shape;
+}
+export function historicalOrigin(value: unknown, operationId: string, observationId: string): HistoricalOrigin {
+  const o=object(value); exact(o,['observation_id','operation_id','status','origin']);
+  ids(o,['observation_id','operation_id']);
+  if (o.observation_id!==observationId || o.operation_id!==operationId) throw new Error('Invalid response');
+  if (o.status==='unavailable') { if (o.origin!==null) throw new Error('Invalid response'); }
+  else if (o.status==='verified') {
+    const origin=object(o.origin);
+    const keys=['project_id','service_id','environment_id','deployment_id','instance_id','lifecycle_id','credential_id','grant_id'];
+    exact(origin,keys); ids(origin,keys);
+  } else throw new Error('Invalid response');
+  return value as HistoricalOrigin;
 }
 export function observation(value: unknown): Observation {
   const o=object(value);
