@@ -277,6 +277,74 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
     return result[0]
 
 
+
+def _immutable_capture(transport,ids):
+    """Read complete stored capture/proof rows for the fixed prior record IDs."""
+    from deploy.local import provision
+    if not isinstance(ids,set) or len(ids)>10000 or any(not isinstance(x,str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',x) for x in ids): raise ValueError('invalid prior record IDs')
+    if not ids: return {}
+    tenant=provision.sql_quote(provision.IDS[0]); collector=provision.sql_quote(profiles.MANAGED.profile.collector)
+    ids_sql=','.join(provision.sql_quote(value)+'::uuid' for value in sorted(ids))
+    raw=transport.admin(f"""SELECT coalesce(json_agg(json_build_array(m.record_id::text,to_jsonb(m),to_jsonb(b),to_jsonb(p),to_jsonb(q)) ORDER BY m.record_id),'[]'::json)::text
+      FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_batches b USING (tenant_id,collector_id,batch_id)
+      JOIN contour.ingestion_payloads p USING (tenant_id,collector_id,batch_id)
+      LEFT JOIN contour.origin_proofs q USING (tenant_id,collector_id,batch_id,record_id)
+      WHERE m.tenant_id={tenant} AND m.collector_id={collector} AND m.record_id IN ({ids_sql});""")
+    if not isinstance(raw,str) or len(raw.encode('utf-8'))>8*1024*1024: raise ValueError('capture evidence bound')
+    rows=json.loads(raw)
+    if not isinstance(rows,list) or len(rows)!=len(ids) or any(not isinstance(row,list) or len(row)!=5 or row[0] not in ids for row in rows): raise ValueError('capture evidence invalid')
+    result={row[0]:row for row in rows}
+    if set(result)!=ids: raise ValueError('capture evidence missing')
+    return result
+
+
+def _policy_cycle(transport,proof,expected,original,diagnostics=None):
+    """Renew between completed streams and prove both old evidence and adoption."""
+    from deploy.local import origin21_renewal, origin21_setup, provision
+    selected=profiles.MANAGED
+    proof.verify(); transport.verify()
+    _,pending=origin21_renewal.artifacts(selected.bound)
+    if pending is not None: raise ValueError('policy renewal already pending')
+    history=origin21_renewal.history(selected.bound,transport.sensitive)
+    if history is None or type(history.count) is not int or history.count<1 or type(history.head) is not bytes: raise ValueError('policy history invalid')
+    revision=products.require_current_policy(transport.admin,transport.sensitive,selected=selected)
+    if type(revision) is not int or history.count!=revision or history.head_policy.get('revision')!=revision: raise ValueError('policy head mismatch')
+    prior=origin21_ready.snapshot(transport.admin,selected=selected)
+    prior_by_id={row[0]:row for row in prior}
+    if len(prior_by_id)!=len(prior): raise ValueError('duplicate prior evidence')
+    prior_immutable=_immutable_capture(transport,set(prior_by_id))
+    try:
+        origin21_setup.prepare(transport=transport,expected_evidence=expected,renew=True,selected=selected)
+        _,pending=origin21_renewal.artifacts(selected.bound)
+        if pending is not None: raise ValueError('policy renewal outcome pending')
+        renewed=origin21_renewal.history(selected.bound,transport.sensitive)
+        current=products.require_current_policy(transport.admin,transport.sensitive,selected=selected)
+        if renewed is None or renewed.count!=revision+1 or renewed.head_policy.get('revision')!=revision+1 or current!=revision+1 or renewed.initial!=history.initial or renewed.head==history.head: raise ValueError('policy renewal head mismatch')
+        tenant=provision.sql_quote(provision.IDS[0]); collector=provision.sql_quote(selected.profile.collector)
+        prior_head=transport.sensitive(f"SELECT EXISTS (SELECT 1 FROM contour.policy_revisions WHERE tenant_id={tenant} AND collector_id={collector} AND revision={revision} AND signed_envelope=decode('{history.head.hex()}','hex'))::text;")
+        if prior_head!='true': raise ValueError('prior signed policy changed')
+        before=origin21_ready.snapshot(transport.admin,selected=selected)
+        before_ids={row[0] for row in before}
+        if len(before_ids)!=len(before): raise ValueError('duplicate adoption baseline')
+        # This is the existing post-case readiness check, not an extra or reused check.
+        origin21_ready.check(expected,selected=selected,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
+        after=origin21_ready.snapshot(transport.admin,selected=selected)
+        after_by_id={row[0]:row for row in after}
+        if len(after_by_id)!=len(after) or any(after_by_id.get(key)!=value for key,value in prior_by_id.items()) or _immutable_capture(transport,set(prior_by_id))!=prior_immutable: raise ValueError('prior capture evidence changed')
+        fresh=[row for row in after if row[0] not in before_ids]
+        leaves=[item['leaf_sha256'] for item in original]
+        if len(set(leaves))!=2 or any(row[9] not in leaves for row in fresh): raise ValueError('adoption evidence scope')
+        for index,leaf in enumerate(leaves,1):
+            rows=[row for row in after if row[9]==leaf]
+            if not origin21_ready.validate_fresh(rows,before_ids,index,leaf,expected[index-1],current,selected=selected): raise ValueError('policy adoption missing')
+        if products.require_current_policy(transport.admin,transport.sensitive,selected=selected)!=current or transport.sensitive(f"SELECT EXISTS (SELECT 1 FROM contour.policy_revisions WHERE tenant_id={tenant} AND collector_id={collector} AND revision={revision} AND signed_envelope=decode('{history.head.hex()}','hex'))::text;")!='true': raise ValueError('policy changed after adoption')
+        proof.verify(); transport.verify()
+    except BaseException:
+        # Unknown CAS or observation outcomes retain all qualification-owned state.
+        if not any(item[0] is proof for item in _RETAINED): _RETAINED.append((proof,None))
+        raise
+
+
 def qualify_positive_streams(transport,proof):
     """Prove both held directions and real catalog observations on one graph.
 
@@ -293,7 +361,7 @@ def qualify_positive_streams(transport,proof):
     _set_phase('initial-readiness')
     origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
     transitions=[]
-    for mode,index,transition in (('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')):
+    for case,(mode,index,transition) in enumerate((('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')),1):
         _set_phase('stream-capture-baseline')
         before={row[0] for row in origin21_ready.snapshot(transport.admin,selected=profiles.MANAGED)}
         revision=products.require_current_policy(transport.admin,transport.sensitive,selected=profiles.MANAGED)
@@ -302,7 +370,8 @@ def qualify_positive_streams(transport,proof):
         _wait_capture(transport,before,original[index-1],expected[index-1],revision,index)
         if _products(proof)!=original: raise ValueError('qualification product generation changed')
         _set_phase('stream-readiness')
-        origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
+        if case==2: _policy_cycle(transport,proof,expected,original,diagnostics)
+        else: origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
         if _source_guard()!=source: raise ValueError('qualification source changed')
     for first,second in ((transitions[0],transitions[1]),(transitions[2],transitions[3])):
         if first[0]!=second[1] or first[1]!=second[0]: raise ValueError('qualification rollback fingerprint mismatch')
