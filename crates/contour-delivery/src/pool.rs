@@ -1,6 +1,7 @@
 //! Fixed-owner pool. It never transfers authority or waits in capture callbacks.
 use super::{CaptureId, CollectorOwner, OwnerError, SendOutcome};
 use crate::adapter::StructuralAdapter;
+use crate::authority::Refresh;
 use contour_core::{AdmissionInputs, CaptureScope, OriginWitness, QueueStats, RecordMetadata};
 use std::{
     future::{Future, poll_fn},
@@ -12,6 +13,7 @@ use std::{
     task::Poll,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, SemaphorePermit};
+use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoolCapture {
@@ -26,8 +28,10 @@ pub struct CollectorPool {
     instance: u64,
     origin_v2: bool,
     slots: Vec<Mutex<CollectorOwner>>,
+    renewal: Vec<RenewalConfig>,
     enabled: AtomicBool,
     epoch: AtomicU64,
+    failed_epoch: AtomicU64,
     sync: Mutex<()>,
     background: Semaphore,
     cancel: Notify,
@@ -39,6 +43,22 @@ pub struct CollectorPool {
     blocked_sends: AtomicUsize,
 }
 
+struct RenewalConfig {
+    client: crate::DeliveryClient,
+    keys: Arc<contour_core::PolicyKeys>,
+    source_ids: Vec<String>,
+}
+
+impl RenewalConfig {
+    fn duplicate(&self) -> Self {
+        Self {
+            client: self.client.duplicate(),
+            keys: self.keys.clone(),
+            source_ids: self.source_ids.clone(),
+        }
+    }
+}
+
 // Cancellation stays durable even when forwarding cannot acquire the gate.
 // Every gate holder drains it before releasing the last synchronous raw owner.
 struct PoolGate<'a> {
@@ -48,6 +68,32 @@ struct PoolGate<'a> {
 impl Drop for PoolGate<'_> {
     fn drop(&mut self) {
         self.pool.drain_cancelled();
+    }
+}
+struct RenewalFence<'a> {
+    pool: &'a CollectorPool,
+    epoch: u64,
+    armed: bool,
+    guards: Vec<tokio::sync::MutexGuard<'a, CollectorOwner>>,
+    permit: Option<SemaphorePermit<'a>>,
+}
+impl Drop for RenewalFence<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Publish the failure before waiting for a callback's gate. A
+            // callback in progress must see this before retaining its result.
+            if let Some(marker) = self.epoch.checked_add(1) {
+                self.pool.failed_epoch.fetch_max(marker, Ordering::SeqCst);
+            }
+            self.pool.cancel.notify_waiters();
+            for owner in &mut self.guards {
+                owner.streams.clear();
+            }
+            self.guards.clear();
+            if let Ok(_gate) = self.pool.lock_gate() {
+                self.pool.invalidate_epoch(self.epoch);
+            }
+        }
     }
 }
 impl CollectorPool {
@@ -71,13 +117,23 @@ impl CollectorPool {
             .map_err(|_| OwnerError::Paused)?;
         let origin_v2 = first.client.wire_mode == super::WireMode::V2;
         let cancelled = (0..owners.len()).map(|_| AtomicU64::new(0)).collect();
+        let renewal = owners
+            .iter()
+            .map(|owner| RenewalConfig {
+                client: owner.client.duplicate(),
+                keys: owner.keys.clone(),
+                source_ids: owner.source_ids.clone(),
+            })
+            .collect();
         Ok(Arc::new(Self {
             instance,
             origin_v2,
             cancelled,
             slots: owners.into_iter().map(Mutex::new).collect(),
+            renewal,
             enabled: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            failed_epoch: AtomicU64::new(0),
             sync: Mutex::new(()),
             background: Semaphore::new(1),
             cancel: Notify::new(),
@@ -139,16 +195,27 @@ impl CollectorPool {
     /// this periodically in addition to the checks on capture operations.
     pub fn poll_authority(&self) -> Result<(), OwnerError> {
         let _gate = self.try_gate().map_err(|_| OwnerError::Paused)?;
-        if !self.enabled.load(Ordering::Acquire) {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        if !self.current(epoch) {
             return Err(OwnerError::Paused);
         }
-        self.check_live()
+        self.check_live()?;
+        for slot in &self.slots {
+            if let Ok(mut owner) = slot.try_lock() {
+                owner.streams.expire();
+            }
+        }
+        Ok(())
     }
     fn lose(&self) {
         self.losses.fetch_add(1, Ordering::Relaxed);
     }
     fn current(&self, epoch: u64) -> bool {
-        self.enabled.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch
+        self.enabled.load(Ordering::Acquire)
+            && self.epoch.load(Ordering::Acquire) == epoch
+            && epoch
+                .checked_add(1)
+                .is_some_and(|marker| self.failed_epoch.load(Ordering::SeqCst) < marker)
     }
     // Wait outside every owner/raw lock. Tokio's semaphore queues waiters fairly;
     // cancellation must also wake an old waiter before it can use a new grant.
@@ -225,6 +292,201 @@ impl CollectorPool {
         self.enabled.store(true, Ordering::Release);
         Ok(())
     }
+    /// Renew equivalent authority without interrupting live streams while the
+    /// independently owned transport is pending. Real changes use full sync.
+    pub async fn renew(&self) -> Result<(), OwnerError> {
+        let configs = &self.renewal;
+        self.renew_with(|index| {
+            let mut config = configs[index].duplicate();
+            async move {
+                config
+                    .client
+                    .refresh_authority(&config.source_ids, &config.keys)
+                    .await
+                    .map_err(OwnerError::from)
+            }
+        })
+        .await
+    }
+
+    async fn renew_with<F, Fut>(&self, mut fetch: F) -> Result<(), OwnerError>
+    where
+        F: FnMut(usize) -> Fut,
+        Fut: Future<Output = Result<Refresh, OwnerError>>,
+    {
+        // Full synchronize invalidates before waiting on this mutex. Thus an
+        // older renewal can never install after a stop or newer full sync.
+        let _sync = self.sync.lock().await;
+        let epoch = {
+            let _gate = self.lock_gate()?;
+            let epoch = self.epoch.load(Ordering::Acquire);
+            if !self.current(epoch) {
+                return Err(OwnerError::Paused);
+            }
+            self.check_live()?;
+            epoch
+        };
+        let mut fence = RenewalFence {
+            pool: self,
+            epoch,
+            armed: true,
+            guards: Vec::with_capacity(self.slots.len()),
+            permit: None,
+        };
+        let mut candidates = Vec::with_capacity(self.slots.len());
+        for index in 0..self.slots.len() {
+            let notify = self.cancel.notified();
+            let mut notify = pin!(notify);
+            let future = fetch(index);
+            let mut future = pin!(future);
+            let candidate = poll_fn(|cx| {
+                if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Err(OwnerError::Paused));
+                }
+                future.as_mut().poll(cx)
+            })
+            .await?;
+            candidates.push(candidate);
+        }
+        // Drain the single background transport before taking any owner lock,
+        // so a deferred send cannot hold previously acquired raw owners idle.
+        fence.permit = Some(self.background_permit(epoch).await?);
+        // Await owner locks without the coordinator gate. Capture operations
+        // never wait on these locks and their contention losses are counted.
+        for slot in &self.slots {
+            let notify = self.cancel.notified();
+            let mut notify = pin!(notify);
+            let lock = slot.lock();
+            let mut lock = pin!(lock);
+            let guard = poll_fn(|cx| {
+                if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Err(OwnerError::Paused));
+                }
+                match lock.as_mut().poll(cx) {
+                    Poll::Ready(guard) => Poll::Ready(Ok(guard)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+            fence.guards.push(guard);
+        }
+        let _gate = self.lock_gate()?;
+        let checked = (|| -> Result<(), OwnerError> {
+            if !self.current(epoch) || fence.guards.iter().any(|owner| !owner.is_live()) {
+                return Err(OwnerError::Paused);
+            }
+            let total = fence
+                .guards
+                .iter()
+                .try_fold(0usize, |sum, owner| {
+                    sum.checked_add(owner.configured_queue_bytes)
+                })
+                .ok_or(OwnerError::Paused)?;
+            let first = candidates.first().ok_or(OwnerError::Paused)?;
+            let equivalent = fence
+                .guards
+                .iter()
+                .zip(&candidates)
+                .all(|(owner, candidate)| {
+                    let Some(current) = owner.policies.last().map(|p| &p.policy) else {
+                        return false;
+                    };
+                    let Some(live) = owner.live.as_ref() else {
+                        return false;
+                    };
+                    candidate.live.sources == live.sources
+                        && candidate.live.sources == first.live.sources
+                        && candidate.policy.revision() == current.revision()
+                        && total as u64 <= candidate.policy.queue_bytes()
+                        && Instant::now() < candidate.live.deadline
+                        && candidate
+                            .policy
+                            .validate_capture_at(time::OffsetDateTime::now_utc())
+                            .is_ok()
+                        && AdmissionInputs::new(
+                            owner.client.identity.each_ref().map(String::as_str),
+                            &candidate.policy,
+                            &[current],
+                            &candidate.live.sources,
+                        )
+                        .is_ok()
+                        && AdmissionInputs::new(
+                            owner.client.identity.each_ref().map(String::as_str),
+                            &candidate.policy,
+                            &[&first.policy],
+                            &candidate.live.sources,
+                        )
+                        .is_ok()
+                });
+            if !equivalent {
+                return Err(OwnerError::Paused);
+            }
+            // All candidate checks precede reconciliation; no partial installation
+            // can be observed while every owner and the coordinator gate are held.
+            for (owner, candidate) in fence.guards.iter_mut().zip(&candidates) {
+                let owner = &mut **owner;
+                let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+                let inputs = AdmissionInputs::new(
+                    owner.client.identity.each_ref().map(String::as_str),
+                    &candidate.policy,
+                    &refs,
+                    &candidate.live.sources,
+                )
+                .map_err(|e| OwnerError::Queue(crate::QueueError::Admission(e)))?;
+                owner.queue.reconcile(&inputs)?;
+            }
+            if !self.current(epoch)
+                || fence.guards.iter().any(|owner| !owner.is_live())
+                || candidates.iter().any(|c| {
+                    Instant::now() >= c.live.deadline
+                        || c.policy
+                            .validate_capture_at(time::OffsetDateTime::now_utc())
+                            .is_err()
+                })
+            {
+                return Err(OwnerError::Paused);
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            // Failed reconciliation or drift is visible before the gate and
+            // owners are released, including already-held raw streams.
+            for owner in &mut fence.guards {
+                owner.streams.clear();
+            }
+            self.invalidate_epoch(epoch);
+            fence.armed = false;
+            return Err(error);
+        }
+        for (owner, candidate) in fence.guards.iter_mut().zip(candidates) {
+            owner.live = Some(candidate.live);
+            if owner
+                .retry
+                .as_ref()
+                .is_some_and(|r| r.directive == crate::RetryDirective::RenewAuthorizedEnrollment)
+            {
+                owner.retry = None;
+            }
+        }
+        fence.armed = false;
+        Ok(())
+    }
+
+    // Caller holds the coordinator gate; invalidation is conditional so a
+    // dropped stale renewal cannot disable a newer generation.
+    fn invalidate_epoch(&self, epoch: u64) {
+        if self.enabled.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch {
+            self.enabled.store(false, Ordering::Release);
+            let _ = self.advance_epoch();
+            for slot in &self.slots {
+                if let Ok(mut owner) = slot.try_lock() {
+                    owner.streams.clear();
+                }
+            }
+            self.cancel.notify_waiters();
+        }
+    }
+
     fn validate_common(
         guards: &[tokio::sync::MutexGuard<'_, CollectorOwner>],
     ) -> Result<(), OwnerError> {
@@ -371,6 +633,11 @@ impl CollectorPool {
                         return Err(OwnerError::Paused);
                     }
                 }
+                if !self.current(epoch) {
+                    owner.cancel_capture(id);
+                    self.lose();
+                    return Err(OwnerError::Paused);
+                }
                 return Ok(PoolCapture {
                     pool: self.instance,
                     slot,
@@ -426,9 +693,16 @@ impl CollectorPool {
             self.lose();
             return Err(OwnerError::Paused);
         }
-        let result = owner.capture_fragment(token.id, bytes).inspect_err(|_| {
+        let mut result = owner
+            .capture_fragment_checked(token.id, bytes, || self.current(token.epoch))
+            .inspect_err(|_| {
+                self.lose();
+            });
+        if !self.current(token.epoch) {
+            owner.cancel_capture(token.id);
             self.lose();
-        });
+            result = Err(OwnerError::Paused);
+        }
         drop(owner);
         self.check_live()?;
         result
@@ -482,7 +756,8 @@ impl CollectorPool {
             self.lose();
             return Err(OwnerError::Paused);
         }
-        let result = owner.finish_and_admit(token.id, metadata);
+        let result =
+            owner.finish_and_admit_checked(token.id, metadata, || self.current(token.epoch));
         drop(owner);
         self.check_live()?;
         result.inspect_err(|_| {
@@ -535,7 +810,11 @@ impl CollectorPool {
         if !owner.streams.is_empty() {
             return Err(OwnerError::Paused);
         }
-        owner.freeze(batch_id, maximum_records, maximum_wire_bytes)
+        let result = owner.freeze(batch_id, maximum_records, maximum_wire_bytes);
+        if !self.current(epoch) {
+            return Err(OwnerError::Paused);
+        }
+        result
     }
     /// Background only: owner remains in its mutex if cancellation drops the
     /// send future, preserving frozen IDs and releasing transport owners first.
@@ -576,7 +855,11 @@ impl CollectorPool {
             if !self.current(epoch) || notify.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(Err(OwnerError::Paused));
             }
-            send.as_mut().poll(cx)
+            match send.as_mut().poll(cx) {
+                Poll::Ready(result) if self.current(epoch) => Poll::Ready(result),
+                Poll::Ready(_) => Poll::Ready(Err(OwnerError::Paused)),
+                Poll::Pending => Poll::Pending,
+            }
         })
         .await
     }
@@ -621,7 +904,7 @@ impl CollectorPool {
 #[cfg(test)]
 mod tests {
     use super::super::capture_tests::{
-        make_owner, make_owner_at, make_owner_at_with_ttl, make_owner_v2, scope,
+        make_owner, make_owner_at, make_owner_at_with_ttl, make_owner_mode_at, make_owner_v2, scope,
     };
     use super::*;
 
@@ -879,6 +1162,503 @@ mod tests {
                 )
                 .expect("reserved owner must admit the actual captured record");
                 assert_eq!(pool.losses(), 0);
+            });
+    }
+
+    #[test]
+    fn pending_equivalent_renewal_preserves_stream() {
+        let now = time::OffsetDateTime::now_utc();
+        let pool = CollectorPool::new(vec![make_owner_at(now)]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let mut candidate_owner = make_owner_at(now);
+        let candidate = Refresh {
+            live: candidate_owner.live.take().unwrap(),
+            policy: candidate_owner.policies.pop().unwrap().policy,
+            envelope_bytes: 0,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let token = pool.try_begin(&scope()).unwrap();
+                pool.try_fragment(token, br#"{"id":"#).unwrap();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let mut rx = Some(rx);
+                let mut renewal = Box::pin(pool.renew_with(|_| {
+                    let rx = rx.take().unwrap();
+                    async move { rx.await.map_err(|_| OwnerError::Paused) }
+                }));
+                poll_fn(|cx| {
+                    assert!(renewal.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(
+                    pool.slots[0].try_lock().is_ok(),
+                    "fetch holds no owner lock"
+                );
+                pool.try_fragment(token, b"1}")
+                    .expect("pending fetch preserves raw stream");
+                tx.send(candidate).ok().unwrap();
+                renewal.await.unwrap();
+                let s = scope();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                pool.try_finish(
+                    token,
+                    RecordMetadata {
+                        record_id: "00000000-0000-4000-8000-000000000002",
+                        source_id: s.source_id,
+                        workload: s.workload,
+                        protocol: "http",
+                        direction: "request",
+                        visibility: "structure",
+                        operation: s.operation,
+                        route_template: s.route_template,
+                        route_uncertain: false,
+                        parser_profile: s.parser_profile,
+                        policy_revision: 1,
+                        count: 1,
+                        first_seen: timestamp.clone(),
+                        last_seen: timestamp,
+                        sample_numerator: 1,
+                        sample_denominator: 1,
+                        status_code: None,
+                        request_header_names: &[],
+                        response_header_names: &[],
+                        query_parameter_names: &[],
+                    },
+                )
+                .unwrap();
+                assert_eq!(pool.try_queue_stats(0).unwrap().records, 1);
+                assert_eq!(pool.losses(), 0);
+            });
+    }
+
+    fn candidate_at(now: time::OffsetDateTime) -> Refresh {
+        let mut owner = make_owner_at(now);
+        Refresh {
+            live: owner.live.take().unwrap(),
+            policy: owner.policies.pop().unwrap().policy,
+            envelope_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn v2_witness_survives_equivalent_renewal() {
+        let now = time::OffsetDateTime::now_utc();
+        let owner = make_owner_mode_at(super::super::WireMode::V2, now, 60);
+        let pool = CollectorPool::new(vec![owner]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let mut candidate = Some(candidate_at(now));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let witness = OriginWitness::DownstreamMtlsLeafSha256V1 {
+                    leaf_sha256: "a".repeat(64),
+                };
+                let token = pool.try_begin_v2(&scope(), &witness).unwrap();
+                pool.try_fragment(token, br#"{"id":"#).unwrap();
+                pool.renew_with(|_| {
+                    let candidate = candidate.take().unwrap();
+                    async move { Ok(candidate) }
+                })
+                .await
+                .unwrap();
+                pool.try_fragment(token, b"1}").unwrap();
+                let s = scope();
+                let timestamp = contour_core::Timestamp::parse("2026-10-30T12:00:00Z").unwrap();
+                pool.try_finish(
+                    token,
+                    RecordMetadata {
+                        record_id: "00000000-0000-4000-8000-000000000002",
+                        source_id: s.source_id,
+                        workload: s.workload,
+                        protocol: "http",
+                        direction: "request",
+                        visibility: "structure",
+                        operation: s.operation,
+                        route_template: s.route_template,
+                        route_uncertain: false,
+                        parser_profile: s.parser_profile,
+                        policy_revision: 1,
+                        count: 1,
+                        first_seen: timestamp.clone(),
+                        last_seen: timestamp,
+                        sample_numerator: 1,
+                        sample_denominator: 1,
+                        status_code: None,
+                        request_header_names: &[],
+                        response_header_names: &[],
+                        query_parameter_names: &[],
+                    },
+                )
+                .unwrap();
+                let mut owner = pool.slots[0].try_lock().unwrap();
+                assert!(
+                    owner
+                        .freeze("00000000-0000-4000-8000-000000000001", 1, 10000)
+                        .unwrap()
+                );
+                let owner = &mut *owner;
+                let refs = owner.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
+                let inputs = AdmissionInputs::new(
+                    owner.client.identity.each_ref().map(String::as_str),
+                    refs.last().unwrap(),
+                    &refs,
+                    &owner.live.as_ref().unwrap().sources,
+                )
+                .unwrap();
+                let mut attempt = owner.queue.reserve_delivery(&inputs).unwrap().unwrap();
+                let value: serde_json::Value =
+                    serde_json::from_slice(attempt.view().wire()).unwrap();
+                assert_eq!(
+                    value["records"][0]["origin_witness"]["leaf_sha256"],
+                    "a".repeat(64)
+                );
+            });
+    }
+
+    #[test]
+    fn renewal_failure_and_dropped_future_fence_capture() {
+        for cancel in [false, true] {
+            let now = time::OffsetDateTime::now_utc();
+            let pool = CollectorPool::new(vec![make_owner_at(now)]).unwrap();
+            pool.enabled.store(true, Ordering::Release);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let token = pool.try_begin(&scope()).unwrap();
+                    pool.try_fragment(token, b"private").unwrap();
+                    if cancel {
+                        let mut renewal = Box::pin(pool.renew_with(|_| async {
+                            std::future::pending::<Result<Refresh, OwnerError>>().await
+                        }));
+                        poll_fn(|cx| {
+                            assert!(renewal.as_mut().poll(cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        drop(renewal);
+                    } else {
+                        assert!(
+                            pool.renew_with(|_| async {
+                                Err(OwnerError::Transport(crate::DeliveryError::Transport))
+                            })
+                            .await
+                            .is_err()
+                        );
+                    }
+                    assert!(!pool.enabled.load(Ordering::Acquire));
+                    assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+                    assert!(pool.try_fragment(token, b"late").is_err());
+                });
+        }
+    }
+
+    #[test]
+    fn stale_renewal_cannot_disable_or_reactivate_new_epoch() {
+        let now = time::OffsetDateTime::now_utc();
+        let pool = CollectorPool::new(vec![make_owner_at(now)]).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let mut rx = Some(rx);
+                let mut renewal = Box::pin(pool.renew_with(|_| {
+                    let rx = rx.take().unwrap();
+                    async move { rx.await.map_err(|_| OwnerError::Paused) }
+                }));
+                poll_fn(|cx| {
+                    assert!(renewal.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let mut stop = Box::pin(pool.synchronize());
+                poll_fn(|cx| {
+                    assert!(stop.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(!pool.enabled.load(Ordering::Acquire));
+                let new_epoch = pool.epoch.load(Ordering::Acquire);
+                // Model a newer successfully enabled generation while the old
+                // transport is still pending; its late response must not affect that one.
+                pool.enabled.store(true, Ordering::Release);
+                tx.send(candidate_at(now)).ok().unwrap();
+                assert!(renewal.await.is_err());
+                assert!(pool.current(new_epoch));
+                drop(stop);
+            });
+    }
+
+    #[test]
+    fn changed_content_or_source_never_commits_as_equivalent() {
+        for source_drift in [false, true] {
+            let now = time::OffsetDateTime::now_utc();
+            let pool = CollectorPool::new(vec![make_owner_at(now)]).unwrap();
+            pool.enabled.store(true, Ordering::Release);
+            let mut candidate = if source_drift {
+                candidate_at(now)
+            } else {
+                candidate_at(now + time::Duration::seconds(1))
+            };
+            if source_drift {
+                candidate.live.sources.clear();
+            }
+            let mut candidate = Some(candidate);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let token = pool.try_begin(&scope()).unwrap();
+                    pool.try_fragment(token, b"private").unwrap();
+                    assert!(
+                        pool.renew_with(|_| {
+                            let c = candidate.take().unwrap();
+                            async move { Ok(c) }
+                        })
+                        .await
+                        .is_err()
+                    );
+                    assert!(!pool.enabled.load(Ordering::Acquire));
+                    assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+                    assert!(pool.try_fragment(token, b"late").is_err());
+                });
+        }
+    }
+
+    #[test]
+    fn denied_malformed_and_expired_candidates_disable_capture() {
+        for failure in 0..4 {
+            let now = time::OffsetDateTime::now_utc();
+            let pool = CollectorPool::new(vec![make_owner_at(now)]).unwrap();
+            pool.enabled.store(true, Ordering::Release);
+            let mut candidate = candidate_at(now);
+            candidate.live.deadline = Instant::now();
+            let mut candidate = Some(candidate);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let token = pool.try_begin(&scope()).unwrap();
+                    pool.try_fragment(token, b"private").unwrap();
+                    let result = pool
+                        .renew_with(|_| {
+                            let candidate = candidate.take().unwrap();
+                            async move {
+                                match failure {
+                                    0 => {
+                                        Err(OwnerError::Transport(crate::DeliveryError::Rejected {
+                                            status: 403,
+                                            retry_after: None,
+                                        }))
+                                    }
+                                    1 => Err(OwnerError::Transport(crate::DeliveryError::Receipt)),
+                                    2 => {
+                                        Err(OwnerError::Transport(crate::DeliveryError::Transport))
+                                    }
+                                    _ => Ok(candidate),
+                                }
+                            }
+                        })
+                        .await;
+                    assert!(result.is_err());
+                    assert!(!pool.enabled.load(Ordering::Acquire));
+                    assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+                    assert!(pool.try_fragment(token, b"late").is_err());
+                });
+        }
+    }
+
+    #[test]
+    fn aggregate_quota_drift_invalidates_without_install() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            owner.configured_queue_bytes = 6000;
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let mut candidates = [Some(candidate_at(now)), Some(candidate_at(now))];
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let token = pool.try_begin(&scope()).unwrap();
+                pool.try_fragment(token, b"private").unwrap();
+                let original = pool.slots[0]
+                    .try_lock()
+                    .unwrap()
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .deadline;
+                assert!(
+                    pool.renew_with(|i| {
+                        let c = candidates[i].take().unwrap();
+                        async move { Ok(c) }
+                    })
+                    .await
+                    .is_err()
+                );
+                assert!(!pool.enabled.load(Ordering::Acquire));
+                assert_eq!(
+                    pool.slots[0]
+                        .try_lock()
+                        .unwrap()
+                        .live
+                        .as_ref()
+                        .unwrap()
+                        .deadline,
+                    original
+                );
+                assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+            });
+    }
+
+    #[test]
+    fn commit_owner_contention_counts_capture_loss() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            owner.configured_queue_bytes = 4000;
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let mut candidates = [Some(candidate_at(now)), Some(candidate_at(now))];
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let token = pool.try_begin(&scope()).unwrap();
+                assert_eq!(token.slot, 0);
+                pool.try_fragment(token, b"prefix").unwrap();
+                let busy = pool.slots[1].lock().await;
+                let mut renewal = Box::pin(pool.renew_with(|i| {
+                    let c = candidates[i].take().unwrap();
+                    async move { Ok(c) }
+                }));
+                poll_fn(|cx| {
+                    assert!(renewal.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(pool.try_fragment(token, b"suffix").is_err());
+                assert_eq!(pool.losses(), 1);
+                drop(renewal);
+                assert!(pool.slots[0].try_lock().unwrap().streams.is_empty());
+                drop(busy);
+            });
+    }
+
+    #[test]
+    fn pending_send_does_not_block_fetch_and_renewal_cancel_interrupts_send() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            owner.configured_queue_bytes = 4000;
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        pool.blocked_sends.store(1, Ordering::Release);
+        let mut candidates = [Some(candidate_at(now)), Some(candidate_at(now))];
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut send = Box::pin(pool.send(0));
+                poll_fn(|cx| {
+                    assert!(send.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let token = pool.try_begin(&scope()).unwrap();
+                assert_eq!(token.slot, 1);
+                pool.try_fragment(token, b"before").unwrap();
+                let mut renewal = Box::pin(pool.renew_with(|i| {
+                    let candidate = candidates[i].take().unwrap();
+                    async move { Ok(candidate) }
+                }));
+                poll_fn(|cx| {
+                    assert!(renewal.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                pool.try_fragment(token, b"after").unwrap();
+                drop(renewal);
+                assert!(!pool.enabled.load(Ordering::Acquire));
+                assert!(pool.slots[1].try_lock().unwrap().streams.is_empty());
+                poll_fn(|cx| {
+                    assert!(matches!(
+                        send.as_mut().poll(cx),
+                        Poll::Ready(Err(OwnerError::Paused))
+                    ));
+                    Poll::Ready(())
+                })
+                .await;
+            });
+    }
+
+    #[test]
+    fn partial_pool_failure_invalidates_all_slots_without_install() {
+        let now = time::OffsetDateTime::now_utc();
+        let mut owners = vec![make_owner_at(now), make_owner_at(now)];
+        for owner in &mut owners {
+            owner.configured_queue_bytes = 4000;
+        }
+        let pool = CollectorPool::new(owners).unwrap();
+        pool.enabled.store(true, Ordering::Release);
+        let mut candidate = Some(candidate_at(now));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let token = pool.try_begin(&scope()).unwrap();
+                pool.try_fragment(token, b"private").unwrap();
+                let original = pool.slots[0]
+                    .try_lock()
+                    .unwrap()
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .deadline;
+                let result = pool
+                    .renew_with(|index| {
+                        let candidate = if index == 0 { candidate.take() } else { None };
+                        async move { candidate.ok_or(OwnerError::Paused) }
+                    })
+                    .await;
+                assert!(result.is_err());
+                assert!(!pool.enabled.load(Ordering::Acquire));
+                assert!(
+                    pool.slots
+                        .iter()
+                        .all(|slot| slot.try_lock().unwrap().streams.is_empty())
+                );
+                assert_eq!(
+                    pool.slots[0]
+                        .try_lock()
+                        .unwrap()
+                        .live
+                        .as_ref()
+                        .unwrap()
+                        .deadline,
+                    original
+                );
             });
     }
 

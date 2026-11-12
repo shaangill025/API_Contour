@@ -10,6 +10,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use time::OffsetDateTime;
+use tokio::time::Instant;
 use zeroize::Zeroize;
 
 const MAX_STREAMS: usize = 16;
@@ -27,6 +28,7 @@ impl CaptureId {
     }
 }
 struct Stream {
+    deadline: Instant,
     source: String,
     workload: [String; 4],
     profile: String,
@@ -81,6 +83,11 @@ impl Streams {
     }
     pub(crate) fn cancel_through(&mut self, sequence: u64) {
         self.entries.retain(|id, _| id.sequence > sequence);
+        self.total = self.entries.values().map(|entry| entry.bytes.len()).sum();
+    }
+    pub(crate) fn expire(&mut self) {
+        let now = Instant::now();
+        self.entries.retain(|_, stream| now < stream.deadline);
         self.total = self.entries.values().map(|entry| entry.bytes.len()).sum();
     }
     pub(crate) fn clear(&mut self) {
@@ -155,6 +162,7 @@ impl CollectorOwner {
         self.streams.entries.insert(
             id,
             Stream {
+                deadline: self.live.as_ref().ok_or(OwnerError::Paused)?.deadline,
                 source: scope.source_id.to_owned(),
                 workload: scope.workload.map(str::to_owned),
                 profile: scope.parser_profile.to_owned(),
@@ -196,6 +204,14 @@ impl CollectorOwner {
     ) -> Result<(), OwnerError> {
         self.capture_fragment_prepared(id, bytes, |_| {}, before_copy)
     }
+    pub(super) fn capture_fragment_checked(
+        &mut self,
+        id: CaptureId,
+        bytes: &[u8],
+        still_current: impl Fn() -> bool,
+    ) -> Result<(), OwnerError> {
+        self.capture_fragment_prepared_checked(id, bytes, still_current, |_| {}, || {})
+    }
     // Private deterministic preparation seam; adapters cannot alter authority.
     pub(super) fn capture_fragment_prepared(
         &mut self,
@@ -204,15 +220,31 @@ impl CollectorOwner {
         prepared: impl FnOnce(&mut Self),
         before_copy: impl FnOnce(),
     ) -> Result<(), OwnerError> {
+        self.capture_fragment_prepared_checked(id, bytes, || true, prepared, before_copy)
+    }
+    fn capture_fragment_prepared_checked(
+        &mut self,
+        id: CaptureId,
+        bytes: &[u8],
+        still_current: impl Fn() -> bool,
+        prepared: impl FnOnce(&mut Self),
+        before_copy: impl FnOnce(),
+    ) -> Result<(), OwnerError> {
         if self.guard().is_err() {
             self.streams.clear();
             return Err(OwnerError::Paused);
         }
         let stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
+        if !still_current() || Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
         let limit = self.check_stream_scope(&stream.scope())?;
         let mut stream = stream;
         if stream.limited {
             self.guard()?;
+            if !still_current() || Instant::now() >= stream.deadline {
+                return Err(OwnerError::Paused);
+            }
             self.streams.entries.insert(id, stream);
             return Ok(());
         }
@@ -223,6 +255,9 @@ impl CollectorOwner {
             stream.bytes = Vec::new();
             stream.limited = true;
             self.guard()?;
+            if !still_current() || Instant::now() >= stream.deadline {
+                return Err(OwnerError::Paused);
+            }
             self.streams.entries.insert(id, stream);
             return Ok(());
         }
@@ -237,9 +272,15 @@ impl CollectorOwner {
         prepared(self);
         self.guard()?;
         before_copy();
+        if !still_current() || Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
         stream.bytes.extend_from_slice(bytes);
         if self.guard().is_err() {
             self.streams.clear();
+            return Err(OwnerError::Paused);
+        }
+        if !still_current() || Instant::now() >= stream.deadline {
             return Err(OwnerError::Paused);
         }
         self.streams.total += stream.bytes.len();
@@ -255,7 +296,14 @@ impl CollectorOwner {
             return Err(OwnerError::Paused);
         }
         let stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
-        self.inspect_stream(&stream)
+        if Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
+        let result = self.inspect_stream(&stream)?;
+        if Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
+        Ok(result)
     }
     fn inspect_stream(&mut self, stream: &Stream) -> Result<(u64, Observation), OwnerError> {
         if !stream.limited {
@@ -280,13 +328,25 @@ impl CollectorOwner {
             },
         ))
     }
+    #[cfg(test)]
     pub(super) fn finish_and_admit(
         &mut self,
         id: CaptureId,
+        metadata: RecordMetadata<'_>,
+    ) -> Result<(), OwnerError> {
+        self.finish_and_admit_checked(id, metadata, || true)
+    }
+    pub(super) fn finish_and_admit_checked(
+        &mut self,
+        id: CaptureId,
         mut metadata: RecordMetadata<'_>,
+        still_current: impl Fn() -> bool,
     ) -> Result<(), OwnerError> {
         self.guard()?;
         let mut stream = self.streams.remove(id).ok_or(OwnerError::Paused)?;
+        if !still_current() || Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
         if metadata.source_id != stream.source
             || metadata.workload != stream.workload.each_ref().map(String::as_str)
             || metadata.parser_profile != stream.profile
@@ -299,11 +359,14 @@ impl CollectorOwner {
             return Err(OwnerError::Paused);
         }
         let (revision, observation) = self.inspect_stream(&stream)?;
+        if !still_current() || Instant::now() >= stream.deadline {
+            return Err(OwnerError::Paused);
+        }
         metadata.policy_revision = revision;
         let draft =
             RecordDraft::from_observation(metadata, observation).map_err(|_| OwnerError::Paused)?;
         let witness = stream.witness.take();
-        self.admit_inner(draft, witness, |_| {})
+        self.admit_before(draft, witness, Some(stream.deadline), still_current, |_| {})
     }
 }
 
@@ -313,6 +376,51 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn renewed_owner_cannot_extend_existing_stream_deadline() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, br#"{"id":"#).unwrap();
+        owner.streams.entries.get_mut(&id).unwrap().deadline = Instant::now();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(60);
+        assert!(owner.capture_fragment(id, b"1}").is_err());
+        assert!(owner.streams.is_empty());
+        assert!(owner.is_live());
+    }
+
+    #[test]
+    fn failure_observed_before_copy_discards_stream() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        let current = std::cell::Cell::new(true);
+        let result = owner.capture_fragment_prepared_checked(
+            id,
+            b"private",
+            || current.get(),
+            |_| {},
+            || current.set(false),
+        );
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert!(owner.streams.is_empty());
+        assert_eq!(owner.streams.total, 0);
+    }
+
+    #[test]
+    fn idle_expiry_reclaims_stream_under_renewed_owner() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let id = owner.begin_capture(&scope()).unwrap();
+        owner.capture_fragment(id, b"{").unwrap();
+        owner.streams.entries.get_mut(&id).unwrap().deadline = Instant::now();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(60);
+        owner.streams.expire();
+        assert!(owner.streams.is_empty());
+        assert_eq!(owner.streams.total, 0);
+        assert!(owner.is_live());
+    }
 
     #[test]
     fn overflow_discards_raw_and_ignores_later_bytes_but_rechecks_authority() {

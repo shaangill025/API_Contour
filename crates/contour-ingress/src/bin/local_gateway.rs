@@ -231,8 +231,13 @@ fn run() -> Result<(), &'static str> {
             .map_err(|_| "listener unavailable")?;
         let refresh = pool.clone();
         tokio::spawn(async move {
+            let mut live = false;
             loop {
-                let _ = refresh.synchronize().await;
+                live = if live {
+                    refresh.renew().await.is_ok()
+                } else {
+                    refresh.synchronize().await.is_ok()
+                };
                 sleep(Duration::from_secs(10)).await;
             }
         });

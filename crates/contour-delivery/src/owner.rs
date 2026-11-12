@@ -67,7 +67,7 @@ struct RetryState {
 /// Callers must service expire_retained while paused; this is not a scheduler.
 pub struct CollectorOwner {
     client: DeliveryClient,
-    keys: PolicyKeys,
+    keys: Arc<PolicyKeys>,
     source_ids: Vec<String>,
     queue: MemoryQueue,
     policies: Vec<PolicyEntry>,
@@ -119,7 +119,7 @@ impl CollectorOwner {
         };
         Ok(Self {
             client,
-            keys,
+            keys: Arc::new(keys),
             source_ids: source_ids.iter().map(|s| (*s).to_owned()).collect(),
             queue,
             policies: Vec::new(),
@@ -287,7 +287,20 @@ impl CollectorOwner {
         witness: Option<OriginWitness>,
         after_admission: impl FnOnce(&mut Self),
     ) -> Result<(), OwnerError> {
+        self.admit_before(draft, witness, None, || true, after_admission)
+    }
+    fn admit_before(
+        &mut self,
+        draft: RecordDraft,
+        witness: Option<OriginWitness>,
+        deadline: Option<Instant>,
+        still_current: impl Fn() -> bool,
+        after_admission: impl FnOnce(&mut Self),
+    ) -> Result<(), OwnerError> {
         self.guard()?;
+        if !still_current() || deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(OwnerError::Paused);
+        }
         let live = self.live.as_ref().ok_or(OwnerError::Paused)?;
         let refs = self.policies.iter().map(|p| &p.policy).collect::<Vec<_>>();
         let inputs = AdmissionInputs::new(
@@ -302,9 +315,11 @@ impl CollectorOwner {
             None => self.queue.admit_retractable(draft, &inputs)?,
         };
         after_admission(self);
-        if !self.is_live() {
-            self.live = None;
-            self.streams.clear();
+        if !self.is_live() || !still_current() || deadline.is_some_and(|d| Instant::now() >= d) {
+            if !self.is_live() {
+                self.live = None;
+                self.streams.clear();
+            }
             self.queue.retract_admission(admission)?;
             return Err(OwnerError::Paused);
         }
@@ -481,7 +496,11 @@ mod capture_tests {
     pub(super) fn make_owner_at_with_ttl(now: OffsetDateTime, ttl: u64) -> CollectorOwner {
         make_owner_mode_at(WireMode::V1, now, ttl)
     }
-    fn make_owner_mode_at(mode: WireMode, now: OffsetDateTime, ttl: u64) -> CollectorOwner {
+    pub(super) fn make_owner_mode_at(
+        mode: WireMode,
+        now: OffsetDateTime,
+        ttl: u64,
+    ) -> CollectorOwner {
         let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
         let keys = PolicyKeys::new(&[("test", public)]).unwrap();
@@ -972,6 +991,27 @@ mod capture_tests {
             prior_id
         );
     }
+    #[test]
+    fn renewal_failure_during_admission_retracts_new_record() {
+        let mut owner = make_owner();
+        owner.live.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(10);
+        let draft = record(&mut owner, "00000000-0000-4000-8000-000000000003");
+        let current = std::cell::Cell::new(true);
+        let result = owner.admit_before(
+            draft,
+            None,
+            None,
+            || current.get(),
+            |owner| {
+                assert_eq!(owner.stats().records, 1);
+                current.set(false);
+            },
+        );
+        assert!(matches!(result, Err(OwnerError::Paused)));
+        assert_eq!(owner.stats().records, 0);
+        assert!(owner.is_live());
+    }
+
     #[test]
     fn paused_and_expired_owner_reject_before_inspection() {
         let mut owner = make_owner();
