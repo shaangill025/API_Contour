@@ -66,6 +66,13 @@ def command(runner,args,*,data=None,timeout=30,limit=1048576,allow_absent=False)
 
 
 class HeldStatusError(RuntimeError): pass
+class HeldStatus408(HeldStatusError): pass
+class HeldStatus429(HeldStatusError): pass
+class HeldStatus500(HeldStatusError): pass
+class HeldStatus502(HeldStatusError): pass
+class HeldStatus503(HeldStatusError): pass
+class HeldStatus504(HeldStatusError): pass
+class HeldStatusOther(HeldStatusError): pass
 class HeldBodyLimitError(RuntimeError): pass
 class HeldPrefixError(RuntimeError): pass
 class HeldResponseError(RuntimeError): pass
@@ -74,7 +81,7 @@ class HeldBodyMismatch(RuntimeError): pass
 class HeldRequestError(RuntimeError): pass
 class HeldTimeout(RuntimeError): pass
 class HeldControlError(RuntimeError): pass
-_HELD_ERRORS={b'DIAG STATUS\n':HeldStatusError,b'DIAG BODY_LIMIT\n':HeldBodyLimitError,b'DIAG PREFIX\n':HeldPrefixError,b'DIAG RESPONSE_ERROR\n':HeldResponseError,b'DIAG RESPONSE_ABORTED\n':HeldResponseAborted,b'DIAG BODY_MISMATCH\n':HeldBodyMismatch,b'DIAG REQUEST_ERROR\n':HeldRequestError,b'DIAG TIMEOUT\n':HeldTimeout,b'DIAG CONTROL\n':HeldControlError}
+_HELD_ERRORS={b'DIAG STATUS\n':HeldStatusError,**{('DIAG STATUS_'+str(status)+'\n').encode():cls for status,cls in ((408,HeldStatus408),(429,HeldStatus429),(500,HeldStatus500),(502,HeldStatus502),(503,HeldStatus503),(504,HeldStatus504))},b'DIAG STATUS_OTHER\n':HeldStatusOther,b'DIAG BODY_LIMIT\n':HeldBodyLimitError,b'DIAG PREFIX\n':HeldPrefixError,b'DIAG RESPONSE_ERROR\n':HeldResponseError,b'DIAG RESPONSE_ABORTED\n':HeldResponseAborted,b'DIAG BODY_MISMATCH\n':HeldBodyMismatch,b'DIAG REQUEST_ERROR\n':HeldRequestError,b'DIAG TIMEOUT\n':HeldTimeout,b'DIAG CONTROL\n':HeldControlError}
 
 
 class Monitor:

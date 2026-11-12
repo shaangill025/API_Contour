@@ -125,6 +125,15 @@ class DiagnosticTests(unittest.TestCase):
             lines=wrapper.child_failure_lines(owner)
             self.assertEqual(lines,[valid.decode()]*160)
 
+    def test_stream_timings_are_closed_and_bounded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            owner=mock.Mock(); owner.path=Path(directory)
+            valid=b'managed-stream name=publish ms=12 count=2'
+            bad=[b'managed-stream name=secret ms=1 count=1',b'managed-stream name=publish ms=1000000000 count=1',b'managed-stream name=publish ms=1 count=6',b'managed-stream name=publish ms=1 count=1 secret']
+            (owner.path/'qualification.log').write_bytes(b'\n'.join([valid]*25+bad))
+            self.assertEqual(wrapper.child_failure_lines(owner),[valid.decode()]*20)
+
     def test_private_log_accepts_only_closed_child_diagnostics(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

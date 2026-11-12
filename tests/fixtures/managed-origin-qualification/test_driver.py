@@ -174,7 +174,62 @@ class QualificationDriverTests(unittest.TestCase):
         self.assertEqual(run(False),['begin','initialize','up','transport','streams','negative','unknown','volume'])
         self.assertEqual(run(True),['begin','initialize','up','transport','streams','negative','unknown'])
 
+class HeldDiagnosticsTests(unittest.TestCase):
+    def test_closed_status_buckets_and_legacy_status(self):
+        import runpy,threading
+        helper=runpy.run_path(str(ROOT/'scripts/test-managed-native-edge.py'))
+        for status in ('408','429','500','502','503','504','OTHER'):
+            monitor=object.__new__(helper['Monitor']); monitor.lock=threading.Lock(); monitor.out=bytearray(); monitor.err=bytearray(('DIAG STATUS_'+status+'\n').encode()); monitor.overflow=False; monitor.read_error=False
+            with self.assertRaises(helper['HeldStatus'+('Other' if status=='OTHER' else status)]): monitor.lines()
+        monitor.err=bytearray(b'DIAG STATUS\n')
+        with self.assertRaises(helper['HeldStatusError']): monitor.lines()
+        monitor.err=bytearray(b'DIAG STATUS_501 secret\n')
+        with self.assertRaises(RuntimeError) as error: monitor.lines()
+        self.assertNotIn('secret',str(error.exception))
+
 class StreamOwnerSetupTests(unittest.TestCase):
+    def test_real_publication_method_runs_pre_and_post_gates_around_barrier(self):
+        from deploy.gateway.managed_edge import ManagedEdge
+        events=[]; current=['a'*64]; owner=mock.Mock()
+        data={'pending':{'phase':'staged','candidate':'candidate','commitment':{}},'binding':{},'current':'old','current_commitment':{}}
+        owner._managed_gate.side_effect=lambda _:events.append('gate')
+        owner._publish.side_effect=lambda *a:events.append('publish')
+        owner._confirm.side_effect=lambda *a:events.append('confirm')
+        owner._save.side_effect=lambda _:events.append('save')
+        owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
+        def renew():
+            ManagedEdge._publish_and_confirm(owner,data); current[0]='b'*64
+        owner.renew.side_effect=renew
+        class Monitor:
+            def __init__(self,args): events.append('client'); self.proc=mock.Mock()
+            def lines(self): return [b'PID 7']
+            def wait(self,value,**kwargs): events.append('prefix' if value==b'CLIENT_WRITTEN' else 'pass')
+            def send(self,value): events.append('release')
+            def finish(self,expected): pass
+            def reap(self): pass
+        with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'):
+            driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},{'Monitor':Monitor,'remote_absent':lambda *a:None},object())
+        self.assertEqual(events.count('gate'),2)
+        self.assertLess(events.index('gate'),events.index('client'))
+        self.assertLess(events.index('prefix'),events.index('publish'))
+        self.assertLess(events.index('confirm'),events.index('release'))
+        self.assertLess(events.index('save'),len(events))
+
+    def test_real_publication_postgate_failure_never_succeeds(self):
+        from deploy.gateway.managed_edge import ManagedEdge
+        owner=mock.Mock(); gates=[]
+        data={'pending':{'phase':'staged','candidate':'candidate','commitment':{}},'binding':{},'current':'old','current_commitment':{}}
+        def gate(_):
+            gates.append(True)
+            if len(gates)==2: raise ValueError('postgate')
+        owner._managed_gate.side_effect=gate
+        owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
+        owner.renew.side_effect=lambda:ManagedEdge._publish_and_confirm(owner,data)
+        monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
+        with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'):
+            with self.assertRaises(BaseExceptionGroup): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},{'Monitor':lambda _:monitor,'remote_absent':lambda *a:None},object())
+        self.assertEqual(len(gates),2); owner._save.assert_not_called()
+
     def test_owner_validation_precedes_starting_idle_bounded_request(self):
         events=[]; current=['a'*64]
         owner=mock.Mock()
@@ -182,8 +237,8 @@ class StreamOwnerSetupTests(unittest.TestCase):
         owner._confirm.side_effect=lambda:events.append('confirm')
         def publish():
             events.append('publish'); owner._confirm(); current[0]='b'*64
-        owner._publish_and_confirm.side_effect=publish
-        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        owner._publish.side_effect=publish
+        owner.renew.side_effect=lambda:owner._publish()
         owner.close.side_effect=lambda:events.append('owner-exit')
         class Monitor:
             def __init__(self,args): events.append('client'); self.proc=mock.Mock()
@@ -207,7 +262,7 @@ class StreamOwnerFailureTests(unittest.TestCase):
                 owner=mock.Mock(); current=['a'*64]
                 owner._load.side_effect=lambda:{'current_commitment':{'cert_sha256':current[0]}}
                 def publish(): owner._confirm(); current[0]='b'*64
-                owner._publish_and_confirm.side_effect=publish; owner.renew.side_effect=lambda:owner._publish_and_confirm()
+                owner._publish.side_effect=publish; owner.renew.side_effect=lambda:owner._publish()
                 monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
                 absent=mock.Mock()
                 if slow=='finish': monitor.finish.side_effect=lambda *a:time.sleep(.12)
@@ -231,8 +286,8 @@ class StreamOwnerFailureTests(unittest.TestCase):
             count[0]+=1
             return DelayedEvent() if count[0]==2 else real_event()
         owner=mock.Mock(); owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
-        owner._publish_and_confirm.side_effect=lambda:published.append(True)
-        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        owner._publish.side_effect=lambda:published.append(True)
+        owner.renew.side_effect=lambda:owner._publish()
         monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
         with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'),mock.patch.object(driver,'_STREAM_DEADLINE',.08),mock.patch.object(driver.threading,'Event',side_effect=event):
             with self.assertRaises(BaseExceptionGroup): driver._stream('request',1,'renew','d'*64,{'container_id':'c'*64},{'Monitor':lambda _:monitor,'remote_absent':mock.Mock()},object())
@@ -247,12 +302,12 @@ class StreamOwnerFailureTests(unittest.TestCase):
         for failure in ('start','join'):
             with self.subTest(failure=failure):
                 release=threading.Event(); entered=threading.Event(); threads=[]
-                owner=mock.Mock(); proof=mock.Mock(); original_publish=owner._publish_and_confirm; original_confirm=owner._confirm
+                owner=mock.Mock(); proof=mock.Mock(); original_publish=owner._publish; original_confirm=owner._confirm
                 owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
                 def publish():
                     owner._confirm(); entered.set(); release.wait(2)
                 original_publish.side_effect=publish
-                owner.renew.side_effect=lambda:owner._publish_and_confirm()
+                owner.renew.side_effect=lambda:owner._publish()
                 class ThreadProxy:
                     def __init__(self,**kwargs): self.thread=real_thread(**kwargs); threads.append(self.thread)
                     def start(self):
@@ -275,7 +330,7 @@ class StreamOwnerFailureTests(unittest.TestCase):
                         with self.assertRaises(BaseExceptionGroup) as raised: driver.main(['image','head','receipt','digest'])
                         self.assertTrue(any(isinstance(e,KeyboardInterrupt) for e in raised.exception.exceptions),repr(raised.exception))
                         owner.close.assert_not_called(); proof.close.assert_not_called(); disposal.dispose_synthetic_volume.assert_not_called()
-                        self.assertIsNot(owner._publish_and_confirm,original_publish); self.assertIsNot(owner._confirm,original_confirm)
+                        self.assertIsNot(owner._publish,original_publish); self.assertIsNot(owner._confirm,original_confirm)
                         self.assertTrue(any(item[0] is owner for item in driver._RETAINED))
                 finally:
                     release.set()
@@ -293,8 +348,8 @@ class StreamOwnerFailureTests(unittest.TestCase):
             if kind=='postgate': raise ValueError('postgate')
             if kind=='live': release.wait(2)
             current[0]='b'*64
-        owner._confirm.side_effect=confirm; owner._publish_and_confirm.side_effect=publish
-        owner.renew.side_effect=lambda:owner._publish_and_confirm()
+        owner._confirm.side_effect=confirm; owner._publish.side_effect=publish
+        owner.renew.side_effect=lambda:owner._publish()
         monitor=mock.Mock(); monitor.lines.return_value=[b'PID 7']
         if kind=='client': monitor.wait.side_effect=ValueError('client')
         if kind=='barrier': monitor.wait.side_effect=lambda *a,**k:time.sleep(.15)
@@ -328,8 +383,8 @@ class StreamOwnerFailureTests(unittest.TestCase):
     def test_renewal_and_monitor_cleanup_failures_survive_owner_close(self):
         primary=RuntimeError('rotation failed'); cleanup=OSError('reap failed')
         owner=mock.Mock();owner._load.return_value={'current_commitment':{'cert_sha256':'a'*64}}
-        owner.renew.side_effect=lambda:owner._publish_and_confirm()
-        owner._publish_and_confirm.side_effect=primary
+        owner.renew.side_effect=lambda:owner._publish()
+        owner._publish.side_effect=primary
         monitor=mock.Mock();monitor.lines.return_value=[b'PID 7'];monitor.reap.side_effect=cleanup
         helper={'Monitor':mock.Mock(return_value=monitor),'remote_absent':mock.Mock()}
         with mock.patch.object(driver.controller,'open_edge',return_value=owner),mock.patch.object(driver,'_wait_status'):

@@ -66,14 +66,16 @@ def child_failure_lines(owner):
         if len(raw)>16777216: raise ValueError('child diagnostic log too large')
     finally: os.close(fd)
     phases='arguments|source-check|qualification-begin|initialize|topology-up|transport|positive-streams|initial-readiness|stream-capture-baseline|stream-setup|stream-client-start|stream-prefix|stream-transition|stream-release|stream-capture-wait|stream-readiness|negative-cases|lost-ack|volume-disposal'
-    kinds='ValueError|RuntimeError|TimeoutError|AssertionError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|HeldStatusError|HeldBodyLimitError|HeldPrefixError|HeldResponseError|HeldResponseAborted|HeldBodyMismatch|HeldRequestError|HeldTimeout|HeldControlError|OtherError'
+    kinds='ValueError|RuntimeError|TimeoutError|AssertionError|PermissionError|FileNotFoundError|OSError|KeyError|IndexError|TypeError|AttributeError|HeldStatusError|HeldStatus408|HeldStatus429|HeldStatus500|HeldStatus502|HeldStatus503|HeldStatus504|HeldStatusOther|HeldBodyLimitError|HeldPrefixError|HeldResponseError|HeldResponseAborted|HeldBodyMismatch|HeldRequestError|HeldTimeout|HeldControlError|OtherError'
     names='|'.join(re.escape(name) for name in sorted(_ALLOWED_FRAMES))
     location='(?:unavailable|(?:'+names+'):[1-9][0-9]{0,6}(?:,(?:'+names+'):[1-9][0-9]{0,6}){0,5})'
     pattern=re.compile(('managed-failure phase=(?:'+phases+') role=(?:primary|cleanup) type=(?:'+kinds+') location='+location).encode())
     failures=[line.decode('ascii') for line in raw.splitlines() if pattern.fullmatch(line)][:16]
     diagnostic=re.compile(rb'managed-ready name=(?:transport|setup|policy_before|descriptors|worker|quiescence|probe|capture|post_slot|policy_after) event=(?:start|end) ms=(?:0|[1-9][0-9]{0,8}) count=(?:[1-9]|[1-9][0-9]|1[0-5][0-9]|160)')
     timings=[line.decode('ascii') for line in raw.splitlines() if diagnostic.fullmatch(line)][:160]
-    return failures+timings
+    stream_diagnostic=re.compile(rb'managed-stream name=(?:prefix|publish|confirm|activation|release) ms=(?:0|[1-9][0-9]{0,8}) count=[1-5]')
+    streams=[line.decode('ascii') for line in raw.splitlines() if stream_diagnostic.fullmatch(line)][:20]
+    return failures+timings+streams
 
 
 def helper():

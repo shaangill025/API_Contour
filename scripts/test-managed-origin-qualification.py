@@ -162,26 +162,39 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
     global _PHASE
     nonce=secrets.token_hex(16); source=(FIXTURE/'client.js').read_text(); replica=descriptor['container_id']
     args=['docker','exec','-i','--env','LD_PRELOAD=','--env','LD_LIBRARY_PATH=','--env','LD_AUDIT=','--env','NODE_OPTIONS=','--env','NODE_PATH=',replica,'/usr/bin/env','-i','/bin/sh','-c',SHELL,'fixture',source,mode,nonce]
-    for name in ('HeldStatusError','HeldBodyLimitError','HeldPrefixError','HeldResponseError','HeldResponseAborted','HeldBodyMismatch','HeldRequestError','HeldTimeout','HeldControlError'):
+    for name in ('HeldStatusError','HeldStatus408','HeldStatus429','HeldStatus500','HeldStatus502','HeldStatus503','HeldStatus504','HeldStatusOther','HeldBodyLimitError','HeldPrefixError','HeldResponseError','HeldResponseAborted','HeldBodyMismatch','HeldRequestError','HeldTimeout','HeldControlError'):
         cls=helper.get(name)
         if isinstance(cls,type) and issubclass(cls,RuntimeError): _ALLOWED_TYPES.add(cls)
     ready=threading.Event(); prefix=threading.Event(); activated=threading.Event(); cancel=threading.Event(); done=threading.Event()
     result=[]; writer_errors=[]; state={'publish':False,'confirm':False}
-    original_publish=owner._publish_and_confirm; original_confirm=owner._confirm
+    original_publish=owner._publish; original_confirm=owner._confirm
+    diagnostic_enabled=os.environ.get('CONTOUR_MANAGED_READY_DIAGNOSTICS')=='1'
+    diagnostic_start=time.monotonic(); diagnostic_count=[0]; diagnostic_lock=threading.Lock()
+    def timing(name):
+        if not diagnostic_enabled or name not in ('prefix','publish','confirm','activation','release'): return
+        try:
+            with diagnostic_lock:
+                if diagnostic_count[0]>=5: return
+                ms=min(999999999,max(0,int((time.monotonic()-diagnostic_start)*1000)))
+                diagnostic_count[0]+=1
+                print(f'managed-stream name={name} ms={ms} count={diagnostic_count[0]}',file=sys.stderr,flush=True)
+        except BaseException: pass
     deadline=time.monotonic()+_STREAM_DEADLINE
     def remaining(): return max(0,deadline-time.monotonic())
     def publish(*args,**kwargs):
         if state['publish'] or state['confirm']: raise RuntimeError('duplicate publication')
         state['publish']=True; ready.set()
         if not prefix.wait(remaining()) or cancel.is_set() or not remaining(): raise TimeoutError('publication barrier cancelled')
+        timing('publish')
         return original_publish(*args,**kwargs)
     def confirm(*args,**kwargs):
         if not state['publish'] or state['confirm'] or not prefix.is_set(): raise RuntimeError('confirmation out of order')
         state['confirm']=True
         value=original_confirm(*args,**kwargs)
+        timing('confirm')
         activated.set()
         return value
-    owner._publish_and_confirm=publish; owner._confirm=confirm
+    owner._publish=publish; owner._confirm=confirm
     def write():
         try:
             before=owner._load()['current_commitment']['cert_sha256']
@@ -216,11 +229,15 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
         if mode=='request': monitor.wait(b'CLIENT_WRITTEN',timeout=remaining()); _wait_status(destination,nonce,b'REQUEST_PREFIX',timeout=remaining())
         else: monitor.wait(b'RESPONSE_PREFIX',timeout=remaining()); _wait_status(destination,nonce,b'RESPONSE_PREFIX',timeout=remaining())
         _set_phase('stream-transition')
-        prefix.set()
+        timing('prefix'); prefix.set()
         while not activated.wait(min(.05,remaining())):
+            monitor.lines()
+            if monitor.proc.poll() is not None: raise RuntimeError('qualification client exited')
             if done.is_set(): raise RuntimeError('writer ended before activation')
             if not remaining(): raise TimeoutError('activation deadline')
+        timing('activation')
         _set_phase('stream-release')
+        timing('release')
         if mode=='request': monitor.send('RELEASE_REQUEST')
         else: _control(destination,nonce,'release')
         monitor.wait(b'PASS',timeout=remaining())
@@ -251,7 +268,7 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
             errors.extend(writer_errors)
             if not remaining(): errors.append(TimeoutError('qualification writer deadline'))
             try:
-                owner._publish_and_confirm=original_publish; owner._confirm=original_confirm
+                owner._publish=original_publish; owner._confirm=original_confirm
                 _RETAINED.remove(retained)
             except BaseException as error: errors.append(error)
         failures=([primary] if primary is not None else [])+errors
