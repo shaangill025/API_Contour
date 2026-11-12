@@ -75,6 +75,7 @@ pub struct HumanObservationPage {
 enum Selection<'a> {
     Page(u16, Option<&'a str>),
     Detail(&'a str),
+    Origin(&'a str),
 }
 impl ConnectedDatabase {
     pub async fn list_observations_as_human_until(
@@ -125,6 +126,30 @@ impl ConnectedDatabase {
         .next()
         .ok_or(HumanObservationError::NotFound)
     }
+    pub async fn read_observation_origin_as_human_until(
+        &mut self,
+        identity: &VerifiedIdentity,
+        scope: &DeclaredScope,
+        operation: &str,
+        id: &str,
+        deadline: Instant,
+    ) -> Result<Value, HumanObservationError> {
+        if !uuid(operation) || !uuid(id) {
+            return Err(HumanObservationError::Scope);
+        }
+        self.human_observations_transaction(
+            identity,
+            scope,
+            operation,
+            Selection::Origin(id),
+            deadline,
+        )
+        .await?
+        .items
+        .into_iter()
+        .next()
+        .ok_or(HumanObservationError::NotFound)
+    }
     async fn human_observations_transaction(
         &mut self,
         identity: &VerifiedIdentity,
@@ -158,7 +183,7 @@ impl ConnectedDatabase {
                     if row.is_none() {return Err(HumanObservationError::Scope)}
                 }
                 let (rows,limit)=match selection {
-                    Selection::Detail(id)=>(vec![id.to_owned()],1usize),
+                    Selection::Detail(id) | Selection::Origin(id)=>(vec![id.to_owned()],1usize),
                     Selection::Page(limit,cursor)=>{
                         let rows=tx.query("SELECT observation_id::text FROM contour.observation_windows WHERE tenant_id=$1::text::uuid AND project_id=$2::text::uuid AND service_id=$3::text::uuid AND environment_id=$4::text::uuid AND operation_id=$5::text::uuid AND ($6::text IS NULL OR observation_id>$6::text::uuid) ORDER BY observation_id LIMIT $7",&[&ids[0],&ids[1],&ids[2],&ids[3],&operation,&cursor,&(i64::from(limit)+1)]).await.map_err(database_error)?;
                         (rows.iter().map(|r|r.try_get::<_,String>(0).map_err(|_|HumanObservationError::Corrupt)).collect::<Result<Vec<_>,_>>()?,usize::from(limit))
@@ -171,7 +196,24 @@ impl ConnectedDatabase {
                     let metadata=tx.query_opt(METADATA,&[&ids[0],&ids[1],&ids[2],&ids[3],&operation,&id]).await.map_err(database_error)?.ok_or(HumanObservationError::NotFound)?;
                     if !metadata.try_get::<_,bool>(5).map_err(|_|HumanObservationError::Corrupt)? {return Err(HumanObservationError::Corrupt)}
                     let evidence=catalog_reader::evidence(&tx,&statement,&operator_scope,&parts,&metadata).await?;
-                    let item=project_evidence(&evidence,&parts,&id,operation)?;let len=serde_json::to_vec(&item).map_err(|_|HumanObservationError::Corrupt)?.len()+1;
+                    let item=if matches!(selection,Selection::Origin(_)) {
+                        let available: bool=tx.query_one("SELECT to_regprocedure('contour.human_observation_origin(uuid,uuid,uuid,uuid,uuid,uuid)') IS NOT NULL",&[]).await.map_err(database_error)?.try_get(0).map_err(|_|HumanObservationError::Corrupt)?;
+                        let mut origin=None;
+                        if available {
+                            let row=tx.query_opt("SELECT origin_project_id::text,origin_service_id::text,origin_environment_id::text,origin_deployment_id::text,instance_id::text,lifecycle_id::text,credential_id::text,grant_id::text FROM contour.human_observation_origin($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid)",&[&ids[0],&ids[1],&ids[2],&ids[3],&operation,&id]).await.map_err(database_error)?;
+                            if let Some(row)=row {
+                                let mut values=Vec::with_capacity(8);
+                                for i in 0..8 { let value:String=row.try_get(i).map_err(|_|HumanObservationError::Corrupt)?; if !uuid(&value) {return Err(HumanObservationError::Corrupt)} values.push(value); }
+                                let values:[String;8]=values.try_into().map_err(|_|HumanObservationError::Corrupt)?;
+                                match crate::human_authorization::authorize(&tx,identity,[&ids[0],&values[0],&values[1]],false).await {
+                                    Ok(_) => origin=Some(values),
+                                    Err(crate::human_authorization::HumanAuthorizationError::Forbidden) => {},
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        }
+                        project_origin(&id,operation,origin)
+                    } else { project_evidence(&evidence,&parts,&id,operation)? };let len=serde_json::to_vec(&item).map_err(|_|HumanObservationError::Corrupt)?.len()+1;
                     if bytes+len+512>MAX_PAGE_BYTES {if items.is_empty(){return Err(HumanObservationError::Limit)} more=true;break}
                     bytes+=len;items.push(item);
                 }
@@ -190,6 +232,32 @@ impl ConnectedDatabase {
         timeout_at(deadline, work)
             .await
             .map_err(|_| HumanObservationError::Deadline)?
+    }
+}
+
+fn project_origin(id: &str, operation: &str, origin: Option<[String; 8]>) -> Value {
+    match origin {
+        Some(
+            [
+                project,
+                service,
+                environment,
+                deployment,
+                instance,
+                lifecycle,
+                credential,
+                grant,
+            ],
+        ) => json!({
+            "observation_id":id, "operation_id":operation, "status":"verified", "origin":{
+                "project_id":project, "service_id":service, "environment_id":environment,
+                "deployment_id":deployment, "instance_id":instance, "lifecycle_id":lifecycle,
+                "credential_id":credential, "grant_id":grant
+            }
+        }),
+        None => {
+            json!({"observation_id":id,"operation_id":operation,"status":"unavailable","origin":null})
+        }
     }
 }
 
@@ -255,6 +323,18 @@ fn project_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn origin_projection_is_closed_and_preserves_observation_identity() {
+        let ids = std::array::from_fn(|i| format!("00000000-0000-4000-8000-{i:012x}"));
+        let verified = project_origin("observation", "operation", Some(ids));
+        assert_eq!(verified["observation_id"], "observation");
+        assert_eq!(verified["operation_id"], "operation");
+        assert_eq!(verified["status"], "verified");
+        assert_eq!(verified["origin"].as_object().unwrap().len(), 8);
+        let unavailable = project_origin("observation", "operation", None);
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(unavailable["origin"], Value::Null);
+    }
     #[test]
     fn projection_keeps_exact_evidence_and_never_emits_unchecked_fields() {
         let record = json!({"structure":{"kind":"string"},"visibility":"structure","completeness":"partial","reasons":["limit"],"route_uncertain":true,"status_code":null,"first_seen":"first","last_seen":"last","queued_at":"queued","expires_at":"expires","sample_numerator":1,"sample_denominator":3,"count":4,"parser_profile":"fixed","policy_revision":u64::MAX,"request_header_names":["private"],"origin":"forged"});

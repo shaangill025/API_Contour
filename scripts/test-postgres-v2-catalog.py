@@ -11,6 +11,88 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def run_historical_cases(execute, body, rows):
+    scope="tenant_id='%s' AND collector_id='%s' AND batch_id='%s'" % (body['tenant_id'],body['collector_id'],body['batch_id'])
+    # Migration 25 must already be installed by the exact-profile harness.
+    # The two retained windows share an operation but have distinct origins.
+    if rows[0]['operation_id'] != rows[1]['operation_id'] or rows[0]['instance_id'] == rows[1]['instance_id']:
+        raise AssertionError('historical fixture requires two origins for one operation')
+    for row in rows:
+        args=(body['tenant_id'],row['project_id'],row['service_id'],row['environment_id'],row['operation_id'],row['observation_id'])
+        quoted=','.join("'%s'" % value for value in args)
+        execute("""BEGIN; SET LOCAL ROLE contour_catalog_reader_tls;
+          SELECT set_config('apicontour.tenant_id','%s',true);
+          CREATE TEMP TABLE origin_proofs (instance_id uuid);
+          CREATE TEMP TABLE catalog_origin_projection (instance_id uuid);
+          DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.human_observation_origin(%s) o
+            WHERE (o.origin_project_id,o.origin_service_id,o.origin_environment_id,o.origin_deployment_id,o.instance_id)
+             =('%s','%s','%s','%s','%s') AND o.lifecycle_id IS NOT NULL AND o.credential_id IS NOT NULL AND o.grant_id IS NOT NULL)
+            THEN RAISE EXCEPTION 'historical origin mismatch'; END IF; END $$; ROLLBACK;""" %
+          (body['tenant_id'],quoted,row['origin_project_id'],row['origin_service_id'],row['origin_environment_id'],row['origin_deployment_id'],row['instance_id']))
+    # Historical lookup must remain anchored to the older window even if the
+    # derived current heads are absent; the transaction restores them.
+    older=rows[0]
+    old_args=(body['tenant_id'],older['project_id'],older['service_id'],older['environment_id'],older['operation_id'],older['observation_id'])
+    old_quoted=','.join("'%s'" % value for value in old_args)
+    execute("""BEGIN; SET LOCAL session_replication_role=replica;
+      DELETE FROM contour.catalog_origin_heads WHERE tenant_id='%s' AND operation_id='%s';
+      SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+      DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.human_observation_origin(%s) o WHERE o.instance_id='%s')
+        THEN RAISE EXCEPTION 'historical origin depended on head'; END IF; END $$; ROLLBACK;""" %
+      (body['tenant_id'],older['operation_id'],body['tenant_id'],old_quoted,older['instance_id']))
+    selected=rows[0]
+    unattributed=body['records'][2]['record']['record_id']
+    execute("""BEGIN; SET LOCAL ROLE contour_catalog_reader_tls;
+      SELECT set_config('apicontour.tenant_id','%s',true);
+      DO $$ DECLARE observation uuid; BEGIN
+        SELECT w.observation_id INTO STRICT observation FROM contour.observation_windows w
+          WHERE w.tenant_id='%s' AND w.collector_id='%s' AND w.batch_id='%s' AND w.record_id='%s';
+        IF EXISTS (SELECT 1 FROM contour.human_observation_origin('%s','%s','%s','%s','%s',observation))
+          THEN RAISE EXCEPTION 'unattributed origin disclosed'; END IF;
+      END $$; ROLLBACK;""" % (body['tenant_id'],body['tenant_id'],body['collector_id'],body['batch_id'],unattributed,
+        body['tenant_id'],selected['project_id'],selected['service_id'],selected['environment_id'],selected['operation_id']))
+    args=(body['tenant_id'],selected['project_id'],selected['service_id'],selected['environment_id'],selected['operation_id'],selected['observation_id'])
+    quoted=','.join("'%s'" % value for value in args)
+    for table,assignment,record_id in (
+        ('catalog_origin_projection',None,selected['record_id']),
+        ('ingestion_v2_metadata',"attribution_class='unattributed'",selected['record_id']),
+        ('ingestion_v2_metadata',"attribution_class='verified_origin_v1'",body['records'][2]['record']['record_id']),
+        ('observation_windows',"visibility='connection'",selected['record_id'])):
+        statement=("DELETE FROM contour.%s WHERE %s AND record_id='%s'" % (table,scope,record_id) if assignment is None else
+                   "UPDATE contour.%s SET %s WHERE %s AND record_id='%s'" % (table,assignment,scope,record_id))
+        execute("""BEGIN; SET LOCAL session_replication_role=replica; %s;
+          SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+          DO $$ DECLARE rejected boolean:=false; BEGIN
+            BEGIN PERFORM * FROM contour.human_observation_origin(%s);
+            EXCEPTION WHEN check_violation THEN rejected:=true; END;
+            IF NOT rejected THEN RAISE EXCEPTION 'corrupt historical evidence accepted'; END IF;
+          END $$; ROLLBACK;""" % (statement,body['tenant_id'],quoted))
+    # Retained V2 batch and completion cannot become legacy by removing payload
+    # and all selected-record evidence. This corruption is rolled back.
+    execute("""BEGIN; SET LOCAL session_replication_role=replica;
+      DELETE FROM contour.catalog_origin_projection WHERE %s AND record_id='%s';
+      DELETE FROM contour.origin_proofs WHERE %s AND record_id='%s';
+      DELETE FROM contour.ingestion_v2_metadata WHERE %s AND record_id='%s';
+      DELETE FROM contour.ingestion_payloads WHERE %s;
+      SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+      DO $$ DECLARE rejected boolean:=false; BEGIN
+        BEGIN PERFORM * FROM contour.human_observation_origin(%s);
+        EXCEPTION WHEN check_violation THEN rejected:=true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'missing V2 payload downgraded'; END IF;
+      END $$; ROLLBACK;""" % (scope,selected['record_id'],scope,selected['record_id'],scope,selected['record_id'],scope,body['tenant_id'],quoted))
+    # A projection for the unattributed record is also inconsistent.
+    execute("""BEGIN; SET LOCAL session_replication_role=replica;
+      INSERT INTO contour.catalog_origin_projection
+      SELECT tenant_id,collector_id,batch_id,'%s',proof_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id
+      FROM contour.catalog_origin_projection WHERE %s AND record_id='%s';
+      SET LOCAL ROLE contour_catalog_reader_tls; SELECT set_config('apicontour.tenant_id','%s',true);
+      DO $$ DECLARE rejected boolean:=false; BEGIN
+        BEGIN PERFORM * FROM contour.human_observation_origin(%s);
+        EXCEPTION WHEN check_violation THEN rejected:=true; END;
+        IF NOT rejected THEN RAISE EXCEPTION 'extra historical projection accepted'; END IF;
+      END $$; ROLLBACK;""" % (body['records'][2]['record']['record_id'],scope,selected['record_id'],body['tenant_id'],quoted))
+
+
 def run_cases(execute, accepted, check, counts):
     execute((ROOT / 'db/provision_v2_ingress.sql').read_text())
     execute((ROOT / 'db/opt-in-migrations/0016_v2_unattributed.sql').read_text())
@@ -169,7 +251,7 @@ def run_origin_cases(execute, body, port, directory, environment, expected_origi
       END $$; ROLLBACK;""" % dict(tenant=body['tenant_id'], collector=body['collector_id'],
                                  batch=body['batch_id'], record=body['records'][0]['record']['record_id'], scope=scope))
     execute("BEGIN; SET LOCAL ROLE contour_catalog_tls; SELECT set_config('apicontour.tenant_id','bbbbbbbb-0000-0000-0000-000000000000',true); DO $$ BEGIN IF EXISTS (SELECT 1 FROM contour.catalog_origin_projection WHERE %s) THEN RAISE EXCEPTION 'cross-tenant projection visible'; END IF; END $$; ROLLBACK;" % scope)
-    rows = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.operation_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.%s ORDER BY p.record_id) x;" % scope.replace(' AND ', ' AND p.')))
+    rows = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.proof_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.observation_id,w.operation_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE p.%s ORDER BY p.record_id) x;" % scope.replace(' AND ', ' AND p.')))
     target = body['records'][0]['record']
     for row, origin in zip(rows, expected_origins):
         for field, value in origin.items():

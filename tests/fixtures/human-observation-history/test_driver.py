@@ -7,6 +7,30 @@ ROOT=Path(__file__).resolve().parents[3]
 spec=importlib.util.spec_from_file_location('observation_history_fixture',ROOT/'scripts/test-human-observation-history.py')
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 class DriverTests(unittest.TestCase):
+    def test_historical_profile_requires_exact_ledger_and_closed_migrations(self):
+        import runpy
+        fixture=runpy.run_path(str(ROOT/'scripts/test-human-origin.py'))
+        before='{'+','.join(map(str,range(1,18)))+'}'
+        after='{'+','.join(map(str,range(1,26)))+'}'
+        calls=[]
+        def execute(sql):
+            calls.append(sql)
+            if sql.startswith('SELECT array_agg'): return before if len(calls)==1 else after
+        fixture['apply_historical_profile'](execute)
+        self.assertEqual(len(calls),10)
+        for sql,name in zip(calls[1:-1],fixture['HISTORICAL_MIGRATIONS']):
+            self.assertEqual(sql,(ROOT/'db/opt-in-migrations'/(name+'.sql')).read_text())
+        bad=mock.Mock(return_value='{1,2}')
+        with self.assertRaises(RuntimeError): fixture['apply_historical_profile'](bad)
+        bad.assert_called_once()
+        bad_after=mock.Mock(side_effect=[before]+[None]*8+['{1,2}'])
+        with self.assertRaises(RuntimeError): fixture['apply_historical_profile'](bad_after)
+    def test_historical_mode_cannot_be_inherited(self):
+        import os,runpy
+        environment=runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
+        with mock.patch.dict(os.environ,{'CONTOUR_HISTORICAL_ORIGIN_FIXTURE':'1'}):
+            self.assertNotIn('CONTOUR_HISTORICAL_ORIGIN_FIXTURE',environment('synthetic','/unused'))
+
     def test_invalid_scope_never_queries_or_launches(self):
         execute=mock.Mock()
         with mock.patch.object(module,'_runner') as run:

@@ -15,6 +15,20 @@ ACTOR = '00000000-0000-0000-0000-00000000ef01'
 ISSUER = 'https://idp.example.test/realms/demo'
 
 
+HISTORICAL_MIGRATIONS=('0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox',
+                       '0021_origin_admission','0022_causal_generation','0023_causal_marker_bindings',
+                       '0024_causal_live_profile','0025_historical_origin')
+
+
+def apply_historical_profile(execute):
+    if execute("SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;") != '{'+','.join(map(str,range(1,18)))+'}':
+        raise RuntimeError('historical fixture input ledger mismatch')
+    for name in HISTORICAL_MIGRATIONS:
+        execute((ROOT/'db/opt-in-migrations'/(name+'.sql')).read_text())
+    if execute("SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;") != '{'+','.join(map(str,range(1,26)))+'}':
+        raise RuntimeError('historical fixture output ledger mismatch')
+
+
 def run_smoke(execute, body):
     """Restricted reader privileges and tenant/argument guards, before data tests."""
     reader = 'contour_catalog_reader_tls'
@@ -57,12 +71,12 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     for project,service in sorted(set(scopes)):
         execute("SET ROLE contour_human_provisioner; INSERT INTO contour.human_service_roles VALUES ('%s','%s','%s','%s','viewer',true);" % (tenant,project,service,ACTOR))
 
-    def token(subject):
-        now = int(time.time()); claims = {'iss':ISSUER,'sub':subject,'aud':'apicontour','iat':now,'exp':now+600,'nonce':'server-generated-one-use-nonce'}
+    def token(subject,lifetime=600):
+        now = int(time.time()); claims = {'iss':ISSUER,'sub':subject,'aud':'apicontour','iat':now,'exp':now+lifetime,'nonce':'server-generated-one-use-nonce'}
         enc = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b'=')
         data = enc({'alg':'RS256','kid':'synthetic-rsa'}) + b'.' + enc(claims)
         sig = subprocess.run(['openssl','dgst','-sha256','-keyform','DER','-sign',str(ROOT/'crates/contour-auth/tests/fixtures/synthetic-rsa.der')], input=data,capture_output=True,timeout=5,check=True).stdout
-        path = directory / ('human-origin-token-'+subject); path.write_bytes(data+b'.'+base64.urlsafe_b64encode(sig).rstrip(b'=')); return path
+        path = directory / ('human-origin-token-'+subject+'-'+str(lifetime)); path.write_bytes(data+b'.'+base64.urlsafe_b64encode(sig).rstrip(b'=')); return path
     normal, unknown = token('synthetic-user'), token('unknown-user')
 
     # Origin 0 was closed by the enclosing fixture. Origin 1 remains active:
@@ -80,12 +94,20 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     where = "p.tenant_id='%s' AND p.collector_id='%s' AND p.batch_id='%s'" % (tenant,body['collector_id'],body['batch_id'])
     records = json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.origin_project_id AS project_id,p.origin_service_id AS service_id,p.origin_environment_id AS environment_id,p.origin_deployment_id AS deployment_id,p.instance_id,p.collector_id,p.batch_id,p.record_id,w.operation_id,w.last_seen,w.visibility,w.completeness FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE %s) x;" % where))
     assert len(records) == 2
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        # Complete only this disposable fixture's exact 1..25 ledger. The
+        # established sparse fixture has now applied core 5..12 and 13..17.
+        apply_historical_profile(execute)
+        execute((ROOT/'db/tests/historical_origin.sql').read_text())
+        historical_rows=json.loads(execute("SELECT json_agg(row_to_json(x) ORDER BY record_id) FROM (SELECT p.record_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,p.instance_id,w.observation_id,w.operation_id,w.project_id,w.service_id,w.environment_id,w.deployment_id FROM contour.catalog_origin_projection p JOIN contour.observation_windows w USING(tenant_id,collector_id,batch_id,record_id) WHERE %s) x;" % where))
+        if type(historical_rows) is not list or len(historical_rows)!=2: raise RuntimeError('historical fixture rows unavailable')
+        runpy.run_path(str(ROOT/'scripts/test-postgres-v2-catalog.py'))['run_historical_cases'](execute,body,historical_rows)
     records.reverse()  # Active origin first; the closed origin remains historically visible.
     first = records[0]
     keys = [tenant,target['project_id'],target['service_id'],target['environment_id'],*[first[k] for k in ('project_id','service_id','environment_id','deployment_id','instance_id')]]
     predicate = "(tenant_id,project_id,service_id,environment_id,origin_project_id,origin_service_id,origin_environment_id,origin_deployment_id,instance_id)=(%s)" % ','.join("'%s'" % key for key in keys)
     expected_operations = json.loads(execute("SELECT json_agg(operation_id::text ORDER BY operation_id) FROM contour.catalog_origin_heads WHERE %s;" % predicate))
-    runpy.run_path(str(ROOT/'scripts/test-human-catalog.py'))['run_origin_cases'](execute,port,directory,environment,normal,unknown,target_scope,ACTOR,records,expected_operations)
+    runpy.run_path(str(ROOT/'scripts/test-human-catalog.py'))['run_origin_cases'](execute,port,directory,environment,normal,unknown,target_scope,ACTOR,records,expected_operations,token)
     run_business_cases(execute,port,directory,environment,normal,unknown,target_scope,records,expected_operations,target_dir)
 
 
@@ -190,6 +212,21 @@ def run_business_cases(execute, port, directory, environment, normal, unknown, s
 
     def role(project,service,enabled):
         execute("SET ROLE contour_human_provisioner; UPDATE contour.human_service_roles SET enabled=%s WHERE actor_id='%s' AND tenant_id='%s' AND project_id='%s' AND service_id='%s';" % ('true' if enabled else 'false',ACTOR,scope[0],project,service))
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        for item in records:
+            observation=execute("SELECT observation_id::text FROM contour.observation_windows WHERE tenant_id='%s' AND collector_id='%s' AND batch_id='%s' AND record_id='%s';" % (scope[0],item['collector_id'],item['batch_id'],item['record_id']))
+            uri='/v1/observations/'+observation+'/origin?operation_id='+item['operation_id']
+            value=get(uri); assert value['status']==200
+            body=value['body']; assert set(body)=={'observation_id','operation_id','status','origin'}
+            assert body['observation_id']==observation and body['operation_id']==item['operation_id'] and body['status']=='verified'
+            assert set(body['origin'])==set(keys)|{'lifecycle_id','credential_id','grant_id'}
+            assert all(body['origin'][key]==item[key] for key in keys)
+            assert all(uuid.fullmatch(body['origin'][key]) for key in body['origin'])
+            error(get(uri,unknown),403,'forbidden')
+            role(item['project_id'],item['service_id'],False)
+            try:
+                denied=get(uri); assert denied['status']==200 and denied['body']=={'observation_id':observation,'operation_id':item['operation_id'],'status':'unavailable','origin':None}
+            finally: role(item['project_id'],item['service_id'],True)
     role(origin['project_id'],origin['service_id'],False)
     try: error(get('/v1/operations?limit=200&'+urlencode(query)),403,'forbidden')
     finally: role(origin['project_id'],origin['service_id'],True)

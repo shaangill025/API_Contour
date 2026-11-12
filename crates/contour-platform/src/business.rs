@@ -179,6 +179,15 @@ impl Business {
                 .map_err(observation_error)?;
             return Ok(json!({"items":page.items,"next_cursor":page.next_cursor}));
         }
+        if method == "GET" && path.starts_with("/v1/observations/") && path.ends_with("/origin") {
+            let (operation, _, _) = observation_query(request.uri().query(), true)?;
+            let prefix = path.strip_suffix("/origin").ok_or(404u16)?;
+            let id = segment(prefix, "/v1/observations/")?;
+            return db
+                .read_observation_origin_as_human_until(identity, &scope, &operation, id, deadline)
+                .await
+                .map_err(observation_error);
+        }
         if method == "GET" && path.starts_with("/v1/observations/") {
             let (operation, _, _) = observation_query(request.uri().query(), true)?;
             let id = segment(path, "/v1/observations/")?;

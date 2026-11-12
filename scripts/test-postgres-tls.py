@@ -114,6 +114,7 @@ def fixture_environment(password, target, sensor_image=None):
     environment.pop('CONTOUR_FIXTURE_PSQL_OWNER', None)
     environment.pop('CONTOUR_ORIGIN_SENSOR_IMAGE', None)
     environment.pop('CONTOUR_HUMAN_ORIGIN_FIXTURE', None)
+    environment.pop('CONTOUR_HISTORICAL_ORIGIN_FIXTURE', None)
     environment.pop('CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE', None)
     environment.pop('CONTOUR_ORIGIN_REPLACEMENT_FIXTURE', None)
     environment.pop('CONTOUR_ORIGIN_ADMISSION_FIXTURE', None)
@@ -228,7 +229,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture','--historical-origin'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     admission = flags == ['--origin-admission-only']
     replacement = flags == ['--origin-replacement-only'] or admission
@@ -237,13 +238,14 @@ def main():
     if origin_sensor:
         sys.dont_write_bytecode = True
     human_history = flags == ['--human-observation-history']
+    historical_origin = flags == ['--historical-origin']
     runtime_capture = flags == ['--runtime-capture']
-    supervised = human_history or runtime_capture
+    supervised = human_history or runtime_capture or historical_origin
     if supervised: sys.dont_write_bytecode = True
-    human_origin = flags == ['--human-origin'] or human_history
+    human_origin = flags == ['--human-origin'] or human_history or historical_origin
     authority_mode = '--authority' in flags or origin_sensor or human_origin or runtime_capture
-    history_fixture = checked_history_loader() if human_history else (runpy.run_path(str(ROOT/'scripts/test-human-observation-history.py')) if runtime_capture else None)
-    history_source = history_fixture['source_snapshot']() if human_history else (runtime_source_snapshot() if runtime_capture else None)
+    history_fixture = checked_history_loader() if human_history else (runpy.run_path(str(ROOT/'scripts/test-human-observation-history.py')) if (runtime_capture or historical_origin) else None)
+    history_source = history_fixture['source_snapshot']() if human_history else (runtime_source_snapshot() if (runtime_capture or historical_origin) else None)
     fixture_image = None
     if supervised:
         fixture_directory=history_fixture['OwnedFixtureDirectory']()
@@ -316,7 +318,7 @@ def main():
     if supervised:
         if metadata['target_directory']!=str(target): raise ValueError('fixture cargo target changed')
         sys.addaudithook(history_fixture['artifact_guard'](target,history_artifacts))
-        if runtime_capture and runtime_source_snapshot()!=history_source: raise ValueError('fixture source changed during build')
+        if (runtime_capture or historical_origin) and runtime_source_snapshot()!=history_source: raise ValueError('fixture source changed during build')
     probe = str(Path(metadata["target_directory"])/"debug"/"examples"/"tls_probe")
     network = container = volume = None
     servers = []
@@ -334,6 +336,8 @@ def main():
         if admission: environment['CONTOUR_ORIGIN_ADMISSION_FIXTURE'] = '1'
         if human_origin:
             environment['CONTOUR_HUMAN_ORIGIN_FIXTURE'] = '1'
+        if historical_origin:
+            environment['CONTOUR_HISTORICAL_ORIGIN_FIXTURE'] = '1'
         if human_history:
             environment['CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE'] = '1'
         fixture_owner=secrets.token_hex(16) if supervised else None

@@ -224,6 +224,16 @@ def run_cases(container, execute, setup, check, port, directory, environment):
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-catalog.py'))['run_origin_cases'](execute, body, port, directory, environment, expected_origins)
     if environment.get('CONTOUR_HUMAN_ORIGIN_FIXTURE') == '1':
         runpy.run_path(str(ROOT / 'scripts/test-human-origin.py'))['run_cases'](execute, submit, body, expected_origins, port, directory, environment)
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        legacy=v1_before_17; record=legacy['records'][0]
+        execute("""BEGIN; SET LOCAL ROLE contour_catalog_reader_tls;
+          SELECT set_config('apicontour.tenant_id','%s',true);
+          DO $$ DECLARE w contour.observation_windows; BEGIN
+            SELECT x.* INTO STRICT w FROM contour.observation_windows x
+            WHERE (x.tenant_id,x.collector_id,x.batch_id,x.record_id)=('%s','%s','%s','%s');
+            IF EXISTS (SELECT 1 FROM contour.human_observation_origin(w.tenant_id,w.project_id,w.service_id,w.environment_id,w.operation_id,w.observation_id))
+              THEN RAISE EXCEPTION 'legacy origin disclosed'; END IF;
+          END $$; ROLLBACK;""" % (legacy['tenant_id'],legacy['tenant_id'],legacy['collector_id'],legacy['batch_id'],record['record_id']))
 
     # Deliberate owner-only corruption demonstrates the absence verifier fails
     # closed on each retained history component, even before digest conflicts.
