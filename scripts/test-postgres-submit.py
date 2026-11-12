@@ -294,6 +294,10 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     catalog_recovery = runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    if environment.get('CONTOUR_CAUSAL_OBSERVER_FIXTURE') == '1':
+        require_historical_receipt(directory)
+        require_causal_observer_receipt(directory)
+        return
     if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
         require_historical_receipt(directory)
         # This supervised, generation-fenced component fixture does not own a
@@ -317,5 +321,19 @@ def require_historical_receipt(directory):
         if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1
                 or info.st_size!=len(expected) or os.read(fd,len(expected)+1)!=expected):
             raise AssertionError('mandatory historical origin cases did not complete')
+    finally:
+        os.close(fd)
+
+
+def require_causal_observer_receipt(directory):
+    import os, stat
+    path = directory / 'causal-observer.done'
+    expected = b'causal-observer-complete\n'
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or info.st_size != len(expected) or os.read(fd, len(expected) + 1) != expected):
+            raise AssertionError('mandatory causal observer cases did not complete')
     finally:
         os.close(fd)

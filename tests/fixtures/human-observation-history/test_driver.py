@@ -31,6 +31,12 @@ class DriverTests(unittest.TestCase):
         with mock.patch.dict(os.environ,{'CONTOUR_HISTORICAL_ORIGIN_FIXTURE':'1'}):
             self.assertNotIn('CONTOUR_HISTORICAL_ORIGIN_FIXTURE',environment('synthetic','/unused'))
 
+    def test_observer_mode_cannot_be_inherited(self):
+        import os,runpy
+        environment=runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['fixture_environment']
+        with mock.patch.dict(os.environ,{'CONTOUR_CAUSAL_OBSERVER_FIXTURE':'1'}):
+            self.assertNotIn('CONTOUR_CAUSAL_OBSERVER_FIXTURE',environment('synthetic','/unused'))
+
     def test_invalid_scope_never_queries_or_launches(self):
         execute=mock.Mock()
         with mock.patch.object(module,'_runner') as run:
@@ -58,6 +64,20 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaises(AssertionError): require(folder)
             alias.unlink(); path.unlink(); path.symlink_to(alias)
             with self.assertRaises(OSError): require(folder)
+    def test_observer_receipt_requires_exact_owned_regular_file(self):
+        import os, runpy, tempfile
+        require=runpy.run_path(str(ROOT/'scripts/test-postgres-submit.py'))['require_causal_observer_receipt']
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory); path=folder/'causal-observer.done'
+            with self.assertRaises(OSError): require(folder)
+            path.write_bytes(b'wrong')
+            with self.assertRaises(AssertionError): require(folder)
+            path.write_bytes(b'causal-observer-complete\n'); require(folder)
+            alias=folder/'alias'; os.link(path,alias)
+            with self.assertRaises(AssertionError): require(folder)
+            alias.unlink(); path.unlink(); path.symlink_to(alias)
+            with self.assertRaises(OSError): require(folder)
+
     def test_receipt_is_mandatory_and_exact(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
