@@ -122,12 +122,19 @@ INSERT INTO observer_graph_cases
  SELECT 'second-first',convert_to(contour.causal_json_canonical(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('b',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'self-loop',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('c',32))),'{binding,retry_of}',to_jsonb(repeat('c',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'pending-parent',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('d',32))),'{binding,retry_of}',to_jsonb(repeat('f',32)))),'UTF8'),proof FROM observer_seed
- UNION ALL SELECT 'fork-a1',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('4',32))),'{binding,retry_of}',to_jsonb(repeat('a',32)))),'UTF8'),proof FROM observer_seed
+ UNION ALL SELECT 'fork-a1',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('12',16))),'{binding,retry_of}',to_jsonb(repeat('a',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'fork-a2',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('5',32))),'{binding,retry_of}',to_jsonb(repeat('a',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'fork-b1',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('7',32))),'{binding,retry_of}',to_jsonb(repeat('6',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'fork-b2',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('8',32))),'{binding,retry_of}',to_jsonb(repeat('6',32)))),'UTF8'),proof FROM observer_seed
  UNION ALL SELECT 'close-cycle',convert_to(contour.causal_json_canonical(jsonb_set(jsonb_set(convert_from(raw,'UTF8')::jsonb,'{binding,delivery_handle}',to_jsonb(repeat('f',32))),'{binding,retry_of}',to_jsonb(repeat('d',32)))),'UTF8'),proof FROM observer_seed;
 RESET ROLE;
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM (
+  SELECT (convert_from(raw,'UTF8')::jsonb)->'binding'->>'delivery_handle' AS handle FROM observer_seed
+  UNION ALL SELECT (convert_from(raw,'UTF8')::jsonb)->'binding'->>'delivery_handle' FROM observer_retry
+  UNION ALL SELECT (convert_from(raw,'UTF8')::jsonb)->'binding'->>'delivery_handle' FROM observer_graph_cases
+ ) cases GROUP BY handle HAVING count(*)>1) THEN RAISE EXCEPTION 'observer graph delivery handles collide'; END IF;
+END $$;
 SET ROLE contour_causal_observer_writer;
 DO $$ DECLARE r bytea; p contour.verified_observer_claim; BEGIN
  SELECT raw INTO STRICT r FROM observer_graph_cases WHERE name='second-first'; SELECT (proof).* INTO STRICT p FROM observer_graph_cases WHERE name='second-first';
