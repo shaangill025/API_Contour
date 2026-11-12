@@ -315,7 +315,26 @@ def endpoint_call(expected,observe,call):
     finally:
         if observe()!=expected: fail('docker endpoint changed')
 
-def qualify(args, shared, run, owner):
+PHASES=frozenset(('setup','tool','receipt','source','material','payload','endpoint','image','container','final','receipt-write'))
+
+def failure_locations(error,depth=0):
+    """Return only closed local source locations; never expose exception contents."""
+    if depth>3:return []
+    if isinstance(error,BaseExceptionGroup):
+        return [x for item in error.exceptions[:8] for x in failure_locations(item,depth+1)][:8]
+    result=[];tb=error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename==__file__ and 1<=tb.tb_lineno<=1000000:
+            value='qualify-receiver504.py:'+str(tb.tb_lineno)
+            if value not in result:result.append(value)
+        tb=tb.tb_next
+    return result[-4:]
+
+def qualify(args, shared, run, owner, progress=None):
+    def phase(value):
+        if value not in PHASES:raise ValueError('phase')
+        if progress is not None:progress['phase']=value
+    phase('tool')
     if args.docker_sha256 != DOCKER_HASH: fail('unqualified docker hash')
     root = shared.checked_path(ROOT)
     if ',' in str(root) or ':' in str(root): fail('source mount path')
@@ -323,19 +342,24 @@ def qualify(args, shared, run, owner):
     if str(cli)!=DOCKER_PATH: fail('unqualified docker path')
     cli_identity, cli_hash = tool_snapshot(cli, True)
     if cli_hash != args.docker_sha256: fail('docker hash')
+    phase('receipt')
     raw, receipt_hash = receipt_file(args.receipt)
     source_receipt = receipt(raw)
+    phase('source')
     head, sources = shared.snapshot(run,root)
     fixtures = ('tests/fixtures/receiver504-actual/parent.js','tests/fixtures/receiver504-actual/exec_input.py')
     if any(name not in sources or not HEX.fullmatch(sources[name]) for name in fixtures): fail('fixture source missing')
     snapshot_hash = hashlib.sha256(json.dumps(sources,sort_keys=True,separators=(',',':')).encode('ascii')).hexdigest()
     record(owner,'source-before.json',{'head':head,'source_sha256':snapshot_hash,'files':sources})
+    phase('material')
     material=Path(args.material); material_before=material_snapshot(material)
+    phase('payload')
     payload=Path(args.payload); private_bytes,payload_hash=receipt_file(payload)
     if len(private_bytes)>65536: fail('private input size')
     del private_bytes
     config = owner.path / 'docker-config'; config.mkdir(mode=0o700)
     token = uuid.uuid4().hex + uuid.uuid4().hex
+    phase('endpoint')
     endpoint=socket_snapshot()
     stage_number = 0
     def docker(*parts,timeout=30,expect=None,private_input=None):
@@ -366,11 +390,15 @@ def qualify(args, shared, run, owner):
     results = {}
     for arch in ('arm64','amd64'):
         image = source_receipt['images'][arch]['image']
+        phase('image')
         check_image(one(docker('image','inspect',image)),image,arch,source_receipt['token'])
         for case in SCRIPTS:
+            phase('container')
             results[arch+'-'+case] = run_case(docker,owner,arch,case,image,token,root,material,payload,payload_hash)
+    phase('final')
     if shared.snapshot(run,root) != (head,sources) or material_snapshot(material)!=material_before or receipt_file(payload)[1]!=payload_hash: fail('source or input changed')
     if receipt_file(args.receipt)[1] != receipt_hash or tool_snapshot(cli,True) != (cli_identity,cli_hash): fail('input changed')
+    phase('receipt-write')
     record(owner,'receipt.json',{'head':head,'source_receipt_sha256':receipt_hash,'docker_sha256':cli_hash,'source_sha256':snapshot_hash,
         'fixture_sha256':{name:sources[name] for name in fixtures},
         'results':results,'scope':'receiver504-synthetic-local-component',
@@ -382,16 +410,16 @@ def main():
     parser.add_argument('--material',required=True); parser.add_argument('--payload',required=True); parser.add_argument('--receipt',required=True); parser.add_argument('--docker',required=True); parser.add_argument('--docker-sha256',required=True)
     args = parser.parse_args()
     if args.docker_sha256 != DOCKER_HASH: parser.error('unqualified docker sha256')
-    os.umask(0o077); owner = None
+    os.umask(0o077); owner = None; progress={'phase':'setup'}
     try:
         shared = shared_module(); path = Path(tempfile.mkdtemp(prefix='contour-receiver-nodered-')).resolve(); path.chmod(0o700)
         owner = shared.OwnedDirectory(path)
-        qualify(args,shared,shared.Runner(time.monotonic()+900,owner),owner)
+        qualify(args,shared,shared.Runner(time.monotonic()+900,owner),owner,progress)
         print(json.dumps({'pass':True,'phase':'receiver504_synthetic_local_component','evidence_dir':str(path)}))
         return 0
     except BaseException as error:
         kind = type(error).__name__ if type(error).__name__ in ('ValueError','RuntimeError','TimeoutError','OSError','KeyError','TypeError','ExceptionGroup','BaseExceptionGroup') else 'Other'
-        print(json.dumps({'pass':False,'phase':'receiver504_synthetic_local_component','error':kind,'evidence_dir':str(owner.path) if owner else None}))
+        print(json.dumps({'pass':False,'phase':'receiver504_synthetic_local_component','error':kind,'stage':progress['phase'] if progress['phase'] in PHASES else 'setup','location':failure_locations(error),'evidence_dir':str(owner.path) if owner else None}))
         return 1
     finally:
         if owner is not None: owner.close()

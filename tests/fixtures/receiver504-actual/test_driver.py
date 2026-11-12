@@ -61,6 +61,20 @@ class Fences(unittest.TestCase):
   with patch.object(m,'record') as record,patch.object(m,'one',return_value=container()):
    with self.assertRaises(RuntimeError):m.run_case(docker,Mock(),'arm64','component',IMAGE,TOKEN,SOURCE,MATERIAL,Path('/owned/input'),'d'*64)
   self.assertEqual(calls,['create','inspect','start-private']);self.assertEqual(record.call_count,3)
+ def test_failure_location_is_closed_and_excludes_exception_data(self):
+  try:m.fail('private-path-secret-and-sql')
+  except ValueError as error:
+   locations=m.failure_locations(error)
+   self.assertTrue(locations);self.assertTrue(all(__import__('re').fullmatch(r'qualify-receiver504\.py:[1-9][0-9]{0,6}',x) for x in locations))
+   self.assertNotIn('private',repr(locations));self.assertNotIn('secret',repr(locations))
+   group=ExceptionGroup('private',[error,ValueError('private')]);self.assertEqual(m.failure_locations(group),locations)
+  try:raise ValueError('foreign-private')
+  except ValueError as foreign:self.assertEqual(m.failure_locations(foreign),[])
+ def test_preflight_failure_has_closed_stage(self):
+  from types import SimpleNamespace
+  progress={'phase':'setup'}
+  with self.assertRaises(ValueError):m.qualify(SimpleNamespace(docker_sha256='wrong'),Mock(),Mock(),Mock(),progress)
+  self.assertEqual(progress['phase'],'tool');self.assertIn(progress['phase'],m.PHASES)
  def test_endpoint_drift_stops_before_start_or_removal(self):
   for failure in ('after-create','before-start','before-rm'):
    calls=[];state={'endpoint':'old','inspects':0}
