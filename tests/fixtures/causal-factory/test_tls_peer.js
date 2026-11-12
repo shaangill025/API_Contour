@@ -46,3 +46,31 @@ assert.equal(request.calls[0].method, 'POST');
 assert.equal(request.calls[0].rejectUnauthorized, true);
 assert.equal(request.calls[0].headers['content-type'], 'text/plain');
 assert.equal(request.calls[1], 'serial');
+
+// In inbox mode the independent business peer never binds the exporter port;
+// it emits only a domain-separated digest, never the marker value.
+{
+  const ports=[], handlers=[], output=[];
+  const peer=Buffer.from('fixture-client');
+  const fingerprint=require('node:crypto').createHash('sha256').update(peer).digest('hex');
+  const context={
+    require(name) {
+      if (name === 'node:fs') return {readFileSync(){return Buffer.from('fixture');}};
+      if (name === 'node:crypto') return require(name);
+      if (name === 'node:https') return {createServer(_options,handler) {
+        handlers.push(handler); return {listen(port){ports.push(port);}};
+      }};
+      throw Error('unexpected module');
+    },
+    process:{argv:['node','tls_peer.js','business'],env:{PRODUCT_LEAF:fingerprint,EXPORT_LEAF:'b'.repeat(64)},stdout:{write(value){output.push(value);}}},
+    Buffer,
+  };
+  vm.runInNewContext(source,context,{filename:'tls_peer.js',timeout:1000});
+  assert.deepEqual(ports,[9443]);
+  const marker='private-fixture-marker';
+  handlers[0]({socket:{authorized:true,getPeerCertificate(){return {raw:peer};}},method:'POST',url:'/pilot',
+    headers:{'x-apicontour-causal-marker':marker},resume(){}},{writeHead(){},end(){},destroy(){throw Error('rejected');}});
+  const expected=require('node:crypto').createHash('sha256').update('apicontour/causal-marker-wire/1\n').update(marker,'ascii').digest('hex');
+  assert.deepEqual(output,['MARKER '+expected+'\n']);
+  assert(!output[0].includes(marker));
+}

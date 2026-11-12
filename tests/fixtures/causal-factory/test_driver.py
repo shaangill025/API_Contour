@@ -1,4 +1,6 @@
 import json
+import copy
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -11,6 +13,51 @@ DRIVER = runpy.run_path(str(ROOT / 'scripts/test-postgres-causal-factory.py'))
 
 
 class DriverTests(unittest.TestCase):
+    def test_stale_fault_requires_checked_newer_session_and_unchanged_original(self):
+        check=DRIVER['validate_advanced_session']
+        original='1 1000 2000'; advanced='ADVANCED 2 1100 2100'
+        self.assertEqual(check('original','fault',original,advanced,original,'2 1100 2100'),2)
+        cases=[('original','original',original,advanced,original,'2 1100 2100'),
+               ('original','fault',original,'ADVANCED 1 1100 2100',original,'1 1100 2100'),
+               ('original','fault',original,'ADVANCED 0 1100 2100',original,'0 1100 2100'),
+               ('original','fault',original,'ADVANCED 2 2100 2100',original,'2 2100 2100'),
+               ('original','fault',original,advanced,'1 1000 2001','2 1100 2100'),
+               ('original','fault',original,advanced,original,'2 1100 2101'),
+               ('original','fault',original,advanced+' extra',original,'2 1100 2100')]
+        for args in cases:
+            with self.subTest(args=args), self.assertRaises(RuntimeError): check(*args)
+
+    def test_committed_producer_evidence_is_exact(self):
+        root, activity, parent, attempt = ('a'*32, 'b'*32, 'c'*32, 'd'*32)
+        marker = 'e'*64
+        events = [
+            {'kind':'root','event_id':'1'*32,'seq':1,'root':root},
+            {'kind':'delivery','event_id':'2'*32,'seq':2,'root':root,'activity':activity,'parent':parent},
+            {'kind':'attempt','event_id':'3'*32,'seq':3,'root':root,'activity':activity,'attempt':attempt,'marker_digest':marker},
+        ]
+        batch = {'wire_version':1,'batch_id':'00000000-0000-4000-8000-000000000001',
+                 'tenant_id':'tenant','runtime_id':'runtime','session_epoch':1,'first_seq':1,'last_seq':3,'events':events}
+        def encoded(value): return json.dumps(value,sort_keys=True,separators=(',', ':')).encode()
+        def stored(value):
+            raw=encoded(value)
+            return {'canonical':raw.hex(),'digest':hashlib.sha256(b'apicontour/causal-events/1\n'+raw).hexdigest(),
+                    'events':[{'event':e,'digest':hashlib.sha256(b'apicontour/causal-event/1\n'+encoded(e)).hexdigest()} for e in value['events']]}
+        check=DRIVER['validate_producer_batches']
+        self.assertEqual(check([stored(batch)],'tenant','runtime',1,[marker]), {batch['batch_id']})
+        for change in ('epoch','tenant','digest','event_digest','marker','count','kind','duplicate'):
+            rows=[stored(batch)]
+            if change=='epoch': rows=[stored(dict(batch,session_epoch=2))]
+            elif change=='tenant': rows=[stored(dict(batch,tenant_id='other'))]
+            elif change=='digest': rows[0]['digest']='0'*64
+            elif change=='event_digest': rows[0]['events'][0]['digest']='0'*64
+            elif change=='marker':
+                bad=copy.deepcopy(batch); bad['events'][2]['marker_digest']='f'*64; rows=[stored(bad)]
+            elif change=='count': rows[0]['events'].pop()
+            elif change=='kind':
+                bad=copy.deepcopy(batch); bad['events'][2]={'kind':'loss','event_id':'3'*32,'seq':3}; rows=[stored(bad)]
+            else: rows.append(copy.deepcopy(rows[0]))
+            with self.subTest(change=change), self.assertRaises(AssertionError): check(rows,'tenant','runtime',1,[marker])
+
     def test_probe_stage_is_exact_closed_allowlist(self):
         classify = DRIVER['probe_stage']
         source = DRIVER['EXAMPLE'].read_text()
@@ -96,6 +143,22 @@ class DriverTests(unittest.TestCase):
         info['RestartCount'] = 1
         with self.assertRaises(RuntimeError):
             DRIVER['proxy_generation'](info, cid, owner)
+
+    def test_collector_requires_exact_owned_image_and_generation(self):
+        cid, owner, image = 'a'*64, 'b'*64, 'sha256:'+'c'*64
+        info = {'Id':cid,'Image':image,'Config':{'Labels':{DRIVER['LABEL']:owner}},'RestartCount':0,
+                'State':{'Status':'running','Running':True,'Pid':123,'StartedAt':'2026-01-01T00:00:00Z'}}
+        initial=DRIVER['fixture_generation'](info,cid,owner,image)
+        changed=copy.deepcopy(info); changed['State']['StartedAt']='2026-01-01T00:00:01Z'
+        self.assertNotEqual(initial,DRIVER['fixture_generation'](changed,cid,owner,image))
+        for change in ('image','owner','pid','restart'):
+            bad=copy.deepcopy(info)
+            if change=='image': bad['Image']='sha256:'+'d'*64
+            elif change=='owner': bad['Config']['Labels'][DRIVER['LABEL']]='d'*64
+            elif change=='pid': bad['State']['Pid']=0
+            else: bad['RestartCount']=1
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                DRIVER['fixture_generation'](bad,cid,owner,image)
 
     def test_native_linux_uid_preflight(self):
         with self.assertRaises(RuntimeError): DRIVER['check_native_uid']('linux', 501)
