@@ -46,7 +46,7 @@ SOURCE_FILES = ('deploy/local/docker_metadata.py','deploy/local/origin21_profile
                 'db/opt-in-migrations/0019_causal_sessions.sql',
                 'db/opt-in-migrations/0020_causal_inbox.sql',
                 'db/opt-in-migrations/0021_origin_admission.sql')
-MANAGED_SOURCE_FILES = SOURCE_FILES + ('tests/fixtures/docker-metadata/test_metadata.py','deploy/gateway/managed_edge.py','deploy/gateway/certificates.py',
+MANAGED_SOURCE_FILES = SOURCE_FILES + ('deploy/local/origin21_readiness_profile.py','tests/fixtures/docker-metadata/test_metadata.py','deploy/gateway/managed_edge.py','deploy/gateway/certificates.py',
     'deploy/pilot/native_edge_probe.js','deploy/pilot/managed_edge_controller.py',
     'deploy/pilot/flows-wrong-name.json','deploy/pilot/flows-wrong-ca.json',
     'deploy/local/origin21-managed-compose.yaml','deploy/local/origin21_managed_controller.py',
@@ -61,7 +61,8 @@ MANAGED_SOURCE_FILES = SOURCE_FILES + ('tests/fixtures/docker-metadata/test_meta
     'tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js',
     'tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/publisher.js',
     'tests/fixtures/managed-origin-qualification/test_driver.py','tests/fixtures/managed-origin-qualification/test_fixture.py',
-    'tests/fixtures/managed-origin-qualification/test_proof.py','tests/fixtures/managed-origin-qualification/test_wrapper.py')
+    'tests/fixtures/managed-origin-qualification/test_proof.py','tests/fixtures/managed-origin-qualification/test_wrapper.py',
+    'tests/fixtures/managed-origin-qualification/test_readiness_profile.py')
 HUMAN_SOURCE_FILES = MANAGED_SOURCE_FILES + (
     'deploy/local/origin21-managed-human-compose.yaml',
     'deploy/local/check_oidc.py',
