@@ -87,6 +87,7 @@ jobs:
           python3 -B -m unittest discover -s tests/fixtures/node243-archive -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-nodered -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/docker-metadata -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/qualification-git -p 'test_*.py'
           node tests/fixtures/causal-receiver-nodered/test_diagnostics.js
           node tests/fixtures/receiver504-bootstrap/test.js
           node tests/fixtures/receiver504-permit/test.js
