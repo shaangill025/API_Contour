@@ -13,6 +13,34 @@ DRIVER = runpy.run_path(str(ROOT / 'scripts/test-postgres-causal-factory.py'))
 
 
 class DriverTests(unittest.TestCase):
+    def test_collector_build_uses_separate_private_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            config = work / 'docker-config'; config.mkdir(mode=0o700)
+            iid = 'sha256:' + 'a' * 64
+            token = 'b' * 64
+            calls = []
+            def build(args, **kwargs):
+                calls.append(args)
+                build_config = Path(args[args.index('--config') + 1])
+                self.assertNotEqual(build_config, config)
+                self.assertEqual(build_config.stat().st_mode & 0o777, 0o700)
+                (build_config / 'buildx').mkdir()
+                Path(args[args.index('--iidfile') + 1]).write_text(iid)
+            def inspect(kind, ident):
+                self.assertEqual((kind, ident), ('image', iid))
+                return {'Id': iid, 'Config': {'Labels': {DRIVER['LABEL']: token}}}
+            owned, uncertain, diagnostic = [], [], {}
+            result = DRIVER['build_collector_image'](work, Path('/docker'), Path('/socket'),
+                'fixture', token, {'bounded_process_output': build}, inspect, owned, uncertain, diagnostic)
+            self.assertEqual(result, iid)
+            self.assertEqual(list(config.iterdir()), [])
+            self.assertTrue((work / 'docker-build-config' / 'buildx').is_dir())
+            self.assertEqual(calls[0][:3], ['/docker', '--host', 'unix:///socket'])
+            self.assertEqual(owned, [('image', iid, token)])
+            self.assertEqual(uncertain, [])
+            self.assertEqual(diagnostic['collector_image'], iid)
+
     def test_stale_fault_requires_checked_newer_session_and_unchanged_original(self):
         check=DRIVER['validate_advanced_session']
         original='1 1000 2000'; advanced='ADVANCED 2 1100 2100'

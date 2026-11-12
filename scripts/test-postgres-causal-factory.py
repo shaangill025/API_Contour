@@ -287,6 +287,25 @@ def cleanup_with_evidence(primary, uncertain, factory_attempted, proxy_known, in
         raise primary
 
 
+def build_collector_image(work, binary, socket, name, token, bridge, inspect, owned, uncertain, diagnostic):
+    build_config = work / 'docker-build-config'; build_config.mkdir(mode=0o700)
+    docker = [str(binary), '--host', 'unix://' + str(socket), '--config', str(build_config)]
+    image_tag = name+'-collector:fixture'
+    uncertain.append(('image',image_tag))
+    iidfile = work/'collector.iid'
+    bridge['bounded_process_output'](docker+['build','--pull=false','--iidfile',str(iidfile),
+        '--label',LABEL+'='+token,'-f',str(ASSETS/'Dockerfile'),'-t',image_tag,str(ROOT)],
+        cwd=ROOT,env=os.environ.copy())
+    iid=iidfile.read_text().strip()
+    if not re.fullmatch('sha256:[0-9a-f]{64}',iid): raise RuntimeError('collector image receipt')
+    collector_info=inspect('image',iid)
+    if collector_info.get('Id')!=iid or collector_info.get('Config',{}).get('Labels',{}).get(LABEL)!=token:
+        raise RuntimeError('collector image identity')
+    uncertain.pop(); collector_image=iid; owned.append(('image',iid,token))
+    diagnostic['collector_image']=iid
+    return collector_image
+
+
 def qualify(work, docker, d, inspect, create, bridge, https, live, stage, executable,
             product_leaf, export_leaf, binary, socket, binary_hash, config, stages, owned, uncertain, diagnostic,
             exporter_inbox=False):
@@ -311,19 +330,8 @@ def qualify(work, docker, d, inspect, create, bridge, https, live, stage, execut
     try:
         collector_image = None
         if exporter_inbox:
-            image_tag = name+'-collector:fixture'
-            uncertain.append(('image',image_tag))
-            iidfile = work/'collector.iid'
-            bridge['bounded_process_output'](docker+['build','--pull=false','--iidfile',str(iidfile),
-                '--label',LABEL+'='+token,'-f',str(ASSETS/'Dockerfile'),'-t',image_tag,str(ROOT)],
-                cwd=ROOT,env=os.environ.copy())
-            iid=iidfile.read_text().strip()
-            if not re.fullmatch('sha256:[0-9a-f]{64}',iid): raise RuntimeError('collector image receipt')
-            collector_info=inspect('image',iid)
-            if collector_info.get('Id')!=iid or collector_info.get('Config',{}).get('Labels',{}).get(LABEL)!=token:
-                raise RuntimeError('collector image identity')
-            uncertain.pop(); collector_image=iid; owned.append(('image',iid,token))
-            diagnostic['collector_image']=iid
+            collector_image = build_collector_image(work, binary, socket, name, token, bridge,
+                                                    inspect, owned, uncertain, diagnostic)
         image = inspect('image', IMAGE)
         image_id = image.get('Id', '')
         if not re.fullmatch('sha256:[0-9a-f]{64}', image_id):
