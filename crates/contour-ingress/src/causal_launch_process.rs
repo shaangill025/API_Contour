@@ -1371,9 +1371,37 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }
+    fn private_hash_dir() -> std::path::PathBuf {
+        let mut random = [0u8; 16];
+        SystemRandom::new().fill(&mut random).unwrap();
+        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .canonicalize()
+            .unwrap();
+        let path = home.join(format!("contour-hash-test-{name}"));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+    #[test]
+    fn executable_hash_rejects_world_writable_ancestor() {
+        let p = private_hash_dir();
+        let unsafe_ancestor = p.join("unsafe");
+        std::fs::create_dir(&unsafe_ancestor).unwrap();
+        let executable = unsafe_ancestor.join("executable");
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(hash_executable(&executable).is_ok());
+        std::fs::set_permissions(&unsafe_ancestor, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            hash_executable(&executable),
+            Err(ProcessError::Unsafe)
+        ));
+        std::fs::remove_dir_all(p).unwrap();
+    }
     #[test]
     fn executable_hash_matches_sha256_across_read_boundaries() {
-        let p = dir();
+        let p = private_hash_dir();
         let executable = p.join("executable");
         for size in [1, 55, 56, 63, 64, 65, 65535, 65536, 65537, 131073] {
             let bytes: Vec<u8> = (0..size).map(|i| (i * 37 % 251) as u8).collect();
