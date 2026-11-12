@@ -157,4 +157,163 @@ class MetadataTests(unittest.TestCase):
             m.verify_metadata(self.path, 'arm64', 'sha256:' + sha(imgs['candidate'][0]))
 
 
+
+
+def make_layer(entries):
+    import gzip
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode='w', format=tarfile.USTAR_FORMAT) as t:
+        for entry in entries:
+            name, kind, contents = entry[:3]
+            item = tarfile.TarInfo(name)
+            item.mode, item.uid, item.gid = entry[3] if len(entry) == 4 else (0o755, 0, 0)
+            item.type = kind
+            item.size = len(contents) if kind in (tarfile.REGTYPE, tarfile.AREGTYPE) else 0
+            if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE): item.linkname = 'elsewhere'
+            t.addfile(item, io.BytesIO(contents) if item.size else None)
+    uncompressed = raw.getvalue()
+    return gzip.compress(uncompressed, mtime=0), 'sha256:' + sha(uncompressed)
+
+
+def content_fixture(donor_entries=None, added_entries=None, base_diff=None):
+    node = b'tiny node binary'
+    dirs = [(p, tarfile.DIRTYPE, b'') for p in ('usr', 'usr/local', 'usr/local/bin')]
+    normal = dirs + [('usr/local/bin/node', tarfile.REGTYPE, node)]
+    donor_entries = normal if donor_entries is None else donor_entries
+    added_entries = normal if added_entries is None else added_entries
+    donor_sets = donor_entries if donor_entries and isinstance(donor_entries[0], list) else [donor_entries]
+    donor = [make_layer(entries) for entries in donor_sets]
+    base = make_layer([('base', tarfile.REGTYPE, b'base')])
+    added = make_layer(added_entries)
+    blobs, imgs = {}, {}
+    layer_type = 'application/vnd.oci.image.layer.v1.tar+gzip'
+    for name, version, selected in [('node', '24.22.3', donor), ('base', '24.22.1', [base]),
+                                    ('candidate', '24.22.3', [base, added])]:
+        for layer, _ in selected: blobs[sha(layer)] = layer
+        diffs = [d for _, d in selected]
+        if base_diff is not None and name in ('base', 'candidate'): diffs[0] = base_diff
+        c = data({'architecture': 'arm64', 'os': 'linux', 'config': {'Env': ['NODE_VERSION=' + version]},
+                  'rootfs': {'type': 'layers', 'diff_ids': diffs}})
+        blobs[sha(c)] = c
+        manifest = data({'schemaVersion': 2, 'mediaType': m.MANIFEST_TYPE,
+                         'config': desc(c, m.CONFIG_TYPE), 'layers': [desc(x, layer_type) for x, _ in selected]})
+        blobs[sha(manifest)] = manifest
+        imgs[name] = (manifest, c)
+    index = {'schemaVersion': 2, 'manifests': [dict(desc(imgs[name][0], m.MANIFEST_TYPE),
+             platform={'os': 'linux', 'architecture': 'arm64'}) for name in imgs]}
+    probe = {'sha256': sha(node), 'size': len(node), 'mode': 0o755, 'uid': 0, 'gid': 0}
+    return blobs, index, imgs, probe
+
+
+class ContentTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / 'image.tar'
+
+    def run_content(self, donor=None, added=None, probe_change=None, blob_change=None, base_diff=None):
+        blobs, index, imgs, probe = content_fixture(donor, added, base_diff)
+        if probe_change: probe.update(probe_change)
+        if blob_change: blob_change(blobs, imgs)
+        archive(self.path, blobs, index)
+        known = {'arm64': {k: (sha(imgs[k][0]), sha(imgs[k][1])) for k in ('node', 'base')}}
+        with patch.object(m, 'KNOWN', known):
+            return m.verify_content(self.path, 'arm64', 'sha256:' + sha(imgs['candidate'][0]), probe)
+
+    def test_accepts_matching_layers_and_probe(self):
+        result = self.run_content()
+        self.assertEqual(result['scope'], 'oci-local-layer-content')
+        self.assertEqual(result['node']['sha256'], sha(b'tiny node binary'))
+        self.assertIn('caller_probe_association', result['remaining_unverified'])
+        self.assertIn('base_filesystem_semantics', result['remaining_unverified'])
+
+    def test_rejects_added_extra_link_whiteout_traversal_duplicate_and_sparse(self):
+        normal = [(p, tarfile.DIRTYPE, b'') for p in ('usr', 'usr/local', 'usr/local/bin')]
+        normal += [('usr/local/bin/node', tarfile.REGTYPE, b'tiny node binary')]
+        cases = [('etc/other', tarfile.REGTYPE, b'x'), ('usr/local/bin/link', tarfile.SYMTYPE, b''),
+                 ('usr/.wh.foo', tarfile.REGTYPE, b''), ('../escape', tarfile.REGTYPE, b''),
+                 ('usr', tarfile.DIRTYPE, b''), ('usr/local/bin/node/', tarfile.REGTYPE, b'x'),
+                 ('sparse', tarfile.GNUTYPE_SPARSE, b''), ('pax', tarfile.XHDTYPE, b''),
+                 ('gnu', tarfile.GNUTYPE_LONGNAME, b''), ('hard', tarfile.LNKTYPE, b'')]
+        for entry in cases:
+            with self.subTest(entry=entry), self.assertRaises(ValueError): self.run_content(added=normal + [entry])
+
+    def test_added_parent_attributes_are_root_owned_0755(self):
+        for parent in ('usr', 'usr/local', 'usr/local/bin'):
+            for attributes in ((0o755, 1, 0), (0o755, 0, 1), (0o777, 0, 0),
+                               (0o4755, 0, 0), (0o2755, 0, 0), (0o700, 0, 0)):
+                entries = [(p, tarfile.DIRTYPE, b'', attributes if p == parent else (0o755, 0, 0))
+                           for p in ('usr', 'usr/local', 'usr/local/bin')]
+                entries.append(('usr/local/bin/node', tarfile.REGTYPE, b'tiny node binary'))
+                with self.subTest(parent=parent, attributes=attributes):
+                    with self.assertRaisesRegex(ValueError, 'added parent attributes'):
+                        self.run_content(added=entries)
+
+    def test_donor_ancestor_and_whiteout_rejected(self):
+        for entry in [('usr/local', tarfile.SYMTYPE, b''), ('usr/.wh.local', tarfile.REGTYPE, b'')]:
+            with self.subTest(entry=entry), self.assertRaises(ValueError): self.run_content(donor=[entry])
+
+    def test_donor_last_layer_and_later_ambiguity(self):
+        initial = [('usr/local/bin/node', tarfile.REGTYPE, b'old node')]
+        final = [('usr/local/bin/node', tarfile.REGTYPE, b'tiny node binary')]
+        self.run_content(donor=[initial, final])
+        with self.assertRaises(ValueError): self.run_content(donor=[final, initial])
+        with self.assertRaises(ValueError):
+            self.run_content(donor=[final, [('usr/local/bin', tarfile.SYMTYPE, b'')]])
+
+    def test_rejects_valid_gzip_with_wrong_compressed_hash(self):
+        def drift(blobs, imgs):
+            manifest = json.loads(imgs['candidate'][0]); h = manifest['layers'][-1]['digest'][7:]
+            payload = bytearray(blobs[h]); payload[4] ^= 1; blobs[h] = bytes(payload)
+        with self.assertRaisesRegex(ValueError, 'compressed layer digest'): self.run_content(blob_change=drift)
+
+    def test_binary_probe_and_digest_mismatch(self):
+        with self.assertRaises(ValueError): self.run_content(probe_change={'sha256': '0' * 64})
+        with self.assertRaises(ValueError): self.run_content(probe_change={'mode': 0o700})
+        with self.assertRaises(ValueError): self.run_content(base_diff='sha256:' + '0' * 64)
+        def corrupt(blobs, imgs):
+            manifest = json.loads(imgs['candidate'][0]); h = manifest['layers'][-1]['digest'][7:]
+            b = bytearray(blobs[h]); b[-1] ^= 1; blobs[h] = bytes(b)
+        with self.assertRaises((ValueError, OSError)): self.run_content(blob_change=corrupt)
+
+    def test_probe_size_required_and_exact(self):
+        for value in (None, True, 0, 1, m.MAX_FILE + 1):
+            with self.subTest(size=value), self.assertRaises(ValueError):
+                self.run_content(probe_change={'size': value})
+        blobs, index, imgs, probe = content_fixture()
+        del probe['size']
+        archive(self.path, blobs, index)
+        known = {'arm64': {k: (sha(imgs[k][0]), sha(imgs[k][1])) for k in ('node', 'base')}}
+        with patch.object(m, 'KNOWN', known), self.assertRaises(ValueError):
+            m.verify_content(self.path, 'arm64', 'sha256:' + sha(imgs['candidate'][0]), probe)
+
+    def test_regular_node_trailing_slash_is_rejected(self):
+        entries = [(p, tarfile.DIRTYPE, b'') for p in ('usr', 'usr/local', 'usr/local/bin')]
+        entries.append(('usr/local/bin/node/', tarfile.REGTYPE, b'tiny node binary'))
+        with self.assertRaisesRegex(ValueError, 'non-directory trailing slash'):
+            self.run_content(added=entries)
+
+    def test_unaligned_tar_tail_is_rejected(self):
+        import gzip
+        packed, _ = make_layer([('usr', tarfile.DIRTYPE, b'')])
+        raw = gzip.decompress(packed) + b'\0'
+        packed = gzip.compress(raw, mtime=0)
+        blobs = {sha(packed): packed}
+        archive(self.path, blobs, {'schemaVersion': 2, 'manifests': []})
+        a = m.Archive(self.path)
+        self.addCleanup(a.close)
+        with self.assertRaisesRegex(ValueError, 'layer tar alignment'):
+            m.inspect_layer(a, ('application/vnd.oci.image.layer.v1.tar+gzip', sha(packed), len(packed)),
+                            'sha256:' + sha(raw), m.Budget(), 'donor', None)
+
+    def test_limits_and_truncation(self):
+        with patch.object(m, 'MAX_LAYER_UNCOMPRESSED', 1000), self.assertRaises(ValueError): self.run_content()
+        with patch.object(m, 'MAX_TOTAL_COMPRESSED', 10), self.assertRaises(ValueError): self.run_content()
+        with patch.object(m, 'MAX_LAYER_MEMBERS', 1), self.assertRaises(ValueError): self.run_content()
+        def truncate(blobs, imgs):
+            manifest = json.loads(imgs['candidate'][0]); h = manifest['layers'][-1]['digest'][7:]
+            blobs[h] = blobs[h][:-1]
+        with self.assertRaises(ValueError): self.run_content(blob_change=truncate)
+
+
 if __name__ == '__main__': unittest.main()
