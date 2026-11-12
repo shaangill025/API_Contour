@@ -66,6 +66,36 @@ EXPECTED = {
     'arm64': ('sha256:9ca3f7b76099c042f1e655ca8936e0a1ccda68b3c74a8a36375428ef76476d4e', 'sha256:a2130198be80a76bc657795801e4e4c880f4f6aa2bd7d964766d4b953445248a'),
     'amd64': ('sha256:b791832e17c3a8a5897bdb5087381ffbc07b77bc634d204bf603b5f63c1ffe57', 'sha256:1c532f9dd00d6f77750bb2a9fedcdbb3f178ca6e539cbefb66084494d9e568d6'),
 }
+INPUTS = {
+    'node': {'ref': NODE, 'index': 'sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5',
+             'repo': 'node', 'version': '24.22.3',
+             'child': {'arm64':'sha256:f44b069ce4b5d00cb4f7dff81821a4a6953e3790420040abf300139b1d317c6c', 'amd64':'sha256:d8d97e479cdc64f052f81f129362168717c59783ade8dcc1abd22e1cca8dbd7c'}},
+    'base': {'ref': BASE, 'index': 'sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963',
+             'repo': 'nodered/node-red', 'version': '24.22.1',
+             'child': {'arm64':'sha256:fa98d2867f299a67275ae74b7f78f01d34cc7d86f6cb63ea086beb45bac3b9a8', 'amd64':'sha256:051b217b585013c692006e238faa1067adc52f7ded972cbca3d944f5f9563d80'}},
+}
+
+
+def validate_input(image, role, arch):
+    if role not in INPUTS or arch not in EXPECTED: raise ValueError('input role or architecture')
+    expected = INPUTS[role]
+    if image.get('Os') != 'linux' or image.get('Architecture') != arch: raise ValueError('input platform')
+    env = image['Config']['Env']
+    if not isinstance(env, list) or [x for x in env if isinstance(x, str) and x.startswith('NODE_VERSION=')] != ['NODE_VERSION='+expected['version']]: raise ValueError('input version')
+    config = EXPECTED[arch][0 if role == 'node' else 1]
+    descriptor = image.get('Descriptor')
+    if image.get('Id') == expected['index']:
+        if not isinstance(descriptor, dict) or descriptor.get('digest') != expected['index'] or descriptor.get('mediaType') != 'application/vnd.oci.image.index.v1+json': raise ValueError('input descriptor')
+        digests = image.get('RepoDigests')
+        if not isinstance(digests, list) or expected['repo']+'@'+expected['index'] not in digests: raise ValueError('input repository digest')
+        model = 'containerd-index'
+    elif image.get('Id') == config:
+        if descriptor is not None and (not isinstance(descriptor, dict) or descriptor.get('digest') != expected['index'] or descriptor.get('mediaType') != 'application/vnd.oci.image.index.v1+json'): raise ValueError('input descriptor')
+        model = 'legacy-config'
+    else: raise ValueError('input identity')
+    return {'model':model,'index':expected['index'],'expected_child_manifest':expected['child'][arch],
+            'expected_config':config,'engine_child_config_binding_verified':False}
+
 PROBE = r"""const fs=require('fs'),crypto=require('crypto');
 if(process.version!=='v24.22.3') throw Error('version');
 if(require('/usr/src/node-red/node_modules/node-red/package.json').version!=='5.0.9') throw Error('red');
@@ -209,8 +239,8 @@ def qualify(run, owner, shared):
             if arch == 'amd64': x64_started = True
             platform = 'linux/'+arch
             for ref in (NODE, BASE): docker('pull','--platform',platform,ref,timeout=120)
-            node = one(docker('image','inspect',NODE)); base = one(docker('image','inspect',BASE))
-            if (node['Id'],base['Id']) != EXPECTED[arch] or node['Architecture'] != arch or base['Architecture'] != arch: raise ValueError('input identity')
+            node = one(docker('image','inspect','--platform',platform,NODE)); base = one(docker('image','inspect','--platform',platform,BASE))
+            input_models = {'node':validate_input(node,'node',arch), 'base':validate_input(base,'base',arch)}
             iid = owner.path/('iid-'+arch)
             docker('build','--platform',platform,'--pull=false','--label',OWNER+'='+token,'--iidfile',str(iid),'-f',str(recipe),str(ROOT),timeout=330)
             image = image_id_file(iid)
@@ -226,7 +256,7 @@ def qualify(run, owner, shared):
             record(owner,'created-'+arch+'.json',{'cid':cid,'signature':frozen})
             result = run_probe(docker,owner,arch,cid,token,image,frozen)
             record(owner,'result-'+arch+'.json',result)
-            results[arch] = {'image':image,'probe':result}
+            results[arch] = {'image':image,'probe':result,'inputs':input_models}
     except BaseException as error:
         primary = error
     finally:
@@ -242,7 +272,7 @@ def qualify(run, owner, shared):
         raise CacheRestoreFailure('cache restoration failed') from restore_failure
     if primary is not None: raise primary
     if shared.snapshot(run, ROOT) != (head, source) or hashlib.sha256(recipe.read_bytes()).hexdigest() != recipe_hash: raise ValueError('source changed')
-    record(owner,'receipt.json',{'head':head,'recipe_sha256':recipe_hash,'images':results,'token':token,'scope':'version-native-bcrypt-config-and-layer-prefix', 'remaining_unverified':['donor_binary_hash_match','added_layer_contents','publisher_provenance','actual_TLS','profile504']})
+    record(owner,'receipt.json',{'head':head,'recipe_sha256':recipe_hash,'images':results,'token':token,'scope':'version-native-bcrypt-config-and-layer-prefix', 'remaining_unverified':['engine_child_config_binding','donor_binary_hash_match','added_layer_contents','publisher_provenance','actual_TLS','profile504']})
 
 
 def main():
