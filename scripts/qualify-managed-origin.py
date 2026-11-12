@@ -28,7 +28,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -150,7 +150,7 @@ def cleanup_private(run,child,owner,head):
     if os.path.lexists(base): raise RuntimeError('private state remains')
 
 
-def qualify(run,owner,token,h):
+def qualify(run,owner,token,h,*,fresh_metadata=False):
     global _PHASE
     _PHASE="worktree"
     head,source=h['snapshot'](run,ROOT); child=owner.path/'worktree'; tag='apicontour-origin21-build:'+token
@@ -168,7 +168,9 @@ def qualify(run,owner,token,h):
     path=owner.write('build-receipt.json',receipt); digest=hashlib.sha256(receipt).hexdigest()
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after build')
     _PHASE='inner-qualification'
-    run([sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest],cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
+    inner=[sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest]
+    if fresh_metadata: inner.append('--fresh-metadata')
+    run(inner,cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
     if h['image_identity'](run,child,tag,token,head)!=image: raise ValueError('build image changed')
     h['require_registration'](run,ROOT,child,head)
@@ -186,7 +188,8 @@ def qualify(run,owner,token,h):
 
 def main():
     global _PHASE
-    if len(sys.argv)!=1: raise ValueError('no arguments accepted')
+    if sys.argv[1:] not in ([],['--fresh-metadata']): raise ValueError('invalid arguments')
+    fresh_metadata = sys.argv[1:] == ['--fresh-metadata']
     if not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in ('P_PID','WEXITED','WNOHANG','WNOWAIT')):
         print('qualification requires configured Python 3.13 with POSIX waitid/WNOWAIT',file=sys.stderr)
         raise RuntimeError('qualification runtime unavailable')
@@ -196,7 +199,10 @@ def main():
     os.umask(0o077); folder=Path(tempfile.mkdtemp(prefix='contour-managed-origin-qualification-')).resolve(); folder.chmod(0o700)
     owner=h['OwnedDirectory'](folder); failures=[]
     try:
-        run=h['Runner'](deadline,owner); qualify(run,owner,uuid.uuid4().hex,h); owner.remove()
+        run=h['Runner'](deadline,owner)
+        if fresh_metadata: qualify(run,owner,uuid.uuid4().hex,h,fresh_metadata=True)
+        else: qualify(run,owner,uuid.uuid4().hex,h)
+        owner.remove()
     except BaseException as error:
         failures.append(error)
         if _PHASE=='inner-qualification':

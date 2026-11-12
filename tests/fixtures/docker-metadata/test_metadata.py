@@ -4,13 +4,14 @@ import hashlib
 import gc
 import sys
 import threading
+import contextvars
 import tempfile
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('docker_metadata',ROOT/'deploy/local/docker_metadata.py')
@@ -263,6 +264,194 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(m.MetadataError): m.Session(docker='/unapproved',sha256=m.DOCKER_SHA256,socket=m.SOCKET,config='/x')
         with self.assertRaises(m.MetadataError): m.Session(docker=m.DOCKER,sha256='0'*64,socket=m.SOCKET,config='/x')
         with self.assertRaises(m.MetadataError): m.Session(docker=m.DOCKER,sha256=m.DOCKER_SHA256,socket='/tmp/socket',config='/x')
+
+
+class Integration(unittest.TestCase):
+    class FakeSession:
+        created = []
+        def __init__(self,**kwargs):
+            self.kwargs=kwargs; self.calls=0; self.deadline=time.monotonic()+300
+            self.active=False; self.closed=0; self._guard=threading.Lock(); self._cancel=threading.Event()
+            self.fail=False; self.context_checks=0; self.created.append(self)
+        def __enter__(self): self.active=True; return self
+        def start(self,deadline=None): self.active=True; return self
+        def __exit__(self,*_): self.closed+=1; self.active=False
+        def _context(self,deadline=None):
+            self.context_checks+=1
+            if not self.active: raise m.MetadataError('metadata session failed')
+        def read(self,args,deadline=None):
+            self.calls+=1
+            if self.fail: raise m.MetadataError('metadata session failed')
+            return [{'count':self.calls,'null':None}]
+
+    def setUp(self): self.FakeSession.created=[]
+
+    def test_default_off_preserves_original_cli(self):
+        from deploy.local import origin21_products as products
+        with patch.object(products.shutil,'which',return_value='/original/docker'), \
+             patch.object(products.origin21_transport,'_run',return_value='result') as run:
+            self.assertEqual(products._command(['docker','inspect',IDENT],17),b'result')
+            self.assertEqual(run.call_args.args[0],['/original/docker','inspect',IDENT])
+            self.assertEqual(run.call_args.kwargs['deadline'],17)
+            self.assertNotIn('DOCKER_CONFIG',run.call_args.kwargs['env'])
+
+    def test_scoped_supported_fresh_and_unsupported_preserves_timeout_environment(self):
+        from deploy.local import docker_metadata as bound, origin21_products as products
+        pool=bound._Pool(None,Path('/private/config')); token=bound._ACTIVE.set(pool)
+        try:
+            with patch.object(bound,'Session',self.FakeSession), patch.object(products.shutil,'which') as which, \
+                 patch.object(products.origin21_transport,'_run',return_value='cli') as run:
+                a=json.loads(products._command(['docker','inspect',IDENT])); b=json.loads(products._command(['docker','inspect',IDENT]))
+                self.assertNotEqual(a,b); self.assertIsNone(a[0]['null']); run.assert_not_called(); which.assert_not_called()
+                self.assertEqual(products._command(['docker','rm',IDENT],23,token='t'),b'cli')
+                call=run.call_args
+                self.assertEqual(call.args[0],[bound.DOCKER,'--config','/private/config','--host','unix://'+bound.SOCKET,'rm',IDENT])
+                self.assertGreater(call.kwargs['deadline'],0); self.assertLessEqual(call.kwargs['deadline'],23)
+                self.assertEqual(call.kwargs['env']['ORIGIN21_OWNER_TOKEN'],'t')
+                self.assertIn('HOME',call.kwargs['env']); self.assertNotIn('DOCKER_CONFIG',call.kwargs['env'])
+                fake=self.FakeSession.created[0]; fake.fail=True; run.reset_mock()
+                with self.assertRaises(m.MetadataError): products._command(['docker','inspect',IDENT])
+                run.assert_not_called(); self.assertGreaterEqual(fake.context_checks,2)
+        finally:
+            bound._ACTIVE.reset(token); pool.close()
+
+    def test_rotation_and_thread_session_separation(self):
+        pool=m._Pool(None,Path('/private/config')); runner=lambda *_a,**_k:''
+        with patch.object(m,'Session',self.FakeSession):
+            first=json.loads(pool.command(['docker','inspect',IDENT],30,{},runner))
+            session=self.FakeSession.created[0]; session.calls=m.MAX_CALLS-1
+            again=json.loads(pool.command(['docker','inspect',IDENT],30,{},runner))
+            self.assertEqual(first,again); self.assertEqual(session.closed,1)
+            other=self.FakeSession.created[1]; other.deadline=time.monotonic()+1
+            pool.command(['docker','inspect',IDENT],30,{},runner); self.assertEqual(other.closed,1)
+            token=m._ACTIVE.set(pool)
+            try:
+                ctx=contextvars.copy_context(); values=[]
+                t=threading.Thread(target=lambda:ctx.run(lambda:values.append(m.dispatch(['docker','inspect',IDENT],30,{},runner))))
+                t.start(); t.join(2); self.assertFalse(t.is_alive()); self.assertEqual(len(values),1)
+                self.assertEqual(len(pool.sessions),2)
+            finally: m._ACTIVE.reset(token)
+            pool.close()
+            self.assertTrue(all(s.closed==1 for s in self.FakeSession.created))
+
+    def test_scope_restores_context_and_removes_empty_config(self):
+        from deploy.local import origin21_managed_qualification as qualification
+        with tempfile.TemporaryDirectory(prefix='metadata-scope-',dir=Path.home()) as d:
+            folder=Path(d); folder.chmod(0o700)
+            class Proof:
+                def __init__(self): self.folder=folder; self.checks=0
+                def verify(self): self.checks+=1
+            proof=Proof()
+            with patch.object(qualification,'OwnedManagedQualification',Proof):
+                with self.assertRaisesRegex(ValueError,'primary'):
+                    with m.qualification_scope(proof):
+                        self.assertIsNotNone(m._ACTIVE.get()); self.assertTrue((folder/'docker-metadata-config').is_dir())
+                        raise ValueError('primary')
+                self.assertIsNone(m._ACTIVE.get()); self.assertFalse((folder/'docker-metadata-config').exists())
+                self.assertGreaterEqual(proof.checks,3)
+
+    def test_fallback_encoding_cannot_return_after_deadline(self):
+        now=[10.0]; calls=[]
+        class SlowEncoding(str):
+            def encode(self,*args,**kwargs):
+                now[0]=12.0
+                return super().encode(*args,**kwargs)
+        def runner(*args,**kwargs):
+            calls.append((args,kwargs)); return SlowEncoding('not-a-receipt')
+        pool=m._Pool(None,Path('/private/config'))
+        with patch.object(m,'Session',self.FakeSession), patch.object(m.time,'monotonic',side_effect=lambda:now[0]):
+            with self.assertRaises(m.MetadataError): pool.command(['docker','rm',IDENT],1,{},runner)
+            self.assertEqual(len(calls),1)
+            pool.close()
+
+    def test_short_deadline_bounds_real_pipe_read(self):
+        req_r,req_w=os.pipe(); res_r,res_w=os.pipe()
+        class PipeProcess(Process):
+            def __init__(self):
+                super().__init__(); self.stdin=os.fdopen(req_w,'wb',buffering=0); self.stdout=os.fdopen(res_r,'rb',buffering=0)
+        proc=PipeProcess(); session=m.Session(docker=m.DOCKER,sha256=m.DOCKER_SHA256,socket=m.SOCKET,config='/private/config')
+        session.tool=('tool',); session.endpoint=('socket',); session.directory=('config',)
+        session.deadline=time.monotonic()+10; session.process=proc; session.active=True
+        def late():
+            time.sleep(.15)
+            try: os.write(res_w,http(b'{}',b'Content-Length: 2\r\n'))
+            except BrokenPipeError: pass
+            finally: os.close(res_w)
+        writer=threading.Thread(target=late); writer.start(); start=time.monotonic()
+        try:
+            with patch.object(m,'_tool',return_value=('tool',)), patch.object(m,'_socket',return_value=('socket',)), patch.object(m,'_config',return_value=('config',)):
+                with self.assertRaises(m.MetadataError): session.read(['docker','inspect',IDENT],deadline=start+.04)
+            self.assertLess(time.monotonic()-start,.4); self.assertEqual(proc.waits,1)
+        finally:
+            writer.join(1); os.close(req_r)
+        self.assertFalse(writer.is_alive())
+
+    def test_short_deadline_cold_start_and_pool_lock(self):
+        pool=m._Pool(None,Path('/private/config')); runner=Mock()
+        def version(_argv,_env,deadline):
+            while time.monotonic()<deadline: time.sleep(.002)
+            raise TimeoutError()
+        with patch.object(m,'_tool',return_value=('tool',)), patch.object(m,'_socket',return_value=('socket',)), \
+             patch.object(m,'_config',return_value=('config',)), patch.object(m,'_version',side_effect=version), \
+             patch.object(m.subprocess,'Popen') as spawn:
+            start=time.monotonic()
+            with self.assertRaises(m.MetadataError): pool.command(['docker','inspect',IDENT],.04,{},runner)
+            self.assertLess(time.monotonic()-start,.4); spawn.assert_not_called(); runner.assert_not_called()
+        pool.lock.acquire()
+        try:
+            start=time.monotonic()
+            with self.assertRaises(TimeoutError): pool.command(['docker','inspect',IDENT],.04,{},runner)
+            self.assertLess(time.monotonic()-start,.4); runner.assert_not_called()
+        finally: pool.lock.release()
+
+    def test_strict_flags_and_unchanged_deadlines(self):
+        wrapper_spec=importlib.util.spec_from_file_location('fresh_wrapper',ROOT/'scripts/qualify-managed-origin.py')
+        wrapper=importlib.util.module_from_spec(wrapper_spec); wrapper_spec.loader.exec_module(wrapper)
+        driver_spec=importlib.util.spec_from_file_location('fresh_driver',ROOT/'scripts/test-managed-origin-qualification.py')
+        driver=importlib.util.module_from_spec(driver_spec); driver_spec.loader.exec_module(driver)
+        self.assertEqual(wrapper.QUALIFY_SECONDS,1200); self.assertEqual(driver._STREAM_DEADLINE,180)
+        for module in (wrapper,driver):
+            self.assertIn('deploy/local/docker_metadata.py',module._ALLOWED_FRAMES)
+        for extra in (['--fresh-metadata','--fresh-metadata'],['--other']):
+            with patch.object(wrapper.sys,'argv',['wrapper',*extra]), patch.object(wrapper,'helper') as helper:
+                with self.assertRaises(ValueError): wrapper.main()
+                helper.assert_not_called()
+        for args in ([1,2,3,4,'--other'],[1,2,3,4,'--fresh-metadata','--fresh-metadata']):
+            with patch.object(driver,'_source_guard') as source:
+                with self.assertRaises(ValueError): driver.main(args)
+                source.assert_not_called()
+
+    def test_explicit_flag_propagates_only_when_selected(self):
+        spec=importlib.util.spec_from_file_location('fresh_wrapper_forward',ROOT/'scripts/qualify-managed-origin.py')
+        wrapper=importlib.util.module_from_spec(spec); spec.loader.exec_module(wrapper)
+        for enabled in (False,True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory(dir=Path.home()) as d:
+                folder=Path(d); calls=[]
+                class Owner:
+                    path=folder
+                    def verify(self): pass
+                    def write(self,name,data):
+                        path=self.path/name; path.write_bytes(data); return path
+                def run(args,**_kwargs):
+                    calls.append(args)
+                    if args[:3]==['git','worktree','add']:
+                        child=Path(args[-2]); child.mkdir(); (child/'.git').write_text('gitdir: owned')
+                    if len(args)>1 and args[1]=='scripts/test-managed-origin-qualification.py':
+                        raise RuntimeError('stop before execution')
+                    return b''
+                h={'snapshot':lambda *_:('b'*40,{'fixed':'hash'}),'require_registration':lambda *_a,**_k:None,
+                   'encode':lambda value:json.dumps(value,sort_keys=True,separators=(',',':')).encode(),
+                   'OWNER_LABEL':'owner','HEAD_LABEL':'head','image_identity':lambda *_:'sha256:'+'c'*64}
+                with self.assertRaisesRegex(RuntimeError,'stop before execution'):
+                    wrapper.qualify(run,Owner(),'a'*32,h,fresh_metadata=enabled)
+                inner=next(a for a in calls if len(a)>1 and a[1]=='scripts/test-managed-origin-qualification.py')
+                self.assertEqual(inner[-1]=='--fresh-metadata',enabled)
+
+    def test_source_closure_pins_transport(self):
+        from deploy.local import origin21_state
+        self.assertIn('deploy/local/docker_metadata.py',origin21_state.SOURCE_FILES)
+        self.assertIn('tests/fixtures/docker-metadata/test_metadata.py',origin21_state.MANAGED_SOURCE_FILES)
+
 
 
 if __name__ == '__main__': unittest.main()

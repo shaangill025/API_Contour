@@ -6,6 +6,8 @@ closed qualification-owned bootstrap and unknown-outcome disposal, neither of
 which is emulated here. No synthetic capture authority or 503 path is used.
 """
 import json
+import contextlib
+import contextvars
 import hashlib
 import os
 from pathlib import Path
@@ -17,7 +19,7 @@ import threading
 import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from deploy.local import origin21_managed_controller as controller,origin21_products as products,origin21_profile as profiles,origin21_ready,origin21_state,origin21_transport
+from deploy.local import docker_metadata,origin21_managed_controller as controller,origin21_products as products,origin21_profile as profiles,origin21_ready,origin21_state,origin21_transport
 
 ROOT=profiles.ROOT
 FIXTURE=ROOT/'tests/fixtures/managed-origin-qualification'
@@ -33,7 +35,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -82,7 +84,7 @@ def failure_lines(error,phase):
 
 
 def _source_guard():
-    required={SOURCE,M5_HELPER,'deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
+    required={SOURCE,M5_HELPER,'deploy/local/docker_metadata.py','deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
     if not required.issubset(set(origin21_state.MANAGED_SOURCE_FILES)): raise RuntimeError('qualification source closure incomplete')
     return origin21_state._source_identity(context=profiles.MANAGED)
 
@@ -204,7 +206,8 @@ def _stream_with_owner(mode,index,transition,destination,descriptor,helper,owner
             result.append((before,after))
         except BaseException as error: writer_errors.append(error)
         finally: done.set()
-    writer=threading.Thread(target=write,daemon=False)
+    writer_context=contextvars.copy_context()
+    writer=threading.Thread(target=lambda:writer_context.run(write),daemon=False)
     retained=(owner,writer); _RETAINED.append(retained)
     started=False
     monitor=None; pid=None; completed=False; primary=None; errors=[]
@@ -430,7 +433,7 @@ def qualify_lost_publication_ack(proof):
                     time.sleep(.01)
                 raise TimeoutError('publication marker deadline')
             except BaseException as error: observer_errors.append(error)
-        proof.arm_ack_loss(); watcher=threading.Thread(target=observe,daemon=False)
+        proof.arm_ack_loss(); watcher_context=contextvars.copy_context(); watcher=threading.Thread(target=lambda:watcher_context.run(observe),daemon=False)
         retained=(owner,watcher); _RETAINED.append(retained); started=False
         failures=[]
         try:
@@ -539,29 +542,32 @@ def main(argv):
     """Run using an exact clean worktree and its already verified build receipt."""
     from deploy.local import origin21_managed_qualification as qualification,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
     global _PHASE
-    if len(argv)!=4: raise ValueError('build evidence required')
-    image,head,receipt,digest=argv
+    if len(argv)==4: fresh_metadata=False
+    elif len(argv)==5 and argv[-1]=='--fresh-metadata': fresh_metadata=True
+    else: raise ValueError('build evidence required')
+    image,head,receipt,digest=argv[:4]
     _set_phase('source-check')
     source=_source_guard()
     _set_phase('qualification-begin')
     proof=qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest)
     try:
-        _set_phase('initialize')
-        path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
-        _set_phase('topology-up')
-        cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
-        _set_phase('transport')
-        transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
-        _set_phase('positive-streams')
-        positive=qualify_positive_streams(transport,proof)
-        _set_phase('negative-cases')
-        negative=qualify_wrong_name_and_pending(proof)
-        _set_phase('lost-ack')
-        unknown=qualify_lost_publication_ack(proof)
-        _set_phase('volume-disposal')
-        disposal.dispose_synthetic_volume(proof)
-        if _source_guard()!=source: raise ValueError('qualification source changed')
-        return {'positive':positive,'negative':negative,'unknown':unknown,'cleanup':True}
+        with docker_metadata.qualification_scope(proof) if fresh_metadata else contextlib.nullcontext():
+            _set_phase('initialize')
+            path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
+            _set_phase('topology-up')
+            cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
+            _set_phase('transport')
+            transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
+            _set_phase('positive-streams')
+            positive=qualify_positive_streams(transport,proof)
+            _set_phase('negative-cases')
+            negative=qualify_wrong_name_and_pending(proof)
+            _set_phase('lost-ack')
+            unknown=qualify_lost_publication_ack(proof)
+            _set_phase('volume-disposal')
+            disposal.dispose_synthetic_volume(proof)
+            if _source_guard()!=source: raise ValueError('qualification source changed')
+            return {'positive':positive,'negative':negative,'unknown':unknown,'cleanup':True}
     finally:
         primary=sys.exc_info()[1]
         if _RETAINED: _RETAINED.append((proof,None))

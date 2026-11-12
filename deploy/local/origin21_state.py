@@ -22,7 +22,7 @@ PHASES = ('credentials', 'groups', 'migration_15', 'migration_16', 'migration_17
           'origin_1_target', 'origin_1_lifecycle', 'origin_1_credential', 'origin_1_grant',
           'origin_2_target', 'origin_2_lifecycle', 'origin_2_credential', 'origin_2_grant',
           'runtime_configs')
-SOURCE_FILES = ('deploy/local/origin21_profile.py', 'deploy/local/origin21_schema.py',
+SOURCE_FILES = ('deploy/local/docker_metadata.py','deploy/local/origin21_profile.py', 'deploy/local/origin21_schema.py',
                 'deploy/local/origin21_state.py', 'deploy/local/origin21_runtime.py', 'deploy/local/origin21_setup.py', 'deploy/local/origin21_configs.py', 'deploy/local/origin21_transport.py',
                 'deploy/local/origin21_provision.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/origin21_products.py', 'deploy/local/origin21_cli.py', 'deploy/local/origin21_ready.py', 'deploy/local/origin21-compose.yaml', 'deploy/local/origin21-postgres-init.yaml', 'deploy/local/up.py',
                 'deploy/pilot/settings.js', 'deploy/pilot/flows.json', 'deploy/pilot/destination.js', 'deploy/pilot/probe.js', 'deploy/pilot/check_tls.js',
@@ -46,7 +46,7 @@ SOURCE_FILES = ('deploy/local/origin21_profile.py', 'deploy/local/origin21_schem
                 'db/opt-in-migrations/0019_causal_sessions.sql',
                 'db/opt-in-migrations/0020_causal_inbox.sql',
                 'db/opt-in-migrations/0021_origin_admission.sql')
-MANAGED_SOURCE_FILES = SOURCE_FILES + ('deploy/gateway/managed_edge.py','deploy/gateway/certificates.py',
+MANAGED_SOURCE_FILES = SOURCE_FILES + ('tests/fixtures/docker-metadata/test_metadata.py','deploy/gateway/managed_edge.py','deploy/gateway/certificates.py',
     'deploy/pilot/native_edge_probe.js','deploy/pilot/managed_edge_controller.py',
     'deploy/pilot/flows-wrong-name.json','deploy/pilot/flows-wrong-ca.json',
     'deploy/local/origin21-managed-compose.yaml','deploy/local/origin21_managed_controller.py',
