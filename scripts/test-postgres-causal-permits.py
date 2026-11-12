@@ -22,7 +22,7 @@ import uuid
 
 ROOT=Path(__file__).absolute().parent.parent
 OPT=('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs','0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox','0021_origin_admission','0022_causal_generation')
-EXTRA_SOURCE_MIGRATIONS=('0023_causal_marker_bindings','0024_causal_live_profile','0025_historical_origin','0026_causal_evidence_enrollment')
+EXTRA_SOURCE_MIGRATIONS=('0023_causal_marker_bindings','0024_causal_live_profile','0025_historical_origin','0026_causal_evidence_enrollment','0027_causal_observer_inbox')
 EXAMPLE=ROOT/'crates/contour-ingress/examples/causal_permit_probe.rs'
 NODE=ROOT/'collectors/nodered/error-integration/private-owner-permit.js'
 MARKER=ROOT/'collectors/nodered/error-integration/causal-marker.js'
@@ -57,6 +57,7 @@ def snapshot(bridge):
         if build.exists() or build.is_symlink(): paths.add(build)
     paths.add(ROOT/'db/opt-in-migrations/0025_historical_origin.sql')
     paths.add(ROOT/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql')
+    paths.add(ROOT/'db/opt-in-migrations/0027_causal_observer_inbox.sql')
     expected={ROOT/'db/opt-in-migrations'/(n+'.sql') for n in OPT + EXTRA_SOURCE_MIGRATIONS}
     if set((ROOT/'db/opt-in-migrations').glob('*.sql'))!=expected: raise ValueError('migration list changed')
     return {str(path):bridge['digest_file'](safe(path)) for path in sorted(paths)}

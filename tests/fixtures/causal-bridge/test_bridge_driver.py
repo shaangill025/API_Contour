@@ -386,7 +386,7 @@ class DriverTests(unittest.TestCase):
 
 
 class HistoricalSourceInventoryTests(unittest.TestCase):
-    def test_all_old_profiles_hash_25_and_26_without_applying_them(self):
+    def test_all_old_profiles_hash_25_26_and_27_without_applying_them(self):
         import hashlib
         root_repo=Path(__file__).resolve().parents[3]
         cases=(('bridge',19),('sessions',19),('inbox',20),('generation',22),
@@ -420,13 +420,14 @@ class HistoricalSourceInventoryTests(unittest.TestCase):
                         for crate in ('contour-ingress','contour-delivery','contour-platform','contour-abi','contour-wasm'):
                             (root/'crates'/crate/'src').mkdir(parents=True,exist_ok=True)
                 paths.append(root/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql')
+                paths.append(root/'db/opt-in-migrations/0027_causal_observer_inbox.sql')
                 for path in paths:
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 bridge={'source_paths':lambda:[], 'digest_file':lambda path:hashlib.sha256(path.read_bytes()).hexdigest()}
                 with mock.patch.dict(g,patches):
                     def snapshot(): return fn(bridge) if name in ('permits','marker-bridge','live-profile') else fn()
                     before=snapshot()
-                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql'):
+                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql','0027_causal_observer_inbox.sql'):
                         target=root/'db/opt-in-migrations'/filename
                         key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
                         self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
@@ -443,6 +444,7 @@ class HistoricalSourceInventoryTests(unittest.TestCase):
                 self.assertEqual([int(item[:4]) for item in applied],list(range(15,last+1)))
                 self.assertNotIn('0025_historical_origin',applied)
                 self.assertNotIn('0026_causal_evidence_enrollment',applied)
+                self.assertNotIn('0027_causal_observer_inbox',applied)
 
 
 if __name__=='__main__': unittest.main()
