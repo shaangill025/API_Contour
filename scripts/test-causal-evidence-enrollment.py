@@ -67,18 +67,26 @@ def classify(tenant,call,kind,marker=None):
     barrier=''
     if marker is not None:
         if marker not in ('gateway_product','product_gateway','collision'): raise ValueError('invalid barrier')
-        # Wait and contend inside one server command: fences still surround this
-        # operation, but cannot consume the holder's five-second sleep window.
         barrier=("FOR i IN 1..150 LOOP IF EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
           "WHERE datname='contour_local' AND usename='postgres' AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%%race_winner_%s%%') THEN observed:=true; EXIT; END IF; PERFORM pg_sleep(0.02); END LOOP; "
-          "IF NOT observed THEN RAISE EXCEPTION 'barrier unavailable'; END IF; " % marker)
-    state='serialization_failure' if kind=='busy' else 'unique_violation'
+          "IF NOT observed THEN result:='BARRIER_UNAVAILABLE'; END IF; " % marker)
+    state='40001' if kind=='busy' else '23505'
     expected='credential gate busy' if kind=='busy' else ('gateway enrollment unavailable' if tenant==T1 else 'credential unavailable')
-    return ("BEGIN; SET LOCAL statement_timeout='8s'; DO $race$ DECLARE n timestamptz:=clock_timestamp(); m text; observed boolean:=false; BEGIN "
-      "PERFORM set_config('apicontour.tenant_id','%s',true); %s BEGIN PERFORM %s; "
-      "RAISE EXCEPTION 'unexpected acceptance' USING ERRCODE='P0001'; EXCEPTION WHEN %s THEN "
-      "GET STACKED DIAGNOSTICS m=MESSAGE_TEXT; IF m IS DISTINCT FROM '%s' THEN RAISE EXCEPTION 'wrong class'; END IF; END; END $race$; COMMIT; SELECT '%s';"
+    return ("BEGIN; SET LOCAL statement_timeout='8s'; DO $race$ DECLARE n timestamptz:=clock_timestamp(); m text; code text; observed boolean:=false; accepted boolean:=false; result text:='UNEXPECTED_SUCCESS'; BEGIN "
+      "PERFORM set_config('apicontour.tenant_id','%s',true); %s IF result<>'BARRIER_UNAVAILABLE' THEN BEGIN PERFORM %s; accepted:=true; RAISE EXCEPTION 'fixture rollback' USING ERRCODE='P0001'; "
+      "EXCEPTION WHEN query_canceled OR OTHERS THEN GET STACKED DIAGNOSTICS m=MESSAGE_TEXT, code=RETURNED_SQLSTATE; "
+      "IF accepted THEN result:='UNEXPECTED_SUCCESS'; ELSIF code='%s' THEN IF m IS DISTINCT FROM '%s' THEN result:='WRONG_MESSAGE'; ELSE result:='%s'; END IF; "
+      "ELSE result:='SQLSTATE_'||code; END IF; END; END IF; "
+      "PERFORM set_config('apicontour.race_result',result,true); END $race$; SELECT current_setting('apicontour.race_result'); COMMIT;"
       %(tenant,barrier,call,state,expected,kind.upper()))
+
+def require_classification(execute,sql,expected,phase):
+    if expected not in ('BUSY','DUPLICATE') or phase not in ('gateway_product','product_gateway','collision','product_duplicate','gateway_duplicate'): raise ValueError('invalid classification phase')
+    result=execute(sql)
+    if result==expected: return
+    reason=result if result in ('BARRIER_UNAVAILABLE','WRONG_MESSAGE','UNEXPECTED_SUCCESS') or re.fullmatch(r'SQLSTATE_[0-9A-Z]{5}',result or '') else 'INVALID_RESULT'
+    print('race-result phase='+phase+' reason='+reason,file=sys.stderr,flush=True)
+    raise RuntimeError('race classification failed')
 
 def held_case(execute,tenant,holder,contender,marker):
     if marker not in ('gateway_product','product_gateway','collision'): raise ValueError('invalid barrier')
@@ -98,12 +106,12 @@ def held_case(execute,tenant,holder,contender,marker):
         while time.monotonic()<deadline:
             found=execute(identity_sql)
             if found:
-                if not re.fullmatch('[1-9][0-9]{0,9}\|[0-9]{1,20}',found): raise RuntimeError('control identity invalid')
+                if not re.fullmatch(r'[1-9][0-9]{0,9}\|[0-9]{1,20}',found): raise RuntimeError('control identity invalid')
                 identity=found; break
             if futures[0].done(): raise RuntimeError('control ended before barrier')
         if identity is None: raise RuntimeError('control barrier unavailable')
         futures.append(pool.submit(execute,winner))
-        if execute(contender)!='BUSY': raise RuntimeError('race busy classification failed')
+        require_classification(execute,contender,'BUSY',marker)
     finally:
         errors=[]
         try:
@@ -132,19 +140,19 @@ def run_races(execute):
     first=leaf(10001); second=leaf(10002); other=leaf(10003); nonce=leaf(10004)
     p1=product(c1,first); gw1=gateway(g1,leaf(10005),first,leaf(10006))
     held_case(execute,T1,gw1,classify(T2,p1,'busy','gateway_product'),'gateway_product')
-    if execute(classify(T2,p1,'duplicate'))!='DUPLICATE': raise RuntimeError('product duplicate classification failed')
+    require_classification(execute,classify(T2,p1,'duplicate'),'DUPLICATE','product_duplicate')
     quota=execute("SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s';"%T1)
     if not re.fullmatch('[0-9]{1,12}',quota): raise RuntimeError('quota unavailable')
     p2=product(c2,second);gw2=gateway(g2,nonce,second,other)
     held_case(execute,T2,p2,classify(T1,gw2,'busy','product_gateway'),'product_gateway')
-    if execute(classify(T1,gw2,'duplicate'))!='DUPLICATE': raise RuntimeError('gateway duplicate classification failed')
+    require_classification(execute,classify(T1,gw2,'duplicate'),'DUPLICATE','gateway_duplicate')
     check=("SELECT ((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='%s')=%s "
       "AND NOT EXISTS(SELECT 1 FROM contour.origin_credentials WHERE credential_id='%s') "
       "AND NOT EXISTS(SELECT 1 FROM contour.causal_gateway_enrollments WHERE gateway_id='%s' OR (claim).provision_nonce=decode('%s','hex')) "
       "AND NOT EXISTS(SELECT 1 FROM contour.causal_leaf_reservations WHERE leaf_sha256=decode('%s','hex')))::text;"%(T1,quota,c1,g2,nonce,other))
     if execute(check)!='true': raise RuntimeError('losing mutation remained')
     pair=execute(COLLISION_SQL)
-    match=re.fullmatch('([0-9a-f]{64})\|([0-9a-f]{64})\|(-?[0-9]{1,10})',pair)
+    match=re.fullmatch(r'([0-9a-f]{64})\|([0-9a-f]{64})\|(-?[0-9]{1,10})',pair)
     if not match or match[1]==match[2]: raise RuntimeError('collision unavailable')
     a,b=match[1],match[2]
     if execute("SELECT (hashtext('%s')=hashtext('%s'))::text;"%(a,b))!='true': raise RuntimeError('collision invalid')

@@ -107,11 +107,11 @@ class RaceTests(unittest.TestCase):
         call=driver.product('fa000000-0000-4000-8000-000000000011',driver.leaf(3))
         busy=driver.classify(driver.T2,call,'busy','gateway_product')
         self.assertIn("wait_event='advisory'",busy)
-        self.assertIn("IF NOT observed THEN RAISE EXCEPTION",busy)
-        self.assertIn('WHEN serialization_failure',busy)
+        self.assertIn("IF NOT observed THEN result:='BARRIER_UNAVAILABLE'",busy)
+        self.assertIn("IF code='40001'",busy)
         self.assertIn("m IS DISTINCT FROM 'credential gate busy'",busy)
         duplicate=driver.classify(driver.T2,call,'duplicate')
-        self.assertIn('WHEN unique_violation',duplicate)
+        self.assertIn("IF code='23505'",duplicate)
         self.assertIn("m IS DISTINCT FROM 'credential unavailable'",duplicate)
         for kind,marker in [('other',None),('busy','arbitrary')]:
             with self.assertRaises(ValueError): driver.classify(driver.T2,call,kind,marker)
@@ -123,13 +123,13 @@ class RaceTests(unittest.TestCase):
             calls.append(sql)
             if sql==driver.COLLISION_SQL: return pair
             if sql.startswith('SELECT used_bytes'): return '1234'
-            if "SELECT 'DUPLICATE'" in sql: return 'DUPLICATE'
+            if "result:='DUPLICATE'" in sql: return 'DUPLICATE'
             if sql.startswith('SELECT ('): return 'true'
             return ''
         with mock.patch.object(driver,'held_case',side_effect=lambda *args: held.append(args)):
             driver.run_races(execute)
         self.assertEqual([item[-1] for item in held],['gateway_product','product_gateway','collision'])
-        self.assertEqual(sum("SELECT 'DUPLICATE'" in x for x in calls),2)
+        self.assertEqual(sum("result:='DUPLICATE'" in x for x in calls),2)
         self.assertTrue(any('causal_gateway_enrollments' in x and 'used_bytes' in x for x in calls))
         self.assertTrue(any('hashtext(' in x and 'true' not in x for x in calls if x!=driver.COLLISION_SQL))
         def malformed(sql):
@@ -187,6 +187,16 @@ class RaceTests(unittest.TestCase):
                         with self.assertRaises(RuntimeError): driver.held_case(execute,driver.T1,'fixed','contender','collision')
                     else: driver.held_case(execute,driver.T1,'fixed','contender','collision')
                 self.assertEqual(shutdown,[{'wait':not hung,'cancel_futures':True}])
+
+    def test_classification_reports_only_closed_tags_and_never_accepts_wrong_result(self):
+        import contextlib,io
+        for tag in ('BARRIER_UNAVAILABLE','WRONG_MESSAGE','UNEXPECTED_SUCCESS','SQLSTATE_42501','untrusted private text'):
+            out=io.StringIO()
+            with contextlib.redirect_stderr(out), self.assertRaises(RuntimeError):
+                driver.require_classification(lambda _:tag,'opaque','BUSY','gateway_product')
+            expected=tag if tag!='untrusted private text' else 'INVALID_RESULT'
+            self.assertEqual(out.getvalue(),'race-result phase=gateway_product reason='+expected+'\n')
+        driver.require_classification(lambda _:'BUSY','opaque','BUSY','collision')
 
     def test_race_hook_failure_never_completes(self):
         hooks=driver.QualificationHooks('gateway26-races',mock.Mock(),{})
