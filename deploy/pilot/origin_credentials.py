@@ -4,6 +4,8 @@ Partial generation is retained and classified DRIFT: it is never repaired or
 reissued implicitly. The caller supplies the operator-owned synthetic CA paths.
 """
 import hashlib
+import base64
+import binascii
 import os
 from pathlib import Path
 import secrets
@@ -45,6 +47,37 @@ def _run(*args):
     result = subprocess.run(['openssl', *map(str,args)], capture_output=True, timeout=30)
     if result.returncode: raise ValueError('credential cryptographic validation failed')
     return result.stdout
+
+
+def _parse_leaf_inspection(raw, purpose, sans):
+    """Parse only the fixed public key, two extensions and checkend result."""
+    if (not isinstance(raw, bytes) or not 0 < len(raw) <= 65536 or not raw.endswith(b'\n')
+            or any(byte != 10 and not 32 <= byte <= 126 for byte in raw)):
+        raise ValueError('invalid certificate inspection output')
+    try:
+        lines=raw.decode('ascii').splitlines()
+        end=lines.index('-----END PUBLIC KEY-----')
+        if lines[0]!='-----BEGIN PUBLIC KEY-----' or end<2:
+            raise ValueError('invalid certificate public key')
+        body=lines[1:end]
+        if any(not line or len(line)>64 for line in body): raise ValueError('invalid public key encoding')
+        if not base64.b64decode(''.join(body),validate=True): raise ValueError('empty public key')
+        tail=lines[end+1:]
+        if len(tail)!=5 or tail[-1]!='Certificate will not expire': raise ValueError('invalid certificate inspection sections')
+        sections={}
+        for index in (0,2):
+            header=tail[index].strip()
+            if header.endswith(' critical'): header=header[:-9]
+            if header not in ('X509v3 Extended Key Usage:', 'X509v3 Subject Alternative Name:') or header in sections:
+                raise ValueError('invalid certificate extension')
+            sections[header]=tail[index+1].strip()
+        if sections.get('X509v3 Extended Key Usage:') != ('TLS Web Client Authentication' if purpose=='clientAuth' else 'TLS Web Server Authentication'):
+            raise ValueError('leaf purpose drift')
+        if sections.get('X509v3 Subject Alternative Name:') != sans.replace('IP:','IP Address:').replace(',',', '):
+            raise ValueError('leaf SAN drift')
+        return ('\n'.join(lines[:end+1])+'\n').encode('ascii')
+    except (UnicodeError, IndexError, binascii.Error) as error:
+        raise ValueError('invalid certificate inspection output') from error
 
 
 def _write(path, data):
@@ -134,16 +167,10 @@ class Credentials:
             for name,key,cert,purpose,sans,ders,keys in CERTS:
                 key_data=_file(root/key,16384); cert_data=_file(root/cert)
                 keyf=tmp/'key'; certf=tmp/'cert'; keyf.write_bytes(key_data); certf.write_bytes(cert_data)
-                if _run('x509','-in',certf,'-pubkey','-noout') != _run('pkey','-in',keyf,'-pubout'): raise ValueError('leaf key mismatch')
+                inspected=_run('x509','-in',certf,'-pubkey','-ext','extendedKeyUsage,subjectAltName','-checkend','0','-noout')
+                if _parse_leaf_inspection(inspected,purpose,sans) != _run('pkey','-in',keyf,'-pubout'): raise ValueError('leaf key mismatch')
                 public_keys.append(_run('pkey','-in',keyf,'-pubout','-outform','DER'))
                 _run('verify','-CAfile',caf,'-purpose','sslclient' if purpose=='clientAuth' else 'sslserver',certf)
-                _run('x509','-in',certf,'-checkend','0','-noout')
-                eku=_run('x509','-in',certf,'-noout','-ext','extendedKeyUsage').decode().splitlines()
-                if len(eku)!=2 or eku[1].strip()!=('TLS Web Client Authentication' if purpose=='clientAuth' else 'TLS Web Server Authentication'):
-                    raise ValueError('leaf purpose drift')
-                ext=_run('x509','-in',certf,'-noout','-ext','subjectAltName').decode().splitlines()
-                expected=sans.replace('IP:','IP Address:').replace(',',', ')
-                if len(ext)!=2 or ext[1].strip()!=expected: raise ValueError('leaf SAN drift')
                 der=_run('x509','-in',certf,'-outform','DER')
                 keyder=_run('pkcs8','-topk8','-nocrypt','-in',keyf,'-outform','DER')
                 if any(_file(root/p)!=der for p in ders) or any(_file(root/p)!=keyder for p in keys): raise ValueError('DER copy drift')
