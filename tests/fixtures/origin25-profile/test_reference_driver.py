@@ -10,6 +10,33 @@ spec=importlib.util.spec_from_file_location('origin25_reference',ROOT/'scripts/c
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class ReferenceTests(unittest.TestCase):
+    def test_final_postgres_readiness_requires_supervisor_postmaster_and_final_listener(self):
+        process=mock.Mock(return_value=mock.Mock(returncode=0,stdout=b't\n',stderr=b''))
+        self.assertTrue(driver.postgres_ready(process,'fixture-id'))
+        args=process.call_args.args[0]
+        self.assertEqual(args[:5],['docker','exec','fixture-id','sh','-c'])
+        self.assertIn('/proc/1/comm',args[5]);self.assertIn('docker-init',args[5])
+        self.assertIn('/var/lib/postgresql/data/postmaster.pid',args[5]);self.assertIn('/proc/$p/comm',args[5])
+        self.assertIn("current_database()='contour_fixture'",args[5]);self.assertIn("current_setting('listen_addresses')='*'",args[5])
+        self.assertEqual(process.call_args.kwargs['timeout'],5)
+        for result in (mock.Mock(returncode=1,stdout=b't\n',stderr=b''),mock.Mock(returncode=0,stdout=b'f\n',stderr=b''),mock.Mock(returncode=0,stdout=b't\n',stderr=b'warning'),mock.Mock(returncode=0,stdout=b't\nextra',stderr=b'')):
+            process.return_value=result
+            self.assertFalse(driver.postgres_ready(process,'fixture-id'))
+        process.side_effect=TimeoutError('secret')
+        self.assertFalse(driver.postgres_ready(process,'fixture-id'))
+    def test_bootstrap_failure_diagnostics_are_closed_and_preserve_error(self):
+        import contextlib,io
+        for step in ('create_database','logging_settings','version'):
+            output=io.StringIO(); error=RuntimeError('private SQL and password')
+            with contextlib.redirect_stderr(output),self.assertRaises(RuntimeError) as caught:
+                driver.bootstrap_step(step,lambda:(_ for _ in ()).throw(error))
+            self.assertIs(caught.exception,error)
+            self.assertEqual(output.getvalue(),'reference-bootstrap step='+step+' type=RuntimeError\n')
+        called=mock.Mock()
+        with self.assertRaises(ValueError): driver.bootstrap_step('private SQL',called)
+        called.assert_not_called()
+        self.assertEqual(driver.bootstrap_step('version',lambda:'160001'),'160001')
+
     def test_invalid_start_is_never_adopted_or_removed(self):
         valid='2026-11-12T01:02:03.123456789Z'
         for value in (None,'','not-a-date','2026-99-12T01:02:03Z','0001-01-01T00:00:00Z'):

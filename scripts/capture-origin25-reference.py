@@ -70,6 +70,27 @@ class PrivateOutput:
     def close(self): os.close(self.fd)
 
 
+def postgres_ready(process,cid):
+    """Adapt the audited onboarding witness to contour_fixture without TLS."""
+    sql="SELECT current_database()='contour_fixture' AND current_setting('listen_addresses')='*';"
+    command=('test "$(cat /proc/1/comm)" = docker-init && p=$(head -n 1 /var/lib/postgresql/data/postmaster.pid) && '
+             'case "$p" in *[!0-9]*|\'\') exit 1;; esac && test "$p" -gt 1 && test "$(cat /proc/$p/comm)" = postgres && '
+             'pg_isready -U postgres -d contour_fixture >/dev/null && '
+             'exec psql -XqAt -v ON_ERROR_STOP=1 -U postgres -d contour_fixture -c "'+sql+'"')
+    try: result=process(['docker','exec',cid,'sh','-c',command],timeout=5)
+    except (RuntimeError,TimeoutError): return False
+    return result.returncode==0 and result.stdout==b't\n' and result.stderr==b''
+
+
+def bootstrap_step(name,callback):
+    if name not in ('create_database','logging_settings','version'): raise ValueError('invalid bootstrap step')
+    try: return callback()
+    except Exception as error:
+        kind=type(error).__name__ if type(error) in (ValueError,RuntimeError,TimeoutError,OSError) else 'OtherError'
+        print('reference-bootstrap step='+name+' type='+kind,file=sys.stderr,flush=True)
+        raise
+
+
 def record_generation(output,fixture,inspect,token,network_id,cid,image_id):
     item=inspect(['docker','inspect',cid]);candidate=(item.get('State') or {}).get('StartedAt')
     if (fixture['validate_postgres'](item,token,cid,image_id,network_id)!='running' or
@@ -170,7 +191,7 @@ def main(argv):
         cid=call(['docker','create','--init','--pull=never','--name',name+'-postgres','--label',fixture['LABEL']+'='+token,
                   '--network',network_id,'--network-alias','postgres','--memory','512m','--cpus','1','--pids-limit','128',
                   '--tmpfs','/var/lib/postgresql/data:rw,nosuid,noexec,size=256m','-e','POSTGRES_DB=contour_fixture',
-                  '-e','POSTGRES_PASSWORD_FILE=/tmp/initial-secret',IMAGE]).decode('ascii')
+                  '-e','POSTGRES_PASSWORD_FILE=/tmp/initial-secret',IMAGE,'postgres','-c','listen_addresses=*']).decode('ascii')
         if not re.fullmatch('[0-9a-f]{64}',cid): cid=None;raise RuntimeError('container outcome unknown')
         fixture['durable_id'](output.path,'postgres',cid)
         if fixture['validate_postgres'](inspect(['docker','inspect',cid]),token,cid,image_id,network_id)!='created': raise RuntimeError('container started early')
@@ -180,21 +201,20 @@ def main(argv):
         if call(['docker','start',cid]).decode('ascii')!=cid: raise RuntimeError('start outcome unknown')
         until=time.monotonic()+60
         while True:
-            result=process(['docker','exec',cid,'pg_isready','-U','postgres','-d','contour_fixture'],timeout=5)
-            if result.returncode==0: break
+            if postgres_ready(process,cid): break
             if time.monotonic()>=until: raise TimeoutError('fixture readiness')
             time.sleep(.2)
         started=record_generation(output,fixture,inspect,token,network_id,cid,image_id)
         phase='bootstrap';sql=['docker','exec','-i',cid,'psql','-XAtq','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture']
         runner=fresh(sql,os.environ.copy(),token)
         def raw_execute(text): return runner.execute(text,timeout=120)
-        raw_execute('CREATE DATABASE contour_local;')
+        bootstrap_step('create_database',lambda:raw_execute('CREATE DATABASE contour_local;'))
         # Establish safe logging at connection startup before synthetic verifier
         # SQL is parsed. These role settings belong only to this disposable PG.
         settings=('log_statement=none','log_min_duration_statement=-1','log_min_duration_sample=-1',
                   'log_min_error_statement=panic','log_min_messages=panic','log_duration=off',
                   'log_statement_sample_rate=0','log_transaction_sample_rate=0')
-        raw_execute(''.join('ALTER ROLE postgres SET '+item+';' for item in settings))
+        bootstrap_step('logging_settings',lambda:raw_execute(''.join('ALTER ROLE postgres SET '+item+';' for item in settings)))
         def execute(text):
             fence()
             result=raw_execute('\\connect contour_local\n'+origin21_transport.GUARD+text)
@@ -207,8 +227,11 @@ def main(argv):
             if fixture['validate_postgres'](current,token,cid,image_id,network_id)!='running' or (current.get('State') or {}).get('StartedAt')!=started: raise RuntimeError('postgres generation changed')
             fixture['validate_network'](inspect(['docker','network','inspect',network_id]),token,network_id,[cid])
         fence()
-        version_text=execute('SHOW server_version_num;')
-        if not re.fullmatch('[0-9]{6}',version_text) or not 160000<=int(version_text)<170000: raise ValueError('PostgreSQL 16 required')
+        def check_version():
+            value=execute('SHOW server_version_num;')
+            if not re.fullmatch('[0-9]{6}',value) or not 160000<=int(value)<170000: raise ValueError('PostgreSQL 16 required')
+            return value
+        version_text=bootstrap_step('version',check_version)
         execute((ROOT/'db/bootstrap.sql').read_text())
         for kind in provision.PROVISION: execute((ROOT/('db/provision_'+kind+'.sql')).read_text())
         migrations=sorted((ROOT/'db/migrations').glob('*.sql'))
