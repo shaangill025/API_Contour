@@ -107,6 +107,8 @@ class RaceTests(unittest.TestCase):
         call=driver.product('fa000000-0000-4000-8000-000000000011',driver.leaf(3))
         busy=driver.classify(driver.T2,call,'busy','gateway_product')
         self.assertIn("wait_event='advisory'",busy)
+        self.assertIn("FOR i IN 1..150 LOOP PERFORM pg_catalog.pg_stat_clear_snapshot(); IF EXISTS",busy)
+        self.assertIn("statement_timeout='8s'",busy)
         self.assertIn("IF NOT observed THEN result:='BARRIER_UNAVAILABLE'",busy)
         self.assertIn("IF code='40001'",busy)
         self.assertIn("m IS DISTINCT FROM 'credential gate busy'",busy)

@@ -67,7 +67,7 @@ def classify(tenant,call,kind,marker=None):
     barrier=''
     if marker is not None:
         if marker not in ('gateway_product','product_gateway','collision'): raise ValueError('invalid barrier')
-        barrier=("FOR i IN 1..150 LOOP IF EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
+        barrier=("FOR i IN 1..150 LOOP PERFORM pg_catalog.pg_stat_clear_snapshot(); IF EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity "
           "WHERE datname='contour_local' AND usename='postgres' AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%%race_winner_%s%%') THEN observed:=true; EXIT; END IF; PERFORM pg_sleep(0.02); END LOOP; "
           "IF NOT observed THEN result:='BARRIER_UNAVAILABLE'; END IF; " % marker)
     state='40001' if kind=='busy' else '23505'
