@@ -109,6 +109,9 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     expected_operations = json.loads(execute("SELECT json_agg(operation_id::text ORDER BY operation_id) FROM contour.catalog_origin_heads WHERE %s;" % predicate))
     runpy.run_path(str(ROOT/'scripts/test-human-catalog.py'))['run_origin_cases'](execute,port,directory,environment,normal,unknown,target_scope,ACTOR,records,expected_operations,token)
     run_business_cases(execute,port,directory,environment,normal,unknown,target_scope,records,expected_operations,target_dir)
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        with (directory/'historical-origin.done').open('xb') as receipt:
+            receipt.write(b'historical-origin-complete\n')
 
 
 def run_business_cases(execute, port, directory, environment, normal, unknown, scope, records, expected_operations, target_dir):

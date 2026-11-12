@@ -294,8 +294,28 @@ def run_cases(container, execute, setup, probe, port, directory, environment, ca
     print('Runtime-held precommit cancellation, observed real COMMIT uncertainty and discarded application acknowledgement replay passed')
     catalog_recovery = runpy.run_path(str(ROOT / 'scripts/test-postgres-catalog.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
     runpy.run_path(str(ROOT / 'scripts/test-postgres-v2-submit.py'))['run_cases'](container, execute, setup, check, port, directory, environment)
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        require_historical_receipt(directory)
+        # This supervised, generation-fenced component fixture does not own a
+        # PostgreSQL restart transition. The ordinary authority qualification
+        # below still executes its separate crash/recovery cases.
+        return
     if environment.get('CONTOUR_HUMAN_OBSERVATION_HISTORY_FIXTURE') == '1':
         receipt=directory/'human-observation-history.done'
         if receipt.is_symlink() or not receipt.is_file() or receipt.read_bytes()!=b'history-fixture-complete\n': raise AssertionError('mandatory history cases did not complete')
         return
     runpy.run_path(str(ROOT / 'scripts/test-postgres-recovery.py'))['run_cases'](container, execute, setup, check, probe, port, directory, environment, catalog_recovery)
+
+
+def require_historical_receipt(directory):
+    import os, stat
+    path=directory/'historical-origin.done'
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        expected=b'historical-origin-complete\n'
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1
+                or info.st_size!=len(expected) or os.read(fd,len(expected)+1)!=expected):
+            raise AssertionError('mandatory historical origin cases did not complete')
+    finally:
+        os.close(fd)

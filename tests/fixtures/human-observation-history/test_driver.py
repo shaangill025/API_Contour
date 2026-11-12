@@ -45,6 +45,19 @@ class DriverTests(unittest.TestCase):
             with mock.patch.object(module,'_runner',return_value=mock.Mock(return_value=result)):
                 with self.assertRaises(RuntimeError):module._get('probe','config','token','/v1/observations?operation_id=x',{})
 class OwnershipTests(unittest.TestCase):
+    def test_historical_receipt_requires_exact_owned_regular_file(self):
+        import os, runpy, tempfile
+        require=runpy.run_path(str(ROOT/'scripts/test-postgres-submit.py'))['require_historical_receipt']
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory); path=folder/'historical-origin.done'
+            with self.assertRaises(OSError): require(folder)
+            path.write_bytes(b'wrong')
+            with self.assertRaises(AssertionError): require(folder)
+            path.write_bytes(b'historical-origin-complete\n'); require(folder)
+            alias=folder/'alias'; os.link(path,alias)
+            with self.assertRaises(AssertionError): require(folder)
+            alias.unlink(); path.unlink(); path.symlink_to(alias)
+            with self.assertRaises(OSError): require(folder)
     def test_receipt_is_mandatory_and_exact(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
