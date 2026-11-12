@@ -117,13 +117,13 @@ def assert_concurrent(rows, before, a, b):
 
 
 
-# Per-direction outcomes after exact forwarding: malformed/oversize capture is
-# cancelled; request-level encoding/trailers suppress response capture too.
+# Malformed and oversized bodies produce typed unknown observations. Unsupported
+# request-level encoding/trailers suppress response capture too.
 DISCOVERY_CASES = (
     ('normal', ('request','response')),
-    ('request-malformed', ('response',)), ('response-malformed', ('request',)),
+    ('request-malformed', ('request','response')), ('response-malformed', ('request','response')),
     ('request-compressed', ()), ('response-compressed', ('request',)),
-    ('request-oversized', ('response',)), ('response-oversized', ('request',)),
+    ('request-oversized', ('request','response')), ('response-oversized', ('request','response')),
     ('request-chunked', ('request','response')), ('response-chunked', ('request','response')),
     ('request-progress', ('request','response')), ('response-progress', ('request','response')),
     ('request-trailer', ()), ('response-trailer', ('request',)),
@@ -131,17 +131,42 @@ DISCOVERY_CASES = (
     ('normal', ('request','response')),
 )
 
-def assert_discovery_case(rows, before, fingerprint, directions, response_status=200):
+def assert_discovery_case(rows, before, fingerprint, directions, response_status=200, case='normal', history=None):
+    if case not in dict(DISCOVERY_CASES):
+        raise AssertionError('invalid matrix case')
     shape = lambda field, kind: {'kind':'object','fields':{field:{'kind':kind}},'additional':None}
-    expected = {'request':shape('probe','boolean'), 'response':shape('id','integer')}
+    expected = {'request':('complete', [], shape('probe','boolean')),
+                'response':('complete', [], shape('id','integer'))}
+    if case in ('request-malformed','response-malformed','request-oversized','response-oversized'):
+        direction, kind = case.split('-')
+        reason = 'malformed' if kind == 'malformed' else 'limit'
+        expected[direction] = ('unavailable' if reason == 'malformed' else 'partial',
+                               [reason], {'kind':'unknown','reason':reason})
     ids = [r[13] for r in rows]
     if len(ids) != len(set(ids)) or not before.issubset(ids):
         raise AssertionError('matrix history changed')
+    if history is not None:
+        prior = {r[13]:r for r in history}
+        current = {r[13]:r for r in rows if r[13] in before}
+        if set(prior) != before or current != prior:
+            raise AssertionError('matrix history changed')
     fresh = [r for r in rows if r[13] not in before]
     if len(fresh) != len(directions) or {r[14] for r in fresh} != set(directions):
         raise AssertionError('matrix direction or record count mismatch')
-    if any(r[0] != fingerprint or r[21] != expected[r[14]] or r[16] != (None if r[14]=='request' else str(response_status)) for r in fresh):
-        raise AssertionError('matrix attribution or structure mismatch')
+    for r in fresh:
+        completeness, reasons, structure = expected[r[14]]
+        if (len(r) < 36 or r[0] != fingerprint or r[20] != 'verified_origin_v1'
+            or r[29] != {'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':fingerprint}
+            or r[21] != structure or r[27] != completeness or r[28] != reasons
+            or r[30:36] != [1,1,1,'structure','/pilot','http']
+            or r[16] != (None if r[14]=='request' else str(response_status))):
+            raise AssertionError('matrix attribution or structure mismatch')
+
+
+def matrix_expected_loss(case):
+    if case not in dict(DISCOVERY_CASES):
+        raise ValueError('invalid matrix case')
+    return 0
 
 def run_discovery_cases(run_case):
     # Fail immediately on any case; enclosing owned-resource finally performs cleanup.
@@ -176,8 +201,8 @@ def assert_discovery_catalog(catalog, rows, tenant):
     expected = {}
     for r in rows:
         key = [tenant, *r[5:8], 'http', r[14], r[15], '/pilot']
-        expected[r[13]] = ('complete','structure',int(r[16]) if r[16] is not None else None,
-                           r[21],r[17],*r[5:9],r[18],r[19],False,[],key,r[22],1,1,1,*r[23:27])
+        expected[r[13]] = (r[27],'structure',int(r[16]) if r[16] is not None else None,
+                           r[21],r[17],*r[5:9],r[18],r[19],False,r[28],key,r[22],1,1,1,*r[23:27])
     if len(catalog) != len(expected) or {r[0]:tuple(r[1:]) for r in catalog} != expected:
         raise AssertionError('catalog projection mismatch')
 
@@ -511,7 +536,7 @@ def run_cases(container, execute, setup, directory, environment):
             if result != ('READY' if mode=='ready' else 'OK'): raise AssertionError('fixture trigger mismatch')
         control_record_ids=set()
         def snapshot():
-            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure',m.batch_id,r.value->'record'->>'first_seen',r.value->'record'->>'last_seen',r.value->'record'->>'queued_at',r.value->'record'->>'expires_at')), '[]'::json)
+            sql = """SELECT coalesce(json_agg(json_build_array(encode(p.leaf_sha256,'hex'),p.instance_id,p.lifecycle_id,p.credential_id,p.grant_id,m.project_id,m.service_id,m.environment_id,m.deployment_id,p.origin_project_id,p.origin_service_id,p.origin_environment_id,p.origin_deployment_id,m.record_id,r.value->'record'->>'direction',r.value->'record'->>'operation',r.value->'record'->>'status_code',m.source_id,m.parser_profile,m.policy_revision,m.attribution_class,r.value->'record'->'structure',m.batch_id,r.value->'record'->>'first_seen',r.value->'record'->>'last_seen',r.value->'record'->>'queued_at',r.value->'record'->>'expires_at',r.value->'record'->>'completeness',r.value->'record'->'reasons',r.value->'origin_witness',r.value->'record'->'count',r.value->'record'->'sample_numerator',r.value->'record'->'sample_denominator',r.value->'record'->>'visibility',r.value->'record'->>'route_template',r.value->'record'->>'protocol')), '[]'::json)
 FROM contour.ingestion_v2_metadata m JOIN contour.ingestion_payloads b USING (tenant_id,collector_id,batch_id)
 LEFT JOIN contour.origin_proofs p USING (tenant_id,collector_id,batch_id,record_id)
 CROSS JOIN LATERAL jsonb_array_elements(convert_from(b.checked_batch,'UTF8')::jsonb->'records') r(value)
@@ -555,7 +580,8 @@ WHERE w.tenant_id='%s' AND w.collector_id='%s';""" % (tenant,collector)
                 assert_discovery_catalog(json.loads(execute(sql)),rows,tenant)
             def run_matrix_case(case, directions):
                 nonlocal matrix_losses
-                before={row[13] for row in snapshot()}
+                history=snapshot()
+                before={row[13] for row in history}
                 result=subprocess.run(['docker','exec',nodes[0][0],'node','/fixture/discovery-matrix.js','client',case],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15,env=environment,cwd=ROOT)
                 if result.returncode or result.stdout != b'OK\n' or result.stderr:
                     try:
@@ -565,10 +591,10 @@ WHERE w.tenant_id='%s' AND w.collector_id='%s';""" % (tenant,collector)
                     labels=matrix_diagnostics(*outputs)
                     print('Matrix diagnostic: '+(','.join(labels) if labels else 'unavailable'),flush=True)
                     raise AssertionError('matrix forwarding mismatch: '+case)
-                expected_loss = int(case in ('request-malformed','response-malformed','request-oversized','response-oversized'))
+                expected_loss = matrix_expected_loss(case)
                 matrix_losses=parse_matrix_drain(command(gateway,'MATRIX_DRAIN',15),matrix_losses,expected_loss,len(directions))
                 rows=snapshot(); assert_proofs(rows,expected,origin_service,origin_deployment,source,('200','409'))
-                assert_discovery_case(rows,before,cert_hash('a'),directions,409 if case=='response-409' else 200)
+                assert_discovery_case(rows,before,cert_hash('a'),directions,409 if case=='response-409' else 200,case,history)
                 project_and_check(rows)
                 leak=execute("SELECT count(*) FROM contour.ingestion_payloads WHERE tenant_id='%s' AND position('synthetic-secret-sentinel-' in convert_from(checked_batch,'UTF8'))>0;" % tenant)
                 if leak != '0': raise AssertionError('matrix sentinel persisted')
