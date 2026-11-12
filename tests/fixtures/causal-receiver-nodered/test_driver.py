@@ -26,7 +26,7 @@ def container():
             'Memory':536870912,'PidsLimit':32,'Privileged':False,'CapAdd':None,'Devices':None,'PidMode':'',
             'IpcMode':'private','UTSMode':'','UsernsMode':'','PortBindings':None,'PublishAllPorts':False,
             'AutoRemove':False,'RestartPolicy':{'Name':'no'},'OomKillDisable':False,
-            'Tmpfs':{'/data':'rw,noexec,nosuid,size=16m','/tmp':'rw,noexec,nosuid,size=16m'}},
+            'Tmpfs':{'/data':'rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700','/tmp':'rw,noexec,nosuid,size=16m'}},
         'Mounts':[{'Type':'bind','Source':str(SOURCE),'Destination':'/work','RW':False},
                   {'Type':'tmpfs','Destination':'/data'},{'Type':'tmpfs','Destination':'/tmp'}],
         'State':{'Status':'created','Running':False,'ExitCode':0,'StartedAt':'0001-01-01T00:00:00Z'}}
@@ -56,6 +56,25 @@ class Fences(unittest.TestCase):
         c = copy.deepcopy(base); c['HostConfig']['UnexpectedSetting'] = 'changed'
         c['State'] = {'Status':'exited','Running':False,'ExitCode':0,'StartedAt':'2026-11-12T01:02:03Z'}
         with self.assertRaises(ValueError): m.generation(c,CID,TOKEN,IMAGE,SCRIPT,SOURCE,frozen)
+
+    def test_data_tmpfs_permission_model_and_exact_options(self):
+        # Prior default root:root 0755 denies the observed uid 1000; the new
+        # dedicated uid 1000 0700 directory permits only its owner to write.
+        def writable(uid, owner, group_member, mode):
+            bits = (mode >> 6) if uid == owner else ((mode >> 3) if group_member else mode)
+            return bool(bits & 0o2)
+        self.assertFalse(writable(1000,0,False,0o755))
+        self.assertTrue(writable(1000,1000,True,0o700))
+        self.assertFalse(writable(1001,1000,True,0o700))
+        self.assertFalse(writable(1001,1000,False,0o700))
+        valid = container(); m.created(valid,CID,TOKEN,IMAGE,SCRIPT,SOURCE)
+        for bad in ('rw,noexec,nosuid,size=16m',
+                    'rw,noexec,nosuid,size=16m,uid=0,gid=1000,mode=0700',
+                    'rw,noexec,nosuid,size=16m,uid=1000,gid=0,mode=0700',
+                    'rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0777'):
+            c = copy.deepcopy(valid); c['HostConfig']['Tmpfs']['/data'] = bad
+            with self.subTest(options=bad), self.assertRaises(ValueError):
+                m.created(c,CID,TOKEN,IMAGE,SCRIPT,SOURCE)
 
     def test_tmpfs_inspect_models_and_partial_rejection(self):
         both = container()
@@ -98,6 +117,8 @@ class Fences(unittest.TestCase):
                 nonlocal inspect_count
                 events.append(('docker', args[0]))
                 if args[0] == 'create':
+                    self.assertIn('/data:rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700',args)
+                    self.assertIn('/tmp:rw,noexec,nosuid,size=16m',args)
                     if failure == 'create': raise RuntimeError('unknown create')
                     return (CID+'\n').encode()
                 if args[0] == 'start':
@@ -197,6 +218,9 @@ class Fences(unittest.TestCase):
         probe = {'sha256':'d'*64,'size':123,'mode':493,'uid':0,'gid':0,'user':1000}
         r = {'token':TOKEN,'scope':'version-native-bcrypt-config-and-layer-prefix','images':{x:{'image':IMAGE,'probe':probe} for x in ('arm64','amd64')}}
         self.assertEqual(m.receipt(json.dumps(r).encode())['token'],TOKEN)
+        r['images']['arm64']['probe']['user'] = 1001
+        with self.assertRaises(ValueError): m.receipt(json.dumps(r).encode())
+        r['images']['arm64']['probe']['user'] = 1000
         r['images']['arm64']['probe']['size'] = True
         with self.assertRaises(ValueError): m.receipt(json.dumps(r).encode())
 

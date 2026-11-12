@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOCKET = 'unix:///Users/shaanjotgill/.docker/run/docker.sock'
 DOCKER_HASH = '31ae2d64e51d9dfc728a2934941615cdd92f31279ed6d5c1fb2bfc0a44637a8f'
 OWNER = 'org.apicontour.fixture-owner'
+DATA_TMPFS = 'rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700'
+TMP_TMPFS = 'rw,noexec,nosuid,size=16m'
 SCRIPTS = {
     'identity': ('/work/tests/fixtures/causal-receiver-nodered/actual.js', b'PASS phase=identity counts=3,3,3\n'),
     'mtls': ('/work/tests/fixtures/causal-receiver-incoming/host-mtls.js', b'receiver incoming host mTLS: passed\n'),
@@ -165,7 +167,7 @@ def receipt(raw):
         if not isinstance(row,dict) or not isinstance(row.get('image'),str) or not SHA.fullmatch(row['image']): fail('receipt image')
         probe = row.get('probe')
         if not isinstance(probe,dict) or not isinstance(probe.get('sha256'),str) or not HEX.fullmatch(probe['sha256']): fail('receipt probe')
-        if any(type(probe.get(k)) is not int or probe[k] < 0 for k in ('size','mode','uid','gid','user')) or probe['size'] == 0 or probe['user'] == 0: fail('receipt probe attributes')
+        if any(type(probe.get(k)) is not int or probe[k] < 0 for k in ('size','mode','uid','gid','user')) or probe['size'] == 0 or probe['user'] != 1000: fail('receipt probe attributes')
     return data
 
 
@@ -197,7 +199,7 @@ def validate(c, cid, token, image, script, source):
         or host['PortBindings'] not in (None,{}) or host['PublishAllPorts'] is not False
         or host['AutoRemove'] is not False or host['RestartPolicy']['Name'] != 'no'): fail('container isolation')
     if host.get('OomKillDisable', 'missing') is not None and host.get('OomKillDisable', 'missing') is not False: fail('oom')
-    if host['Tmpfs'] != {'/data':'rw,noexec,nosuid,size=16m','/tmp':'rw,noexec,nosuid,size=16m'}: fail('tmpfs')
+    if host['Tmpfs'] != {'/data':DATA_TMPFS,'/tmp':TMP_TMPFS}: fail('tmpfs')
     if not isinstance(mounts,list) or len(mounts) not in (1,3): fail('mount count')
     bind = [m for m in mounts if m.get('Destination') == '/work']
     if len(bind) != 1 or bind[0].get('Type') != 'bind' or bind[0].get('Source') != str(source) or bind[0].get('RW') is not False: fail('source mount')
@@ -250,7 +252,7 @@ def run_case(docker, owner, arch, case, image, token, root):
     record(owner,'intent-'+arch+'-'+case+'.json',{'image':image,'owner':token,'architecture':arch,'script':script})
     cid = docker('create','--platform','linux/'+arch,'--label',OWNER+'='+token,'--network','none',
         '--read-only','--cap-drop','ALL','--security-opt','no-new-privileges', '--memory','512m', '--pids-limit','32',
-        '--tmpfs','/data:rw,noexec,nosuid,size=16m','--tmpfs','/tmp:rw,noexec,nosuid,size=16m',
+        '--tmpfs','/data:'+DATA_TMPFS,'--tmpfs','/tmp:'+TMP_TMPFS,
         '--mount','type=bind,src='+str(root)+',dst=/work,readonly', '--entrypoint','/usr/local/bin/node',image,script).decode('ascii').strip()
     if not HEX.fullmatch(cid): fail('created id')
     record(owner,'cid-'+arch+'-'+case+'.json',{'cid':cid,'image':image,'owner':token})
