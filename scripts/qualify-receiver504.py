@@ -211,7 +211,7 @@ def mount_map(source,material):
 def validate(c, cid, token, image, script, source, material):
     cfg = c['Config']; host = c['HostConfig']; mounts = c['Mounts']
     if c['Id'] != cid or c['Image'] != image or cfg['Labels'].get(OWNER) != token: fail('container identity')
-    if cfg['User'] != str(os.getuid())+':'+str(os.getgid()) or cfg['Hostname'] != 'causal-live' or cfg.get('OpenStdin') is not True or cfg.get('Tty') is not False or cfg.get('StdinOnce') is not False or cfg['Entrypoint'] != ['/bin/sh'] or cfg['Cmd'] != ['-c',PARENT_COMMAND] or script != SCRIPTS['component'][0]: fail('command')
+    if cfg['User'] != str(os.getuid())+':'+str(os.getgid()) or cfg['Hostname'] != 'causal-live' or cfg.get('OpenStdin') is not True or cfg.get('Tty') is not False or cfg.get('StdinOnce') is not True or cfg['Entrypoint'] != ['/bin/sh'] or cfg['Cmd'] != ['-c',PARENT_COMMAND] or script != SCRIPTS['component'][0]: fail('command')
     if (host['NetworkMode'] != 'none' or host['ReadonlyRootfs'] is not True or host['CapDrop'] != ['ALL']
         or host['SecurityOpt'] not in (['no-new-privileges'], ['no-new-privileges:true'])
         or host['Memory'] != 536870912 or host['PidsLimit'] != 32 or host['Privileged'] is not False

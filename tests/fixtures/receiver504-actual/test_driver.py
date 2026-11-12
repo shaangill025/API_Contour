@@ -11,7 +11,7 @@ spec=importlib.util.spec_from_file_location('receiver504_runner',ROOT/'scripts/q
 CID='a'*64;TOKEN='b'*64;IMAGE='sha256:'+'c'*64;SOURCE=Path('/owned/source');MATERIAL=Path('/owned/material');SCRIPT=m.SCRIPTS['component'][0]
 def container():
  mounts=[{'Type':'bind','Source':src,'Destination':dst,'RW':False} for dst,src in m.mount_map(SOURCE,MATERIAL).items()]+[{'Type':'tmpfs','Destination':'/data'},{'Type':'tmpfs','Destination':'/tmp'}]
- return {'Id':CID,'Image':IMAGE,'Created':'2026-11-12T00:00:00Z','RestartCount':0,'Config':{'User':str(os.getuid())+':'+str(os.getgid()),'Hostname':'causal-live','OpenStdin':True,'Tty':False,'StdinOnce':False,'Entrypoint':['/bin/sh'],'Cmd':['-c',m.PARENT_COMMAND],'Labels':{m.OWNER:TOKEN}},'HostConfig':{'NetworkMode':'none','ReadonlyRootfs':True,'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'Memory':536870912,'PidsLimit':32,'Privileged':False,'CapAdd':None,'Devices':None,'PidMode':'','IpcMode':'private','UTSMode':'','UsernsMode':'','PortBindings':None,'PublishAllPorts':False,'AutoRemove':False,'RestartPolicy':{'Name':'no'},'OomKillDisable':False,'Tmpfs':{'/data':m.DATA_TMPFS,'/tmp':m.TMP_TMPFS},'ExtraHosts':['causal-receiver:127.0.0.1','causal-ingress:127.0.0.1','pilot-gateway:127.0.0.1']},'Mounts':mounts,'State':{'Status':'created','Running':False,'ExitCode':0,'StartedAt':'0001-01-01T00:00:00Z'}}
+ return {'Id':CID,'Image':IMAGE,'Created':'2026-11-12T00:00:00Z','RestartCount':0,'Config':{'User':str(os.getuid())+':'+str(os.getgid()),'Hostname':'causal-live','OpenStdin':True,'Tty':False,'StdinOnce':True,'Entrypoint':['/bin/sh'],'Cmd':['-c',m.PARENT_COMMAND],'Labels':{m.OWNER:TOKEN}},'HostConfig':{'NetworkMode':'none','ReadonlyRootfs':True,'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'Memory':536870912,'PidsLimit':32,'Privileged':False,'CapAdd':None,'Devices':None,'PidMode':'','IpcMode':'private','UTSMode':'','UsernsMode':'','PortBindings':None,'PublishAllPorts':False,'AutoRemove':False,'RestartPolicy':{'Name':'no'},'OomKillDisable':False,'Tmpfs':{'/data':m.DATA_TMPFS,'/tmp':m.TMP_TMPFS},'ExtraHosts':['causal-receiver:127.0.0.1','causal-ingress:127.0.0.1','pilot-gateway:127.0.0.1']},'Mounts':mounts,'State':{'Status':'created','Running':False,'ExitCode':0,'StartedAt':'0001-01-01T00:00:00Z'}}
 class Fences(unittest.TestCase):
  def test_mounts_and_stdin_isolation(self):
   obj=container();frozen=m.created(obj,CID,TOKEN,IMAGE,SCRIPT,SOURCE,MATERIAL)
@@ -27,7 +27,7 @@ class Fences(unittest.TestCase):
    if change=='uid':item['Config']['User']='root'
    if change=='stdin':item['Config']['OpenStdin']=False
    if change=='tty':item['Config']['Tty']=True
-   if change=='once':item['Config']['StdinOnce']=True
+   if change=='once':item['Config']['StdinOnce']=False
    if change=='shell':item['Config']['Cmd']=['-c',m.PARENT_COMMAND+'; echo injected']
    with self.subTest(change=change),self.assertRaises(ValueError):m.created(item,CID,TOKEN,IMAGE,SCRIPT,SOURCE,MATERIAL)
   obj['State']={'Status':'exited','Running':False,'ExitCode':0,'StartedAt':'2026-11-12T01:02:03Z'}
