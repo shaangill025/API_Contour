@@ -22,7 +22,7 @@ PHASES = ('credentials', 'groups', 'migration_15', 'migration_16', 'migration_17
           'origin_1_target', 'origin_1_lifecycle', 'origin_1_credential', 'origin_1_grant',
           'origin_2_target', 'origin_2_lifecycle', 'origin_2_credential', 'origin_2_grant',
           'runtime_configs')
-SOURCE_FILES = ('deploy/local/docker_metadata.py','deploy/local/origin21_profile.py', 'deploy/local/origin21_schema.py',
+SOURCE_FILES = ('deploy/local/docker_metadata.py','deploy/local/qualification_git.py','deploy/local/origin21_profile.py', 'deploy/local/origin21_schema.py',
                 'deploy/local/origin21_state.py', 'deploy/local/origin21_runtime.py', 'deploy/local/origin21_setup.py', 'deploy/local/origin21_configs.py', 'deploy/local/origin21_transport.py',
                 'deploy/local/origin21_provision.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/origin21_products.py', 'deploy/local/origin21_cli.py', 'deploy/local/origin21_ready.py', 'deploy/local/origin21-compose.yaml', 'deploy/local/origin21-postgres-init.yaml', 'deploy/local/up.py',
                 'deploy/pilot/settings.js', 'deploy/pilot/flows.json', 'deploy/pilot/destination.js', 'deploy/pilot/probe.js', 'deploy/pilot/check_tls.js',
@@ -62,7 +62,7 @@ MANAGED_SOURCE_FILES = SOURCE_FILES + ('deploy/local/origin21_readiness_profile.
     'tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/publisher.js',
     'tests/fixtures/managed-origin-qualification/test_driver.py','tests/fixtures/managed-origin-qualification/test_fixture.py',
     'tests/fixtures/managed-origin-qualification/test_proof.py','tests/fixtures/managed-origin-qualification/test_wrapper.py',
-    'tests/fixtures/managed-origin-qualification/test_readiness_profile.py')
+    'tests/fixtures/managed-origin-qualification/test_readiness_profile.py','tests/fixtures/qualification-git/test_git.py')
 HUMAN_SOURCE_FILES = MANAGED_SOURCE_FILES + (
     'deploy/local/origin21-managed-human-compose.yaml',
     'deploy/local/check_oidc.py',

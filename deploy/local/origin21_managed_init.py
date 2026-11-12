@@ -51,7 +51,9 @@ def _source(head, *, selected=SELECTED):
     _settings(selected)
     if SOURCE not in origin21_state._source_files(selected): raise RuntimeError('managed initializer source not pinned')
     if not re.fullmatch('[0-9a-f]{40}',head): raise ValueError('invalid source head')
-    if origin21_transport._run(['git','rev-parse','HEAD'],'',deadline=15)!=head or origin21_transport._run(['git','status','--porcelain','--untracked-files=all'],'',deadline=15): raise ValueError('clean source required')
+    from deploy.local import qualification_git
+    fresh=qualification_git.clean_status_if_active(ROOT,head) if selected is SELECTED else False
+    if not fresh and (origin21_transport._run(['git','rev-parse','HEAD'],'',deadline=15)!=head or origin21_transport._run(['git','status','--porcelain','--untracked-files=all'],'',deadline=15)): raise ValueError('clean source required')
     names=['db/bootstrap.sql']+['db/provision_'+kind+'.sql' for kind in provision.PROVISION]
     migrations=sorted((ROOT/'db/migrations').glob('*.sql'))
     if [int(path.name[:4]) for path in migrations]!=list(range(1,15)): raise ValueError('baseline migration drift')
