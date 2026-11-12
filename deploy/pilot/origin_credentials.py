@@ -167,10 +167,10 @@ class Credentials:
             for name,key,cert,purpose,sans,ders,keys in CERTS:
                 key_data=_file(root/key,16384); cert_data=_file(root/cert)
                 keyf=tmp/'key'; certf=tmp/'cert'; keyf.write_bytes(key_data); certf.write_bytes(cert_data)
+                _run('verify','-CAfile',caf,'-purpose','sslclient' if purpose=='clientAuth' else 'sslserver',certf)
                 inspected=_run('x509','-in',certf,'-pubkey','-ext','extendedKeyUsage,subjectAltName','-checkend','0','-noout')
                 if _parse_leaf_inspection(inspected,purpose,sans) != _run('pkey','-in',keyf,'-pubout'): raise ValueError('leaf key mismatch')
                 public_keys.append(_run('pkey','-in',keyf,'-pubout','-outform','DER'))
-                _run('verify','-CAfile',caf,'-purpose','sslclient' if purpose=='clientAuth' else 'sslserver',certf)
                 der=_run('x509','-in',certf,'-outform','DER')
                 keyder=_run('pkcs8','-topk8','-nocrypt','-in',keyf,'-outform','DER')
                 if any(_file(root/p)!=der for p in ders) or any(_file(root/p)!=keyder for p in keys): raise ValueError('DER copy drift')

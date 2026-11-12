@@ -206,6 +206,9 @@ class SyntheticInspection(unittest.TestCase):
                 with mock.patch.object(credentials,'_run',wraps=credentials._run) as calls:
                     op._verify()
                 self.assertEqual(calls.call_count,10)
+                (bundle/'leaf.pem').write_bytes(certs['wrong_purpose'].read_bytes())
+                with self.assertRaisesRegex(ValueError,'^credential cryptographic validation failed$'):
+                    op._verify()
                 (bundle/'leaf.pem').write_bytes(certs['wrong_san'].read_bytes())
                 with self.assertRaises(ValueError): op._verify()
                 (bundle/'leaf.pem').write_bytes(certs['valid'].read_bytes())
