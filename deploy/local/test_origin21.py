@@ -649,7 +649,7 @@ class Origin21Tests(unittest.TestCase):
         migration=origin21_setup.Migration(psql,15,b'BEGIN; COMMIT; COMMIT;',context)
         with self.assertRaises(ValueError): migration.apply()
         self.assertEqual(psql.call_count,before)
-        with mock.patch.object(origin21_setup,'_ledger',return_value=14), mock.patch.object(origin21_setup,'_check',return_value=False):
+        with mock.patch.object(origin21_schema,'observe',return_value={'ledger':list(range(1,15))}), mock.patch.object(origin21_schema,'snapshot_matches',return_value=False):
             self.assertEqual(origin21_setup.Migration(psql,15,b'BEGIN; COMMIT;',context).inspect(),origin21_state.DRIFT)
 
     def test_exact_reference_guard_handles_sql_quotes_and_dollar_quotes(self):

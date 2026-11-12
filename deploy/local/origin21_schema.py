@@ -90,3 +90,43 @@ def require_ready(versions, psql, *, stage=21, phase='pre'):
     if psql('SELECT pg_catalog.current_database()::text;')!='contour_local': raise RuntimeError('wrong local database')
     actual=json.loads(psql(inventory_sql()))
     if actual!=expected: raise RuntimeError('version 21 catalog drift')
+
+
+def _unique_snapshot_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result: raise ValueError('duplicate snapshot key')
+        result[key] = value
+    return result
+
+
+def observe(psql):
+    """Read database, exact ledger and inventory in one fresh SQL snapshot."""
+    if not callable(psql): raise ValueError('database callback required')
+    sql = ("SELECT pg_catalog.jsonb_build_object('database',pg_catalog.current_database(),"
+           "'ledger',coalesce((SELECT pg_catalog.jsonb_agg(version ORDER BY version) FROM contour.schema_migrations),'[]'::jsonb),"
+           "'inventory',((" + inventory_sql().rstrip().removesuffix(';') + ")::jsonb))::text;")
+    raw = psql(sql)
+    if type(raw) is not str or len(raw.encode('utf-8')) > 8 * 1024 * 1024: raise ValueError('schema snapshot bound')
+    value = json.loads(raw, object_pairs_hook=_unique_snapshot_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid JSON constant')))
+    if type(value) is not dict or set(value) != {'database','ledger','inventory'} or value['database'] != 'contour_local' or type(value['ledger']) is not list:
+        raise ValueError('invalid schema snapshot')
+    stage = len(value['ledger'])
+    require_ledger(value['ledger'],stage)
+    inventory=value['inventory']
+    if type(inventory) is not dict or set(inventory) != {'version','server_major','items'} or type(inventory['version']) is not int or inventory['version'] != 1 or type(inventory['server_major']) is not int or type(inventory['items']) is not list:
+        raise ValueError('invalid schema inventory')
+    return value
+
+
+def snapshot_matches(snapshot, stage, phase):
+    """Compare a validated observation with a pinned stage and phase."""
+    require_ledger(snapshot['ledger'],stage)
+    expected = require_reference(stage,phase)
+    # JSON serialization keeps booleans distinct from numerically equal integers.
+    return json.dumps(snapshot['inventory'],sort_keys=True,separators=(',',':'),ensure_ascii=False) == json.dumps(expected,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+
+
+def require_snapshot(psql, stage=21, phase='pre'):
+    snapshot = observe(psql)
+    if not snapshot_matches(snapshot,stage,phase): raise RuntimeError('version 21 catalog drift')

@@ -16,22 +16,19 @@ MIGRATIONS={v:f'db/opt-in-migrations/{v:04d}_'+name+'.sql' for v,name in (
     (18,'causal_runtime_registry'),(19,'causal_sessions'),(20,'causal_inbox'),(21,'origin_admission'))}
 
 
-def _ledger(psql):
-    raw=psql('SELECT version FROM contour.schema_migrations ORDER BY version;')
-    try: versions=[int(item) for item in raw.splitlines()]
-    except (ValueError,AttributeError): raise RuntimeError('invalid schema ledger') from None
-    if versions not in [list(range(1,n+1)) for n in range(14,22)]: raise RuntimeError('unexpected schema ledger')
-    return len(versions)
-
-
 def _phase(stage,context):
     return 'enrolled' if stage==21 and context['login'] else 'pre'
 
 
 def _check(psql,stage,phase):
     try:
-        origin21_schema.require_ready(list(range(1,stage+1)),psql,stage=stage,phase=phase)
+        origin21_schema.require_snapshot(psql,stage=stage,phase=phase)
         return True
+    except (ValueError,RuntimeError): return False
+
+
+def _matches(snapshot,stage,phase):
+    try: return origin21_schema.snapshot_matches(snapshot,stage,phase)
     except (ValueError,RuntimeError): return False
 
 
@@ -49,12 +46,13 @@ def _guard(stage,phase):
 class Groups:
     def __init__(self,psql,context): self.psql,self.context=psql,context
     def inspect(self):
-        try: stage=_ledger(self.psql)
-        except RuntimeError: return origin21_state.DRIFT
-        if stage==14:
-            if _check(self.psql,14,'groups'): return origin21_state.EXACT
-            return origin21_state.ABSENT if _check(self.psql,14,'pre') else origin21_state.DRIFT
-        return origin21_state.EXACT if _check(self.psql,stage,_phase(stage,self.context)) else origin21_state.DRIFT
+        try:
+            snapshot=origin21_schema.observe(self.psql); stage=len(snapshot['ledger'])
+            if stage==14:
+                if _matches(snapshot,14,'groups'): return origin21_state.EXACT
+                return origin21_state.ABSENT if _matches(snapshot,14,'pre') else origin21_state.DRIFT
+            return origin21_state.EXACT if _matches(snapshot,stage,_phase(stage,self.context)) else origin21_state.DRIFT
+        except (ValueError,RuntimeError): return origin21_state.DRIFT
     def apply(self):
         sql=('BEGIN; '+LOCK+_guard(14,'pre')+
              'CREATE ROLE contour_v2_ingress NOLOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION; '
@@ -65,14 +63,15 @@ class Groups:
 class Migration:
     def __init__(self,psql,version,source,context): self.psql,self.version,self.source,self.context=psql,version,source,context
     def inspect(self):
-        try: stage=_ledger(self.psql)
-        except RuntimeError: return origin21_state.DRIFT
-        if stage>=self.version:
-            return origin21_state.EXACT if _check(self.psql,stage,_phase(stage,self.context)) else origin21_state.DRIFT
-        if stage==self.version-1:
-            phase='groups' if stage==14 else 'pre'
-            return origin21_state.ABSENT if _check(self.psql,stage,phase) else origin21_state.DRIFT
-        return origin21_state.DRIFT
+        try:
+            snapshot=origin21_schema.observe(self.psql); stage=len(snapshot['ledger'])
+            if stage>=self.version:
+                return origin21_state.EXACT if _matches(snapshot,stage,_phase(stage,self.context)) else origin21_state.DRIFT
+            if stage==self.version-1:
+                phase='groups' if stage==14 else 'pre'
+                return origin21_state.ABSENT if _matches(snapshot,stage,phase) else origin21_state.DRIFT
+            return origin21_state.DRIFT
+        except (ValueError,RuntimeError): return origin21_state.DRIFT
     def apply(self):
         text=self.source.decode('utf-8')
         if text.count('BEGIN;')!=1 or text.count('COMMIT;')!=1: raise ValueError('migration transaction shape')
