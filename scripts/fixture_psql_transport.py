@@ -27,12 +27,14 @@ class TransportError(RuntimeError):
 
 
 class FreshPsqlTransport:
-    def __init__(self, sql, environment, owner, *, popen=subprocess.Popen, run=subprocess.run):
+    def __init__(self, sql, environment, owner, *, popen=subprocess.Popen, run=subprocess.run, diagnostic_context=None):
         if (len(sql) != 12 or sql[:3] != ['docker', 'exec', '-i'] or
             not re.fullmatch('[0-9a-f]{64}', sql[3]) or
             sql[4:] != ['psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'contour_fixture']):
             raise ValueError('invalid fixture command')
         if not re.fullmatch('[0-9a-f]{32}', owner): raise ValueError('invalid fixture owner')
+        if diagnostic_context not in (None,'observer-v1'): raise ValueError('invalid fixture diagnostic context')
+        self.diagnostic_context = diagnostic_context
         self.container, self.owner, self.environment = sql[3], owner, environment
         self.popen, self.run = popen, run
         self.local = threading.local()
@@ -147,11 +149,17 @@ class FreshPsqlTransport:
             if match is None: raise TransportError('fixture status frame invalid')
             status = int(match.group(1))
             if status in (124, 125, 126, 127, 137): raise TransportError('fixture query completion uncertain')
-            if status != 0: raise _QueryFailed('authority fixture command failed')
+            if status != 0:
+                if self.diagnostic_context == 'observer-v1':
+                    phase, state = _observer_failure(text, out, err)
+                    raise _ObserverQueryFailed(phase,state)
+                raise _QueryFailed()
             decoded = base64.b64decode(b''.join(out.split()), validate=True)
             return decoded.decode(locale.getpreferredencoding(False)).replace('\r\n', '\n').replace('\r', '\n').strip()
         except _BeforeSendDeadline:
             raise TimeoutError('fixture query deadline') from None
+        except _ObserverQueryFailed as failure:
+            raise ObserverQueryError(failure.phase,failure.sqlstate) from None
         except _QueryFailed:
             raise RuntimeError('authority fixture command failed') from None
         except BaseException as exc:
@@ -224,3 +232,31 @@ class _IdleReapError(TransportError):
 
 class _QueryFailed(Exception):
     pass
+
+
+_OBSERVER_PREFIX = b'\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'
+_OBSERVER_STEPS = ('runtime-source','profile','runtime-enroll','session','generation','marker','gateway','proof','canonical','cases')
+
+class ObserverQueryError(RuntimeError):
+    """Definite failure metadata; no database output is retained."""
+    def __init__(self, phase, sqlstate):
+        self.phase = phase if phase in _OBSERVER_STEPS else 'unavailable'
+        self.sqlstate = sqlstate if re.fullmatch('[0-9A-Z]{5}',sqlstate) else 'unavailable'
+        super().__init__('authority fixture command failed (observer-step='+self.phase+', sqlstate='+self.sqlstate+')')
+
+class _ObserverQueryFailed(Exception):
+    def __init__(self,phase,sqlstate): self.phase,self.sqlstate=phase,sqlstate
+
+def _observer_failure(text, out, err):
+    """Parse only a fixed monotone marker sequence and a single SQLSTATE."""
+    unavailable=('unavailable','unavailable')
+    if not text.encode('utf-8').startswith(_OBSERVER_PREFIX): return unavailable
+    try:
+        stdout=base64.b64decode(b''.join(out.split()),validate=True)
+        steps=re.findall(rb'(?m)^observer-step=([^\r\n]*)\r?$',stdout)
+        decoded=[step.decode('ascii') for step in steps]
+        if not decoded or decoded!=list(_OBSERVER_STEPS[:len(decoded)]): return unavailable
+        states=re.findall(rb'(?m)^(?:psql:<stdin>:[0-9]+: )?ERROR:[ \t]+([0-9A-Z]{5})[ \t]*$',err)
+        state=states[0].decode('ascii') if len(states)==1 else 'unavailable'
+        return decoded[-1],state
+    except (ValueError,UnicodeError): return unavailable

@@ -1,5 +1,6 @@
 """Offline transport tests with local synthetic processes; no Docker or database."""
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,36 @@ print(str(os.getpid()) + ':' + s, end='')
         with self.assertRaisesRegex(RuntimeError, 'authority fixture command failed') as caught: self.transport.execute('FAIL')
         self.assertNotIn('secret-sentinel',str(caught.exception))
         self.assertIn(':OK', self.transport.execute('OK')); self.assertFalse(self.calls)
+    def test_observer_parser_redacts_and_rejects_untrusted_markers(self):
+        text=mod._OBSERVER_PREFIX.decode()+'SELECT fixture;'
+        frame=lambda data:base64.b64encode(data)
+        good=frame(b'observer-step=runtime-source\nobserver-step=profile\n')
+        phase,state=mod._observer_failure(text,good,b'psql:<stdin>:77: ERROR:  23514\nsecret-sentinel\n')
+        self.assertEqual((phase,state),('profile','23514'))
+        error=mod.ObserverQueryError(phase,state)
+        self.assertNotIn('secret-sentinel',str(error)); self.assertEqual(set(vars(error)),{'phase','sqlstate'})
+        for out in (b'not-base64', frame(b'observer-step=profile\n'),
+                    frame(b'observer-step=runtime-source\nobserver-step=evil-secret-sentinel\n'),
+                    frame(b'observer-step=runtime-source\nobserver-step=runtime-source\n')):
+            self.assertEqual(mod._observer_failure(text,out,b'23514\n'),('unavailable','unavailable'))
+        self.assertEqual(mod._observer_failure(text,good,b'ERROR:  23514\n'),('profile','23514'))
+        self.assertEqual(mod._observer_failure(text,good,b'prefix ERROR:  23514 secret-sentinel\n'),('profile','unavailable'))
+        self.assertEqual(mod._observer_failure(text,good,b'23514\n'),('profile','unavailable'))
+        self.assertEqual(mod._observer_failure('other',good,b'ERROR:  23514\n'),('unavailable','unavailable'))
+        self.assertEqual(mod._observer_failure(text,good,b'ERROR:  23514\npsql:<stdin>:2: ERROR:  42501\n'),('profile','unavailable'))
+        self.assertEqual(mod._observer_failure(text,good,b'psql: secret-sentinel\n'),('profile','unavailable'))
+        self.assertNotIn('secret-sentinel',str(mod.ObserverQueryError('secret-sentinel','secret-sentinel')))
+
+    def test_observer_failure_remains_definite_and_generic_other_modes(self):
+        self.transport.diagnostic_context='observer-v1'
+        out=base64.b64encode(b'observer-step=runtime-source\n')
+        def exchange(worker,request,nonce,deadline):
+            return out,b'ERROR:  23514\n'+nonce.encode()+b' STATUS 3\n'
+        self.transport._exchange=exchange
+        with self.assertRaises(mod.ObserverQueryError) as caught:self.transport.execute(mod._OBSERVER_PREFIX.decode()+'SELECT fixture;')
+        self.assertEqual((caught.exception.phase,caught.exception.sqlstate),('runtime-source','23514'))
+        self.assertFalse(self.calls)
+
     def test_timeout_contains_and_never_replays(self):
         with self.assertRaises(mod.TransportError): self.transport.execute('SLOW',timeout=.1)
         self.assertTrue(any(cmd[1]=='kill' for cmd in self.calls))

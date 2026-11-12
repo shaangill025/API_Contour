@@ -51,6 +51,14 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(combined),1)
         self.assertIn('trusted synthetic observer seed required',combined[0])
         self.assertIn('nodered_5_0_9_wire_v1',combined[0])
+    def test_diagnostics_preserve_fixture_exactly(self):
+        fixture=(ROOT/'db/tests/causal_observer_inbox.sql').read_text()
+        sql=module._diagnostic_sql(module.SEED_SQL,fixture)
+        self.assertTrue(sql.startswith('\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'))
+        self.assertTrue(sql.endswith('\\echo observer-step=cases\n'+fixture))
+        for label in ('profile','runtime-enroll','session','generation','marker','gateway','proof','canonical'):
+            self.assertEqual(sql.count('observer-step='+label+'\n'),1)
+        with self.assertRaises(ValueError):module._diagnostic_sql('bad',fixture)
     def test_failure_never_writes_receipt(self):self._run(True)
 
 if __name__=='__main__':unittest.main()

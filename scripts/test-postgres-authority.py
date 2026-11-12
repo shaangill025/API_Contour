@@ -21,7 +21,7 @@ def run_cases(container, sql, probe, port, directory, environment, https_only=Fa
     if len(sql) < 4 or sql[3] != container:
         raise ValueError('fixture container identity mismatch')
     transport_type = runpy.run_path(str(ROOT / 'scripts/fixture_psql_transport.py'))['FreshPsqlTransport']
-    with transport_type(sql, environment, owner) as transport:
+    with transport_type(sql, environment, owner, diagnostic_context=('observer-v1' if environment.get('CONTOUR_CAUSAL_OBSERVER_FIXTURE') == '1' else None)) as transport:
         return _run_cases(container, sql, probe, port, directory, environment, https_only, delivery_only, refresh_only, catalog_reader_only, origin_sensor_only, transport.execute)
 
 

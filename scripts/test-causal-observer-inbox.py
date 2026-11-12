@@ -85,10 +85,26 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir):
     for key in ('issued','expires'):
         if not re.fullmatch(r'[0-9T:Z.+-]+',params[key]): raise ValueError('invalid policy time')
     seed=SEED_SQL % params
-    execute(seed+'\n'+(ROOT/'db/tests/causal_observer_inbox.sql').read_text(), timeout=300)
+    execute(_diagnostic_sql(seed,(ROOT/'db/tests/causal_observer_inbox.sql').read_text()), timeout=300)
     path=directory/'causal-observer.done'; fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as out:
         out.write(b'causal-observer-complete\n'); out.flush(); os.fsync(out.fileno())
+
+def _diagnostic_sql(seed, fixture):
+    """Mark audited seed boundaries; preserve the fixture's exact bytes."""
+    markers=(('SET ROLE contour_causal_provisioner;\nSELECT contour.register_causal_profile(', 'profile'),
+             ('SELECT contour.enroll_causal_runtime(', 'runtime-enroll'),
+             ('CREATE TEMP TABLE observer_claim ', 'session'),
+             ('SELECT contour.claim_causal_generation(', 'generation'),
+             ('SELECT contour.bind_causal_marker_key(', 'marker'),
+             ('CREATE TEMP TABLE observer_gateway(', 'gateway'),
+             ('DO $$ BEGIN\n IF NOT EXISTS(SELECT 1 FROM contour.origin_proofs', 'proof'),
+             ('CREATE TEMP TABLE observer_seed(', 'canonical'))
+    for token, label in markers:
+        if seed.count(token)!=1: raise ValueError('observer diagnostic boundary changed')
+        seed=seed.replace(token, '\\echo observer-step='+label+'\n'+token,1)
+    return '\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'+seed+'\n\\echo observer-step=cases\n'+fixture
+
 
 # One psql backend is essential: all claim rows and observer_seed are temporary.
 # Only the issuer assertions below are synthetic. The marker wire is a bounded
