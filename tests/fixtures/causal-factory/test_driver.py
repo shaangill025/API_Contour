@@ -110,9 +110,14 @@ class DriverTests(unittest.TestCase):
             os.chmod(binary, 0o700)
             entry = {'reason':'compiler-artifact', 'target':{'name':'causal_factory_probe',
                 'kind':['example'], 'src_path':str(DRIVER['EXAMPLE'])},
-                'profile':{'test':False}, 'executable':str(binary)}
+                'profile':{'test':False, 'opt_level':'3', 'debug_assertions':False}, 'executable':str(binary)}
             line = json.dumps(entry)
             self.assertEqual(DRIVER['artifact']([line], target), binary)
+            for profile in ({'test':False},
+                            {'test':False, 'opt_level':'0', 'debug_assertions':True},
+                            {'test':False, 'opt_level':'3', 'debug_assertions':True}):
+                with self.assertRaises(RuntimeError):
+                    DRIVER['artifact']([json.dumps(dict(entry, profile=profile))], target)
             with self.assertRaises(RuntimeError):
                 DRIVER['artifact']([line, line], target)
             entry['executable'] = '/bin/sh'

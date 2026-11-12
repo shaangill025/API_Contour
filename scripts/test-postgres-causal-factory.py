@@ -119,6 +119,9 @@ def artifact(lines, target):
         if (entry.get('reason') == 'compiler-artifact' and meta.get('name') == 'causal_factory_probe'
                 and meta.get('kind') == ['example'] and meta.get('src_path') == str(EXAMPLE)
                 and not (entry.get('profile') or {}).get('test', False)):
+            profile = entry.get('profile') or {}
+            if profile.get('test') is not False or profile.get('opt_level') != '3' or profile.get('debug_assertions') is not False:
+                raise RuntimeError('production release artifact required')
             path = Path(entry.get('executable') or '')
             if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
                 raise RuntimeError('unsafe artifact')
@@ -495,7 +498,7 @@ def main():
             return raw
         env = os.environ.copy(); env['CARGO_TARGET_DIR'] = str(target)
         lines = bridge['bounded_process_output'](['cargo', 'build', '-p', 'contour-ingress', '--example',
-            'causal_factory_probe', '--locked', '--offline', '--message-format=json'], cwd=ROOT, env=env)
+            'causal_factory_probe', '--release', '--locked', '--offline', '--message-format=json'], cwd=ROOT, env=env)
         executable = artifact(lines, target); probe_hash = bridge['digest_file'](executable)
         ca_config = work / 'ca.cnf'
         ca_config.write_text('[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n')
