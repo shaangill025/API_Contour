@@ -324,11 +324,13 @@ def failure_locations(error,depth=0):
         return [x for item in error.exceptions[:8] for x in failure_locations(item,depth+1)][:8]
     result=[];tb=error.__traceback__
     while tb is not None:
-        if tb.tb_frame.f_code.co_filename==__file__ and 1<=tb.tb_lineno<=1000000:
-            value='qualify-receiver504.py:'+str(tb.tb_lineno)
+        allowed={__file__:'qualify-receiver504.py',str(ROOT/'scripts/qualify-origin21-onboarding.py'):'qualify-origin21-onboarding.py'}
+        name=allowed.get(tb.tb_frame.f_code.co_filename)
+        if name is not None and 1<=tb.tb_lineno<=1000000:
+            value=name+':'+str(tb.tb_lineno)
             if value not in result:result.append(value)
         tb=tb.tb_next
-    return result[-4:]
+    return result[-8:]
 
 def qualify(args, shared, run, owner, progress=None):
     def phase(value):

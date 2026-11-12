@@ -70,6 +70,15 @@ class Fences(unittest.TestCase):
    group=ExceptionGroup('private',[error,ValueError('private')]);self.assertEqual(m.failure_locations(group),locations)
   try:raise ValueError('foreign-private')
   except ValueError as foreign:self.assertEqual(m.failure_locations(foreign),[])
+ def test_shared_runner_location_is_allowlisted_without_error_payload(self):
+  shared=str(ROOT/'scripts/qualify-origin21-onboarding.py')
+  try:exec(compile("raise RuntimeError('synthetic-secret/private-path')",shared,'exec'),{})
+  except RuntimeError as error:
+   locations=m.failure_locations(error)
+   self.assertEqual(locations,['qualify-origin21-onboarding.py:1'])
+   self.assertNotIn('secret',repr(locations));self.assertNotIn('private',repr(locations))
+  try:exec(compile("raise RuntimeError('private')",'/foreign/qualify-origin21-onboarding.py','exec'),{})
+  except RuntimeError as error:self.assertEqual(m.failure_locations(error),[])
  def test_preflight_failure_has_closed_stage(self):
   from types import SimpleNamespace
   progress={'phase':'setup'}
