@@ -55,8 +55,9 @@ function savePending() {
     sessionStorage.setItem(storageKey, JSON.stringify([...pendingCreates].map(([fingerprint,key]) => [fingerprint,key,true])));
   } catch { storageFault = true; throw new ApiError(0); }
 }
-async function createKey(path: string, body: string): Promise<Pending> {
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+async function createKey(path: string, body: string, signal: AbortSignal, check:()=>void): Promise<Pending> {
+  const hash = await abortable(crypto.subtle.digest('SHA-256', new TextEncoder().encode(body)), signal);
+  check();
   const fingerprint = `${path}:${Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('')}`;
   loadPending();
   let key = pendingCreates.get(fingerprint);
@@ -98,25 +99,42 @@ export function acknowledgeRecovery(id: string) {
   if ((inFlight.get(id) ?? 0) > 0) { completed.add(id); return; }
   releaseCreate({fingerprint:entry[0],key:id,previouslyUncertain:true});
 }
+// Race non-cooperative stages too; remove the listener regardless of which side settles.
+function abortable<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve,reject) => {
+    let done=false;
+    const finish=(action:()=>void)=>{if(done)return; done=true; signal.removeEventListener('abort',onAbort); action();};
+    const onAbort=()=>finish(()=>reject(new ApiError(0)));
+    signal.addEventListener('abort',onAbort,{once:true});
+    if (signal.aborted) onAbort();
+    Promise.resolve(work).then(value=>finish(()=>resolve(value)),error=>finish(()=>reject(error)));
+  });
+}
 // Authentication belongs to the same-origin server. No browser-supplied identity headers,
 // token persistence, remote URL configuration, or automatic retries.
 export async function request<T>(path: string, body?: unknown, deadlineMs = 30_000, validateResult?: (value: unknown) => T, responseLimit?: number, signal?: AbortSignal, expectedView?: string): Promise<T> {
   const sessionAtStart=sessionGeneration;
   const controller = new AbortController();
+  const deadlineAt = performance.now()+deadlineMs;
   const deadline = setTimeout(() => controller.abort(), deadlineMs);
+  const check = () => { if (controller.signal.aborted || performance.now() >= deadlineAt) { controller.abort(); throw new ApiError(0); } };
   const abort = () => controller.abort();
   if (signal?.aborted) controller.abort(); else signal?.addEventListener('abort', abort, {once:true});
   let entry: Pending | undefined;
   try {
+    check();
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    if (payload !== undefined && createPaths.has(path)) entry = await createKey(path, payload);
-    const response = await fetch(`/v1/${path}`, {
+    check();
+    if (payload !== undefined && createPaths.has(path)) entry = await createKey(path, payload, controller.signal, check);
+    check();
+    const response = await abortable(fetch(`/v1/${path}`, {
       method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
       signal: controller.signal, cache: 'no-store',
       headers: body === undefined ? {Accept: 'application/json'} :
         {Accept: 'application/json', 'Content-Type': 'application/json', ...(entry ? {'Idempotency-Key': entry.key} : {})},
       ...(payload === undefined ? {} : {body: payload}),
-    });
+    }), controller.signal);
+    check();
     if (expectedView!==undefined && response.status!==401 && response.headers.get('x-contour-session-view')!==expectedView) throw new SessionChanged();
     if (!response.ok) {
       if (response.status===401) invalidateSession(sessionAtStart);
@@ -131,20 +149,25 @@ export async function request<T>(path: string, body?: unknown, deadlineMs = 30_0
       if (!response.body) throw new ApiError(0);
       const reader=response.body.getReader(); const chunks: Uint8Array[]=[]; let total=0;
       try {
-        while (true) { const part=await reader.read(); if (part.done) break; total+=part.value.length; if (total>responseLimit) throw new ApiError(0); chunks.push(part.value); }
-      } catch (error) { controller.abort(); throw error; }
+        while (true) { const part=await abortable(reader.read(),controller.signal); check(); if (part.done) break; total+=part.value.length; if (total>responseLimit) throw new ApiError(0); chunks.push(part.value); }
+      } catch (error) { controller.abort(); void reader.cancel().catch(()=>{}); throw error; }
       finally { reader.releaseLock(); }
       const bytes=new Uint8Array(total); let offset=0; for (const chunk of chunks) {bytes.set(chunk,offset); offset+=chunk.length;}
       responseBody=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
-    } else responseBody = await response.json();
+    } else responseBody = await abortable(response.json(),controller.signal);
+    check();
     const result = validateResult ? validateResult(responseBody) : responseBody as T;
+    check();
     if (entry) {
       if (!responseBody || typeof responseBody !== 'object' || !('id' in responseBody) || responseBody.id !== entry.key) throw new ApiError(0);
       completed.add(entry.key);
     }
     return result;
   } catch (error) { throw error instanceof ApiError || error instanceof SessionChanged ? error : new ApiError(0); }
-  finally { finishCreate(entry); clearTimeout(deadline); signal?.removeEventListener('abort', abort); }
+  finally {
+    try { finishCreate(entry); }
+    finally { clearTimeout(deadline); signal?.removeEventListener('abort', abort); controller.abort(); }
+  }
 }
 export class SessionViewFailure extends ApiError {}
 // The view is an opaque, non-authoritative session generation marker, never a credential.
