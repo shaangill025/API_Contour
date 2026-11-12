@@ -382,4 +382,61 @@ class DriverTests(unittest.TestCase):
         self.assertNotIn(secret,MODULE['failure_category'](RuntimeError(secret)))
 
 
+
+
+
+class HistoricalSourceInventoryTests(unittest.TestCase):
+    def test_all_old_profiles_hash_25_without_applying_it(self):
+        import hashlib
+        root_repo=Path(__file__).resolve().parents[3]
+        cases=(('bridge',19),('sessions',19),('inbox',20),('generation',22),
+               ('permits',22),('marker-binding',23),('marker-bridge',23),('live-profile',24))
+        for name,last in cases:
+            with self.subTest(driver=name), tempfile.TemporaryDirectory() as temporary:
+                module=runpy.run_path(str(root_repo/('scripts/test-postgres-causal-'+name+'.py')))
+                root=Path(temporary).resolve(); root.mkdir(exist_ok=True)
+                fn=module.get('source_snapshot',module.get('snapshot')); g=fn.__globals__
+                patches={'ROOT':root}
+                if name=='bridge':
+                    for crate in ('contour-postgres','contour-core','contour-auth'):
+                        (root/'crates'/crate/'src').mkdir(parents=True)
+                    with mock.patch.dict(g,patches): paths=module['source_paths']()
+                elif name in ('sessions','inbox','generation','marker-binding'):
+                    names=module.get('SOURCE_PATHS',module.get('SOURCES'))
+                    paths=[root/path for path in names]
+                    if name=='inbox':
+                        extra=root/'crates/fixture/source.rs'; paths.append(extra)
+                else:
+                    folder=root/'db/opt-in-migrations'
+                    extra=module.get('EXTRA_SOURCE_MIGRATIONS',module.get('SOURCE_ONLY_MIGRATIONS',()))
+                    paths=[folder/(item+'.sql') for item in module['OPT']+extra]
+                    for key in ('EXAMPLE','NODE','MARKER'):
+                        if key in module:
+                            original=module[key]; mapped=root/original.relative_to(root_repo)
+                            patches[key]=mapped;paths.append(mapped)
+                    paths += [root/('scripts/test-postgres-causal-'+name+'.py'),root/('tests/fixtures/causal-'+name+'/test_driver.py'),root/'scripts/test-postgres-causal-https.py',root/'tests/fixtures/causal-https/test_https_driver.py']
+                    if name=='permits':
+                        paths.append(root/'crates/contour-ingress/Cargo.toml')
+                        for crate in ('contour-ingress','contour-delivery','contour-platform','contour-abi','contour-wasm'):
+                            (root/'crates'/crate/'src').mkdir(parents=True,exist_ok=True)
+                for path in paths:
+                    path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+                bridge={'source_paths':lambda:[], 'digest_file':lambda path:hashlib.sha256(path.read_bytes()).hexdigest()}
+                with mock.patch.dict(g,patches):
+                    def snapshot(): return fn(bridge) if name in ('permits','marker-bridge','live-profile') else fn()
+                    before=snapshot(); target=root/'db/opt-in-migrations/0025_historical_origin.sql'
+                    key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
+                    self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
+                    target.write_bytes(b'changed');self.assertNotEqual(before[key],snapshot()[key]);target.unlink()
+                    with self.assertRaises(ValueError): snapshot()
+                    target.write_bytes(b'original'); unexpected=target.parent/'0099_unexpected.sql';unexpected.write_bytes(b'x')
+                    with self.assertRaises(ValueError): snapshot()
+                    unexpected.unlink();target.unlink();target.symlink_to(root/'elsewhere')
+                    with self.assertRaises(ValueError): snapshot()
+                applied=module.get('OPT',module.get('OPT_INS'))
+                if name=='marker-binding': applied=module['GEN']['OPT_INS']+('0023_causal_marker_bindings',)
+                self.assertEqual([int(item[:4]) for item in applied],list(range(15,last+1)))
+                self.assertNotIn('0025_historical_origin',applied)
+
+
 if __name__=='__main__': unittest.main()

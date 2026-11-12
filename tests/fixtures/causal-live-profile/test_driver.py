@@ -84,7 +84,7 @@ class Driver(unittest.TestCase):
     def test_extra_migration_and_symlink_are_refused(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp).resolve(); folder=root/'db/opt-in-migrations'; folder.mkdir(parents=True)
-            for name in d.OPT: (folder/(name+'.sql')).write_text('x')
+            for name in d.OPT+d.SOURCE_ONLY_MIGRATIONS: (folder/(name+'.sql')).write_text('x')
             (folder/'0025_other.sql').write_text('x')
             with mock.patch.object(d,'ROOT',root), self.assertRaises(ValueError):
                 d.snapshot({'source_paths':lambda:[],'digest_file':lambda _: 'hash'})

@@ -237,7 +237,7 @@ MIGRATIONS = ('0001_identity','0002_policy','0003_ingestion','0004_catalog','000
 OPT_INS = ('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs',
            '0018_causal_runtime_registry','0019_causal_sessions')
 # Reviewed sources that this 1..19 session qualification hashes, but never applies.
-EXTRA_SOURCE_MIGRATIONS = ('0020_causal_inbox','0021_origin_admission','0022_causal_generation','0023_causal_marker_bindings','0024_causal_live_profile')
+EXTRA_SOURCE_MIGRATIONS = ('0020_causal_inbox','0021_origin_admission','0022_causal_generation','0023_causal_marker_bindings','0024_causal_live_profile','0025_historical_origin')
 TERMINALS = ('runtime_closed','export_revoked','credential_revoked','lifecycle_closed')
 SCENARIOS = (('issue_issue','rollback') + TERMINALS + tuple('issue_then_'+x for x in TERMINALS)
              + ('issue_cas','issue_disable','issue_revoke','cas_issue','disable_issue','revoke_issue'))

@@ -27,7 +27,7 @@ class Driver(unittest.TestCase):
     def test_extra_migration_is_refused(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp).resolve(); folder=root/'db/opt-in-migrations'; folder.mkdir(parents=True)
-            for n in d.OPT: (folder/(n+'.sql')).write_text('fixture')
+            for n in d.OPT+d.EXTRA_SOURCE_MIGRATIONS: (folder/(n+'.sql')).write_text('fixture')
             (folder/'0024_other.sql').write_text('fixture')
             with mock.patch.object(d,'ROOT',root), self.assertRaises(ValueError): d.snapshot({'source_paths':lambda:[],'digest_file':lambda _: 'hash'})
     def test_probe_modes_are_closed_and_cover_invalidation(self):
