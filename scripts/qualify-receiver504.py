@@ -186,6 +186,19 @@ def check_image(value, image_id, arch, owner):
 
 
 MATERIAL_NAMES = ('ca.pem','product.pem','product.key','export.pem','export.key','server.pem','server.key','evidence.pem','evidence.key')
+# Fixed 504 manifest source closure plus the separately checked artifact/manifest.
+ADAPTER_FILES = (
+    'causal-codec.js','causal-evidence-codec.js',
+    *('error-integration/'+x for x in ('causal-marker.js','flow-source-transform.js','lexical-bridge.js','node-source-transform.js','private-causal-exporter.js','private-causal-receipt.js','private-handoff.js','private-wire-dispatch.js','private-wire-transform.js','wire-v2-loader.js')),
+    *('live-integration/'+x for x in ('credential-check.js','lifecycle.js','live-profile.js')),
+    *('receiver-integration/'+x for x in ('live-main-504.js','private-bootstrap-504.js','private-incoming.js','private-launch-proxy-504.js','private-owner-permit-504.js','private-producer-runtime.js','private-profile-504.js','private-root-handoff.js','artifact-504.json','manifest-504.json')),
+)
+
+def no_nested_bind_targets(targets):
+    paths=[Path(x) for x in targets]
+    if len(set(paths))!=len(paths) or any(not p.is_absolute() or '..' in p.parts for p in paths):fail('bind targets')
+    if any(a in b.parents for a in paths for b in paths if a!=b):fail('nested bind targets')
+
 
 def material_snapshot(material):
     material=Path(material)
@@ -201,11 +214,12 @@ def mount_map(source,material):
     result={'/work/tests/fixtures/receiver504-actual/parent.js':str(source/'tests/fixtures/receiver504-actual/parent.js'),
             '/work/tests/fixtures/receiver504-bootstrap/vector.json':str(source/'tests/fixtures/receiver504-bootstrap/vector.json'),
             '/work/docs/specification/fixtures/causal-evidence-v1.json':str(source/'docs/specification/fixtures/causal-evidence-v1.json'),
-            '/adapter':str(source/'collectors/nodered'),
             '/data/flows.json':str(source/'collectors/nodered/live-integration/flows.json'),
             '/adapter/live-integration/tree-arm64.json':str(source/'collectors/nodered/error-integration/wire-v2-image-manifest.json'),
             '/adapter/live-integration/tree-x64.json':str(source/'collectors/nodered/error-integration/wire-v2-image-manifest-x64.json')}
+    for name in ADAPTER_FILES:result['/adapter/'+name]=str(source/'collectors/nodered'/name)
     for name in MATERIAL_NAMES:result['/run/apicontour/live/'+name]=str(material/name)
+    no_nested_bind_targets(result)
     return result
 
 def validate(c, cid, token, image, script, source, material):
@@ -225,6 +239,7 @@ def validate(c, cid, token, image, script, source, material):
     if not isinstance(mounts,list): fail('mount count')
     expected=mount_map(source,material)
     binds=[m for m in mounts if m.get('Type')=='bind']
+    no_nested_bind_targets([m.get('Destination','') for m in binds])
     if len(binds)!=len(expected) or any(m.get('RW') is not False or expected.get(m.get('Destination'))!=m.get('Source') for m in binds) or {m.get('Destination') for m in binds}!=set(expected): fail('bind mounts')
     tmp=[m for m in mounts if m.get('Type')=='tmpfs']
     if len(mounts) not in (len(expected),len(expected)+2) or (tmp and (len(tmp)!=2 or {m.get('Destination') for m in tmp}!={'/data','/tmp'})): fail('mount count')

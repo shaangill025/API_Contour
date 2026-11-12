@@ -34,6 +34,18 @@ class Fences(unittest.TestCase):
   self.assertEqual(m.generation(obj,CID,TOKEN,IMAGE,SCRIPT,SOURCE,MATERIAL,frozen),obj['State']['StartedAt'])
   obj['Config']['Cmd']=['/foreign']
   with self.assertRaises(ValueError):m.generation(obj,CID,TOKEN,IMAGE,SCRIPT,SOURCE,MATERIAL,frozen)
+ def test_adapter_mounts_match_manifest_closure_without_nested_readonly_ancestor(self):
+  import json
+  manifest=json.loads((ROOT/'collectors/nodered/receiver-integration/manifest-504.json').read_text())
+  mounts=m.mount_map(SOURCE,MATERIAL)
+  expected=set(manifest['files'])|{'/adapter/receiver-integration/artifact-504.json','/adapter/receiver-integration/manifest-504.json','/adapter/live-integration/tree-arm64.json','/adapter/live-integration/tree-x64.json'}
+  self.assertEqual({p for p in mounts if p.startswith('/adapter/')},expected)
+  for target in manifest['files']:
+   self.assertEqual(mounts[target],str(SOURCE/'collectors/nodered'/target.removeprefix('/adapter/')))
+  m.no_nested_bind_targets(mounts)
+  with self.assertRaises(ValueError):m.no_nested_bind_targets([*mounts,'/adapter'])
+  item=container();item['Mounts'].append({'Type':'bind','Source':'/foreign','Destination':'/adapter','RW':False})
+  with self.assertRaises(ValueError):m.created(item,CID,TOKEN,IMAGE,SCRIPT,SOURCE,MATERIAL)
  def test_material_inventory_and_privacy(self):
   with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
    path=Path(tmp);path.chmod(0o700)
