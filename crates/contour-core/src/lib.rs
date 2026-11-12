@@ -23,6 +23,11 @@ mod causal_grant;
 pub use causal_grant::{
     CausalGrantError, CausalGrantEventKind, CausalGrantKeys, VerifiedCausalGrant,
 };
+mod causal_evidence;
+pub use causal_evidence::{
+    CausalEvidenceBinding, CausalEvidenceObserver, CausalEvidenceReceiver,
+    MAX_CAUSAL_BINDING_BYTES, MAX_CAUSAL_EVIDENCE_BYTES,
+};
 mod causal_event;
 pub use causal_event::{
     CausalEvent, CausalEventBatch, CausalEventKind, LossReason, MAX_CAUSAL_EVENT_BATCH_BYTES,

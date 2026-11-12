@@ -1,0 +1,65 @@
+[
+  {
+    "kind": "binding",
+    "body": {
+      "wire_version": 1,
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174000",
+      "gateway_id": "123e4567-e89b-12d3-a456-426614174000",
+      "gateway_generation": "11111111111111111111111111111111",
+      "collector_id": "123e4567-e89b-12d3-a456-426614174000",
+      "record_id": "123e4567-e89b-12d3-a456-426614174000",
+      "producer_runtime_id": "123e4567-e89b-12d3-a456-426614174000",
+      "producer_session_epoch": "9007199254740993",
+      "producer_attempt_id": "22222222222222222222222222222222",
+      "marker_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "receiver_runtime_id": "123e4567-e89b-12d3-a456-426614174000",
+      "receiver_session_epoch": "18446744073709551615",
+      "delivery_handle": "44444444444444444444444444444444",
+      "retry_of": null
+    },
+    "canonical": "{\"collector_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"delivery_handle\":\"44444444444444444444444444444444\",\"gateway_generation\":\"11111111111111111111111111111111\",\"gateway_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"marker_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"producer_attempt_id\":\"22222222222222222222222222222222\",\"producer_runtime_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"producer_session_epoch\":\"9007199254740993\",\"receiver_runtime_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"receiver_session_epoch\":\"18446744073709551615\",\"record_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"retry_of\":null,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"wire_version\":1}",
+    "sha256": "6de84be0dec07d3dc9506e1f3b94def5c50a042ac19b913074001449f8465b7f"
+  },
+  {
+    "kind": "observer",
+    "body": {
+      "wire_version": 1,
+      "binding": {
+        "wire_version": 1,
+        "tenant_id": "123e4567-e89b-12d3-a456-426614174000",
+        "gateway_id": "123e4567-e89b-12d3-a456-426614174000",
+        "gateway_generation": "11111111111111111111111111111111",
+        "collector_id": "123e4567-e89b-12d3-a456-426614174000",
+        "record_id": "123e4567-e89b-12d3-a456-426614174000",
+        "producer_runtime_id": "123e4567-e89b-12d3-a456-426614174000",
+        "producer_session_epoch": "9007199254740993",
+        "producer_attempt_id": "22222222222222222222222222222222",
+        "marker_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "receiver_runtime_id": "123e4567-e89b-12d3-a456-426614174000",
+        "receiver_session_epoch": "18446744073709551615",
+        "delivery_handle": "44444444444444444444444444444444",
+        "retry_of": null
+      },
+      "batch_id": "123e4567-e89b-12d3-a456-426614174000",
+      "signed_marker": "ac1.fixture.signature"
+    },
+    "canonical": "{\"batch_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"binding\":{\"collector_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"delivery_handle\":\"44444444444444444444444444444444\",\"gateway_generation\":\"11111111111111111111111111111111\",\"gateway_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"marker_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"producer_attempt_id\":\"22222222222222222222222222222222\",\"producer_runtime_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"producer_session_epoch\":\"9007199254740993\",\"receiver_runtime_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"receiver_session_epoch\":\"18446744073709551615\",\"record_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"retry_of\":null,\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"wire_version\":1},\"signed_marker\":\"ac1.fixture.signature\",\"wire_version\":1}",
+    "sha256": "e607cf75815465baa26d8de812ad6e48ec1751a0dfed3e20b9a0766a003846a9"
+  },
+  {
+    "kind": "receiver",
+    "body": {
+      "wire_version": 1,
+      "tenant_id": "123e4567-e89b-12d3-a456-426614174000",
+      "gateway_id": "123e4567-e89b-12d3-a456-426614174000",
+      "gateway_generation": "11111111111111111111111111111111",
+      "delivery_handle": "44444444444444444444444444444444",
+      "receiver_runtime_id": "123e4567-e89b-12d3-a456-426614174000",
+      "receiver_session_epoch": "18446744073709551615",
+      "local_root": "55555555555555555555555555555555",
+      "binding_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "canonical": "{\"binding_digest\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"delivery_handle\":\"44444444444444444444444444444444\",\"gateway_generation\":\"11111111111111111111111111111111\",\"gateway_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"local_root\":\"55555555555555555555555555555555\",\"receiver_runtime_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"receiver_session_epoch\":\"18446744073709551615\",\"tenant_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"wire_version\":1}",
+    "sha256": "46c6225cfb2fd61b6656f0afa83d24ac0c6200d975aa4d10b99b9bdf3b739052"
+  }
+]
