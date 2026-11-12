@@ -17,7 +17,7 @@ class DriverTests(unittest.TestCase):
         emitted = set(re.findall(r'(?:map_err\(\|_\|\s*|Err\()"([A-Za-z ]+)"', source))
         bind_emitted = set(re.findall(r'=> "(bind_[a-z_]+)"', source))
         self.assertEqual(bind_emitted, {stage for stage in DRIVER['PROBE_STAGES']
-                                        if stage.startswith('bind_')})
+                                        if stage.startswith('bind_') and stage not in DRIVER['PROBE_OBSERVATIONS']})
         emitted.update(bind_emitted)
         self.assertTrue(emitted)
         self.assertLessEqual(emitted, DRIVER['PROBE_STAGES'])
@@ -25,6 +25,11 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(classify(b'factory probe: ' + stage.encode('ascii') + b'\n'), stage)
         for unknown in (b'factory probe: private-secret\n', b'factory probe: bind_invalid\nprivate-secret',
                         b'factory probe: bind_database_deadline: secret\n',
+                        b'factory probe: bind_invalid_target_image\nprivate-secret',
+                        b'factory probe: bind_invalid_target_unknown\n',
+                        b'factory probe: bind_invalid_target_image unsafe deadline_reached extra\n',
+                        b'factory probe: bind_invalid_metadata unsafe deadline_reached\n',
+                        b'factory probe: bind_invalid_target_image secret deadline_reached\n',
                         b'factory probe: bind', b'private-secret', b'x' * 10000,
                         b'factory probe: \xff\n', 'factory probe: bind\n'):
             self.assertIsNone(classify(unknown))

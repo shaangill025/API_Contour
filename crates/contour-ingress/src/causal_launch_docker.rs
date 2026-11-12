@@ -722,10 +722,138 @@ use crate::causal_launch_inspect::{
 use crate::causal_launch_process::LocalAttached;
 use std::sync::Arc;
 
+/// Read-only bind progress; it conveys no authority or target data.
+/// ```compile_fail
+/// use contour_ingress::{BindProgress, BindStage};
+/// fn change(p: &BindProgress) { p.set(BindStage::Complete); }
+/// ```
+#[derive(Clone)]
+pub struct BindProgress(Arc<BindProgressState>);
+struct BindProgressState {
+    stage: std::sync::atomic::AtomicU8,
+    process_failure: std::sync::atomic::AtomicU8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BindStage {
+    NotStarted,
+    Preflight,
+    Sources,
+    Seal,
+    MountsBefore,
+    TargetBefore,
+    TargetStart,
+    TargetSourcesBefore,
+    TargetImage,
+    TargetPeer,
+    TargetFirst,
+    TargetNetwork,
+    TargetSecond,
+    TargetActual,
+    TargetSourcesAfter,
+    TargetFinish,
+    Material,
+    Peer,
+    Generation,
+    Database,
+    Session,
+    MountsAfter,
+    TargetAfter,
+    Metadata,
+    UnixStream,
+    LaunchJournal,
+    Complete,
+}
+impl BindProgress {
+    fn new() -> Self {
+        Self(Arc::new(BindProgressState {
+            stage: std::sync::atomic::AtomicU8::new(0),
+            process_failure: std::sync::atomic::AtomicU8::new(0),
+        }))
+    }
+    pub fn stage(&self) -> BindStage {
+        match self.0.stage.load(std::sync::atomic::Ordering::Acquire) {
+            0 => BindStage::NotStarted,
+            1 => BindStage::Preflight,
+            2 => BindStage::Sources,
+            3 => BindStage::Seal,
+            4 => BindStage::MountsBefore,
+            5 => BindStage::TargetBefore,
+            6 => BindStage::TargetStart,
+            7 => BindStage::TargetSourcesBefore,
+            8 => BindStage::TargetImage,
+            9 => BindStage::TargetPeer,
+            10 => BindStage::TargetFirst,
+            11 => BindStage::TargetNetwork,
+            12 => BindStage::TargetSecond,
+            13 => BindStage::TargetActual,
+            14 => BindStage::TargetSourcesAfter,
+            15 => BindStage::TargetFinish,
+            16 => BindStage::Material,
+            17 => BindStage::Peer,
+            18 => BindStage::Generation,
+            19 => BindStage::Database,
+            20 => BindStage::Session,
+            21 => BindStage::MountsAfter,
+            22 => BindStage::TargetAfter,
+            23 => BindStage::Metadata,
+            24 => BindStage::UnixStream,
+            25 => BindStage::LaunchJournal,
+            26 => BindStage::Complete,
+            _ => unreachable!("only internal fixed stages are stored"),
+        }
+    }
+    /// The fixed process error and whether the deadline had been reached when
+    /// that error was observed. The boolean does not establish its cause.
+    pub fn process_failure(&self) -> Option<(ProcessError, bool)> {
+        let value = self
+            .0
+            .process_failure
+            .load(std::sync::atomic::Ordering::Acquire);
+        if value == 0 {
+            return None;
+        }
+        let error = match (value - 1) % 8 {
+            0 => ProcessError::Unsafe,
+            1 => ProcessError::Busy,
+            2 => ProcessError::Existing,
+            3 => ProcessError::Io,
+            4 => ProcessError::Timeout,
+            5 => ProcessError::OutputLimit,
+            6 => ProcessError::Exit,
+            7 => ProcessError::CleanupUnknown,
+            _ => unreachable!(),
+        };
+        Some((error, value > 8))
+    }
+    fn record_process_failure(&self, error: ProcessError, deadline_reached: bool) {
+        let value = match error {
+            ProcessError::Unsafe => 1,
+            ProcessError::Busy => 2,
+            ProcessError::Existing => 3,
+            ProcessError::Io => 4,
+            ProcessError::Timeout => 5,
+            ProcessError::OutputLimit => 6,
+            ProcessError::Exit => 7,
+            ProcessError::CleanupUnknown => 8,
+        } + if deadline_reached { 8 } else { 0 };
+        self.0
+            .process_failure
+            .store(value, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn set(&self, stage: BindStage) {
+        self.0
+            .stage
+            .store(stage as u8, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// An owned attach whose exact container and network were inspected as running.
 /// It still cannot transfer a seed or authorize a producer.
 pub struct InertStarted<'a> {
     created: InertCreated<'a>,
+    progress: BindProgress,
     policy: Arc<DockerPolicy>,
     attached: LocalAttached,
     stream: Option<tokio::net::UnixStream>,
@@ -845,6 +973,7 @@ impl<'a> InertCreated<'a> {
         let started_at = started_at.to_owned();
         Ok(InertStarted {
             created: self,
+            progress: BindProgress::new(),
             policy,
             attached,
             stream: Some(stream),
@@ -856,6 +985,10 @@ impl<'a> InertCreated<'a> {
 }
 
 impl InertStarted<'_> {
+    /// Read-only, cloneable progress for this bind attempt.
+    pub fn bind_progress(&self) -> BindProgress {
+        self.progress.clone()
+    }
     /// Observe cleanup of the owned local attach process group after it is dropped.
     /// This does not report the state of the remote container or business child.
     pub fn local_cleanup(&self) -> crate::LocalCleanup {
@@ -901,28 +1034,51 @@ impl RunningTarget {
         deployment: &crate::InspectedDeployment,
         deadline: Instant,
     ) -> Result<(), LaunchObserveError> {
+        self.revalidate_observed(deployment, deadline, None).await
+    }
+    pub(crate) async fn revalidate_observed(
+        &self,
+        deployment: &crate::InspectedDeployment,
+        deadline: Instant,
+        progress: Option<&BindProgress>,
+    ) -> Result<(), LaunchObserveError> {
+        let mark = |stage| {
+            if let Some(p) = progress {
+                p.set(stage);
+            }
+        };
         let deadline = deadline.min(self.setup_deadline);
+        let observe_error = |error| {
+            if let Some(p) = progress {
+                p.record_process_failure(error, Instant::now() >= deadline);
+            }
+            LaunchObserveError::Process(error)
+        };
+        mark(BindStage::TargetStart);
         if Instant::now() >= deadline || self.attached.cleanup().result().is_some() {
             return Err(LaunchObserveError::MutationUnknown);
         }
+        mark(BindStage::TargetSourcesBefore);
         self.sources
             .revalidate()
             .map_err(|_| LaunchObserveError::Invalid)?;
+        mark(BindStage::TargetImage);
         let image = self
             .policy
             .observe(DockerInspect::Image, deadline.into())
             .await
-            .map_err(LaunchObserveError::Process)?;
+            .map_err(observe_error)?;
         let image = verified_image(image, self.image.id)?;
         if image.policy != self.image.policy || image.labels != self.image.labels {
             return Err(LaunchObserveError::Invalid);
         }
         for peer in &self.network.members {
+            mark(BindStage::TargetPeer);
             let observed = self
                 .policy
                 .observe(DockerInspect::Container(peer.id), deadline.into())
                 .await
-                .map_err(LaunchObserveError::Process)?;
+                .map_err(observe_error)?;
             peer_metadata(
                 observed.bytes(),
                 peer.id,
@@ -931,21 +1087,24 @@ impl RunningTarget {
                 peer.owner,
             )?;
         }
+        mark(BindStage::TargetFirst);
         let first = self
             .policy
             .observe(DockerInspect::Container(self.cid), deadline.into())
             .await
-            .map_err(LaunchObserveError::Process)?;
+            .map_err(observe_error)?;
+        mark(BindStage::TargetNetwork);
         let network = self
             .policy
             .observe(DockerInspect::Network(self.network.id), deadline.into())
             .await
-            .map_err(LaunchObserveError::Process)?;
+            .map_err(observe_error)?;
+        mark(BindStage::TargetSecond);
         let second = self
             .policy
             .observe(DockerInspect::Container(self.cid), deadline.into())
             .await
-            .map_err(LaunchObserveError::Process)?;
+            .map_err(observe_error)?;
         let expected = ActualExpected {
             cid: self.cid,
             image: self.image.id,
@@ -959,6 +1118,7 @@ impl RunningTarget {
             daemon: self.policy.daemon_endpoint(),
             policy_digest: self.policy.policy_digest(),
         };
+        mark(BindStage::TargetActual);
         for observation in [&first, &second] {
             let actual = validate_actual_container(
                 observation,
@@ -974,9 +1134,11 @@ impl RunningTarget {
                 return Err(LaunchObserveError::Invalid);
             }
         }
+        mark(BindStage::TargetSourcesAfter);
         self.sources
             .revalidate()
             .map_err(|_| LaunchObserveError::Invalid)?;
+        mark(BindStage::TargetFinish);
         if Instant::now() >= deadline || self.attached.cleanup().result().is_some() {
             return Err(LaunchObserveError::MutationUnknown);
         }
@@ -1018,10 +1180,12 @@ impl<'a> InertStarted<'a> {
         binder: &mut CausalMarkerBinder,
         config: LaunchConfig,
     ) -> Result<BoundLauncher<'a>, BoundLaunchError> {
+        self.progress.set(BindStage::Preflight);
         self.created
             .prelaunch
             .revalidate()
             .map_err(BoundLaunchError::Database)?;
+        self.progress.set(BindStage::Sources);
         self.created
             .sources
             .revalidate()
@@ -1043,6 +1207,7 @@ impl<'a> InertStarted<'a> {
         {
             return Err(BoundLaunchError::Invalid);
         }
+        self.progress.set(BindStage::Seal);
         let actual = self.actual.take().ok_or(BoundLaunchError::Invalid)?;
         let observation = actual.normalized().map_err(|_| BoundLaunchError::Invalid)?;
         let (deployment, snapshots) = duplicate
@@ -1087,6 +1252,7 @@ impl<'a> InertStarted<'a> {
             permit_stream,
             attach,
             config,
+            progress: self.progress,
         });
         let transfer = inputs
             .claim(owner, issuer, binder, &peer, grants, policies)
@@ -1367,6 +1533,36 @@ mod relay_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_records_only_fixed_process_failure_and_deadline_observation() {
+        let progress = super::BindProgress::new();
+        assert_eq!(progress.process_failure(), None);
+        for error in [
+            super::ProcessError::Unsafe,
+            super::ProcessError::Busy,
+            super::ProcessError::Existing,
+            super::ProcessError::Io,
+            super::ProcessError::Timeout,
+            super::ProcessError::OutputLimit,
+            super::ProcessError::Exit,
+            super::ProcessError::CleanupUnknown,
+        ] {
+            for reached in [false, true] {
+                progress.record_process_failure(error, reached);
+                assert_eq!(progress.clone().process_failure(), Some((error, reached)));
+            }
+        }
+    }
+    #[test]
+    fn progress_clones_observe_only_fixed_internal_updates() {
+        let progress = super::BindProgress::new();
+        let reader = progress.clone();
+        assert_eq!(reader.stage(), super::BindStage::NotStarted);
+        progress.set(super::BindStage::TargetNetwork);
+        assert_eq!(reader.stage(), super::BindStage::TargetNetwork);
+        progress.set(super::BindStage::Metadata);
+        assert_eq!(reader.stage(), super::BindStage::Metadata);
+    }
     use super::*;
     const PIN: &str =
         "nodered/node-red@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963";

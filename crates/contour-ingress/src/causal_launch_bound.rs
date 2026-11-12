@@ -43,6 +43,7 @@ pub struct BoundLaunchInputs {
     target: crate::causal_launch_docker::RunningTarget,
     observation: Vec<u8>,
     setup_deadline: Instant,
+    progress: crate::BindProgress,
     snapshots: [FileSnapshot; 7],
     permit_stream: StdStream,
     attach: UnixStream,
@@ -129,6 +130,7 @@ pub(crate) struct BoundInputParts {
     pub(crate) target: crate::causal_launch_docker::RunningTarget,
     pub(crate) observation: Vec<u8>,
     pub(crate) setup_deadline: Instant,
+    pub(crate) progress: crate::BindProgress,
     pub(crate) snapshots: [FileSnapshot; 7],
     pub(crate) permit_stream: StdStream,
     pub(crate) attach: UnixStream,
@@ -141,6 +143,7 @@ impl BoundLaunchInputs {
             target: parts.target,
             observation: parts.observation,
             setup_deadline: parts.setup_deadline,
+            progress: parts.progress,
             snapshots: parts.snapshots,
             permit_stream: parts.permit_stream,
             attach: parts.attach,
@@ -187,14 +190,17 @@ impl BoundLaunchInputs {
             .map_err(|_| BoundLaunchError::Invalid)?;
         let seed = Secret(random()?);
         let slot = random()?;
+        self.progress.set(crate::BindStage::MountsBefore);
         self.validate_mounts()?;
+        self.progress.set(crate::BindStage::TargetBefore);
         self.target
-            .revalidate(&self.deployment, setup_deadline)
+            .revalidate_observed(&self.deployment, setup_deadline, Some(&self.progress))
             .await
             .map_err(|_| BoundLaunchError::Invalid)?;
         if Instant::now() >= setup_deadline {
             return Err(BoundLaunchError::Expired);
         }
+        self.progress.set(crate::BindStage::Material);
         let material = check_material(
             &seed.0,
             self.snapshots[4].as_bytes(),
@@ -209,6 +215,7 @@ impl BoundLaunchInputs {
         if Instant::now() >= setup_deadline {
             return Err(BoundLaunchError::Expired);
         }
+        self.progress.set(crate::BindStage::Peer);
         let verified_peer = validate_export_peer(&material, peer)?;
         let record = self
             .deployment
@@ -222,6 +229,7 @@ impl BoundLaunchInputs {
             return Err(BoundLaunchError::Expired);
         }
         let deadline = (Instant::now() + STARTUP_BUDGET).min(setup_deadline);
+        self.progress.set(crate::BindStage::Generation);
         let generation = begin_generation(&mut owner, &verified_peer)?;
         if Instant::now() >= deadline {
             return Err(BoundLaunchError::Expired);
@@ -246,7 +254,9 @@ impl BoundLaunchInputs {
             grant: grants,
             policy: policies,
         };
+        self.progress.set(crate::BindStage::Database);
         let session = checked_bound_refresh(&mut attempt, &mut window).await?;
+        self.progress.set(crate::BindStage::Session);
         let (tenant, runtime, nonce, epoch, manifest) = {
             let v = session
                 .wire_profile_503()
@@ -274,12 +284,19 @@ impl BoundLaunchInputs {
             }
         }
         fresh(&session, window.remaining_deadline())?;
+        self.progress.set(crate::BindStage::MountsAfter);
         self.validate_mounts()?;
+        self.progress.set(crate::BindStage::TargetAfter);
         self.target
-            .revalidate(&self.deployment, window.remaining_deadline())
+            .revalidate_observed(
+                &self.deployment,
+                window.remaining_deadline(),
+                Some(&self.progress),
+            )
             .await
             .map_err(|_| BoundLaunchError::Invalid)?;
         fresh(&session, window.remaining_deadline())?;
+        self.progress.set(crate::BindStage::Metadata);
         let ca = hex(&material.ca_sha256());
         let export = hex(&material.export_leaf());
         let product = hex(&material.product_leaf());
@@ -311,9 +328,11 @@ impl BoundLaunchInputs {
         })
         .map_err(|_| BoundLaunchError::Invalid)?;
         fresh(&session, window.remaining_deadline())?;
+        self.progress.set(crate::BindStage::UnixStream);
         let permit_stream =
             UnixStream::from_std(self.permit_stream).map_err(|_| BoundLaunchError::Invalid)?;
         fresh(&session, window.remaining_deadline())?;
+        self.progress.set(crate::BindStage::LaunchJournal);
         owner.consume_bound_launch(&BoundLaunchRecord::checked(
             slot, launcher, identity, record,
         ))?;
@@ -335,6 +354,7 @@ impl BoundLaunchInputs {
             selected,
         };
         let permit = CausalPermitOwner::from_bound(proof);
+        self.progress.set(crate::BindStage::Complete);
         Ok(BoundTransfer {
             deployment: self.deployment,
             target: self.target,

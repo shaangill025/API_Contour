@@ -25,8 +25,8 @@ mod service;
 pub use causal_launch_bound::{BoundLaunchError, BoundLaunchInputs, BoundTransfer};
 #[cfg(unix)]
 pub use causal_launch_docker::{
-    BoundLauncher, InertCreated, InertStarted, LaunchConfig, LaunchObserveError, OwnerLabel,
-    Prelaunch503, VerifiedImage, VerifiedNetwork, VerifiedPeer,
+    BindProgress, BindStage, BoundLauncher, InertCreated, InertStarted, LaunchConfig,
+    LaunchObserveError, OwnerLabel, Prelaunch503, VerifiedImage, VerifiedNetwork, VerifiedPeer,
 };
 #[cfg(unix)]
 pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};

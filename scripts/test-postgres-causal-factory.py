@@ -46,8 +46,47 @@ PROBE_STAGES = frozenset({
     'bind_database_corrupt', 'bind_database_logical_quota', 'bind_database_history_limit',
     'bind_database_busy', 'bind_database_database', 'bind_database_deadline',
     'bind_database_outcome_unknown',
+    'bind_invalid_not_started',
+    'bind_invalid_preflight',
+    'bind_invalid_sources',
+    'bind_invalid_seal',
+    'bind_invalid_mounts_before',
+    'bind_invalid_target_before',
+    'bind_invalid_target_start',
+    'bind_invalid_target_sources_before',
+    'bind_invalid_target_image',
+    'bind_invalid_target_peer',
+    'bind_invalid_target_first',
+    'bind_invalid_target_network',
+    'bind_invalid_target_second',
+    'bind_invalid_target_actual',
+    'bind_invalid_target_sources_after',
+    'bind_invalid_target_finish',
+    'bind_invalid_material',
+    'bind_invalid_peer',
+    'bind_invalid_generation',
+    'bind_invalid_database',
+    'bind_invalid_session',
+    'bind_invalid_mounts_after',
+    'bind_invalid_target_after',
+    'bind_invalid_metadata',
+    'bind_invalid_unix_stream',
+    'bind_invalid_launch_journal',
+    'bind_invalid_complete',
 })
 
+
+# Closed products of fixed observation stage, process class, and deadline state.
+PROBE_OBSERVATIONS = frozenset(
+    f'{stage} {error} {deadline}'
+    for stage in ('bind_invalid_target_image', 'bind_invalid_target_peer',
+                  'bind_invalid_target_first', 'bind_invalid_target_network',
+                  'bind_invalid_target_second')
+    for error in ('unsafe', 'busy', 'existing', 'io', 'timeout', 'output_limit',
+                  'exit', 'cleanup_unknown')
+    for deadline in ('deadline_reached', 'deadline_not_reached')
+)
+PROBE_STAGES = PROBE_STAGES | PROBE_OBSERVATIONS
 
 def probe_stage(stderr):
     # Only a complete, exact static probe message is retained. In particular,

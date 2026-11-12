@@ -2,9 +2,10 @@
 //! READY means the checked launcher observed the correlated startup event; it
 //! does not prove exporter admission, causal wire propagation, or graph output.
 use contour_core::{CausalGrantKeys, PolicyKeys};
+use contour_ingress::ProcessError;
 use contour_ingress::{
-    BoundLaunchError, CandidateSources, CausalIssueOwner, CausalJournalError, DockerPolicy,
-    LaunchConfig, OwnerLabel, Prelaunch503,
+    BindStage, BoundLaunchError, CandidateSources, CausalIssueOwner, CausalJournalError,
+    DockerPolicy, LaunchConfig, OwnerLabel, Prelaunch503,
 };
 use contour_postgres::{
     CausalBinding, CausalError, CausalIssue, CausalIssuer, CausalMarkerBinder, DatabaseSettings,
@@ -123,6 +124,37 @@ fn bind_error(error: BoundLaunchError) -> &'static str {
         },
     }
 }
+fn bind_invalid_stage(stage: BindStage) -> &'static str {
+    match stage {
+        BindStage::NotStarted => "bind_invalid_not_started",
+        BindStage::Preflight => "bind_invalid_preflight",
+        BindStage::Sources => "bind_invalid_sources",
+        BindStage::Seal => "bind_invalid_seal",
+        BindStage::MountsBefore => "bind_invalid_mounts_before",
+        BindStage::TargetBefore => "bind_invalid_target_before",
+        BindStage::TargetStart => "bind_invalid_target_start",
+        BindStage::TargetSourcesBefore => "bind_invalid_target_sources_before",
+        BindStage::TargetImage => "bind_invalid_target_image",
+        BindStage::TargetPeer => "bind_invalid_target_peer",
+        BindStage::TargetFirst => "bind_invalid_target_first",
+        BindStage::TargetNetwork => "bind_invalid_target_network",
+        BindStage::TargetSecond => "bind_invalid_target_second",
+        BindStage::TargetActual => "bind_invalid_target_actual",
+        BindStage::TargetSourcesAfter => "bind_invalid_target_sources_after",
+        BindStage::TargetFinish => "bind_invalid_target_finish",
+        BindStage::Material => "bind_invalid_material",
+        BindStage::Peer => "bind_invalid_peer",
+        BindStage::Generation => "bind_invalid_generation",
+        BindStage::Database => "bind_invalid_database",
+        BindStage::Session => "bind_invalid_session",
+        BindStage::MountsAfter => "bind_invalid_mounts_after",
+        BindStage::TargetAfter => "bind_invalid_target_after",
+        BindStage::Metadata => "bind_invalid_metadata",
+        BindStage::UnixStream => "bind_invalid_unix_stream",
+        BindStage::LaunchJournal => "bind_invalid_launch_journal",
+        BindStage::Complete => "bind_invalid_complete",
+    }
+}
 async fn wait_cleanup(
     result: impl Fn() -> Option<bool>,
     deadline: tokio::time::Instant,
@@ -138,16 +170,49 @@ async fn wait_cleanup(
         }
     }
 }
+enum ProbeError {
+    Static(&'static str),
+    BindProcess(BindStage, ProcessError, bool),
+}
+impl From<&'static str> for ProbeError {
+    fn from(value: &'static str) -> Self {
+        Self::Static(value)
+    }
+}
+fn process_class(error: ProcessError) -> &'static str {
+    match error {
+        ProcessError::Unsafe => "unsafe",
+        ProcessError::Busy => "busy",
+        ProcessError::Existing => "existing",
+        ProcessError::Io => "io",
+        ProcessError::Timeout => "timeout",
+        ProcessError::OutputLimit => "output_limit",
+        ProcessError::Exit => "exit",
+        ProcessError::CleanupUnknown => "cleanup_unknown",
+    }
+}
 fn main() {
     if let Err(error) = run() {
-        eprintln!("factory probe: {error}");
+        match error {
+            ProbeError::Static(stage) => eprintln!("factory probe: {stage}"),
+            ProbeError::BindProcess(stage, error, reached) => eprintln!(
+                "factory probe: {} {} {}",
+                bind_invalid_stage(stage),
+                process_class(error),
+                if reached {
+                    "deadline_reached"
+                } else {
+                    "deadline_not_reached"
+                }
+            ),
+        }
         std::process::exit(1);
     }
 }
-fn run() -> Result<(), &'static str> {
+fn run() -> Result<(), ProbeError> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() != 1 {
-        return Err("arguments");
+        return Err("arguments".into());
     }
     let input: Inputs = serde_json::from_slice(&read(Path::new(&args[0]))?).map_err(|_| "input")?;
     let password = env::var("CONTOUR_CAUSAL_ISSUER_PASSWORD").map_err(|_| "password")?;
@@ -249,6 +314,7 @@ fn run() -> Result<(), &'static str> {
                 .await
                 .map_err(|_| "create")?;
             let started = created.start(docker).await.map_err(|_| "start")?;
+            let progress = started.bind_progress();
             let bound = started
                 .bind(
                     &mut issuer,
@@ -263,7 +329,15 @@ fn run() -> Result<(), &'static str> {
                     },
                 )
                 .await
-                .map_err(bind_error)?;
+                .map_err(|error| match error {
+                    BoundLaunchError::Invalid => match progress.process_failure() {
+                        Some((error, reached)) => {
+                            ProbeError::BindProcess(progress.stage(), error, reached)
+                        }
+                        None => ProbeError::Static(bind_invalid_stage(progress.stage())),
+                    },
+                    other => ProbeError::Static(bind_error(other)),
+                })?;
             let cleanup = bound.local_cleanup();
             let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
             let mut work = Box::pin(bound.run(&mut issuer, &mut binder, ready_tx));
@@ -316,6 +390,58 @@ fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_classes_are_fixed_and_distinct() {
+        let classes = [
+            (ProcessError::Unsafe, "unsafe"),
+            (ProcessError::Busy, "busy"),
+            (ProcessError::Existing, "existing"),
+            (ProcessError::Io, "io"),
+            (ProcessError::Timeout, "timeout"),
+            (ProcessError::OutputLimit, "output_limit"),
+            (ProcessError::Exit, "exit"),
+            (ProcessError::CleanupUnknown, "cleanup_unknown"),
+        ];
+        for (error, expected) in classes {
+            assert_eq!(process_class(error), expected);
+        }
+    }
+    #[test]
+    fn bind_stage_projection_is_fixed_and_distinct() {
+        let stages = [
+            BindStage::NotStarted,
+            BindStage::Preflight,
+            BindStage::Sources,
+            BindStage::Seal,
+            BindStage::MountsBefore,
+            BindStage::TargetBefore,
+            BindStage::TargetStart,
+            BindStage::TargetSourcesBefore,
+            BindStage::TargetImage,
+            BindStage::TargetPeer,
+            BindStage::TargetFirst,
+            BindStage::TargetNetwork,
+            BindStage::TargetSecond,
+            BindStage::TargetActual,
+            BindStage::TargetSourcesAfter,
+            BindStage::TargetFinish,
+            BindStage::Material,
+            BindStage::Peer,
+            BindStage::Generation,
+            BindStage::Database,
+            BindStage::Session,
+            BindStage::MountsAfter,
+            BindStage::TargetAfter,
+            BindStage::Metadata,
+            BindStage::UnixStream,
+            BindStage::LaunchJournal,
+            BindStage::Complete,
+        ];
+        let outputs: std::collections::BTreeSet<_> =
+            stages.into_iter().map(bind_invalid_stage).collect();
+        assert_eq!(outputs.len(), stages.len());
+        assert!(outputs.iter().all(|s| s.starts_with("bind_invalid_")));
+    }
     #[test]
     fn bind_errors_have_fixed_distinct_classes() {
         let cases = [
