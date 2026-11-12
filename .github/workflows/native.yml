@@ -90,6 +90,13 @@ jobs:
           node tests/fixtures/causal-receiver-nodered/test_diagnostics.js
           node tests/fixtures/receiver504-bootstrap/test.js
           node tests/fixtures/receiver504-permit/test.js
+          node tests/fixtures/receiver504-profile/test.js
+          node tests/fixtures/receiver504-startup/entrypoint.js
+          node tests/fixtures/receiver504-startup/composition.js
+          node tests/fixtures/receiver504-startup/outbox.js
+          node tests/fixtures/receiver504-startup/proxy.js
+          node tests/fixtures/receiver504-startup/loader.js
+          node tests/fixtures/receiver504-startup/profile.js
       - name: Test fresh-session PostgreSQL fixture transport
         run: python3 -B -m unittest discover -s tests/fixtures/psql-transport -p test_transport.py
       - name: Test PostgreSQL TLS, transport failures and authority validation
