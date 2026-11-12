@@ -25,11 +25,20 @@ async function stalled(closeEvent){
  if(closeEvent)socket.emit('close');else timers.find(t=>t.ms===1000).fn();
  await result;assert.equal(spawned,false);
 }
+function diagnostic(){
+ const section=source.slice(source.indexOf('const STAGES='),source.indexOf('function readPrivate()'));
+ const api=vm.runInNewContext(section+'\n({diag,diagnostic})',{Set,Number,Math});
+ api.diag.stage='metadata';api.diag.hello=true;api.diag.spawned=true;api.diag.refresh=123;api.diag.proxy='nonzero';
+ assert.equal(api.diagnostic(),'FAIL phase=metadata hello=1 spawned=1 ready=0 refresh=16 proxy=nonzero');
+ api.diag.failure='private-path-secret';api.diag.stage='unknown-secret';api.diag.proxy='private-error';api.diag.refresh=Infinity;api.diag.hello='private';
+ const value=api.diagnostic();assert.equal(value,'FAIL phase=input hello=0 spawned=1 ready=0 refresh=0 proxy=other');assert(!value.includes('private'));
+ api.diag.failure='request';api.diag.stage='cleanup';assert(api.diagnostic().includes('phase=request'));
+}
 async function tail(failure){
- const start=source.lastIndexOf(' }finally{\n  clearTimeout(timeout)');assert(start>0);const tail=source.slice(start);
- const labels=[];const context={Buffer,Error,Promise,setTimeout,clearTimeout,process:{exit(){throw Error('exit');},exitCode:0},console:{log:x=>labels.push(x),error:x=>labels.push(x)},stopChild:async()=>{if(failure)throw Error('failed');},shutdown:async()=>{},setImmediate};
+ const start=source.lastIndexOf(' }catch(error){diag.failure=diag.stage;throw error;}finally{\n  clearTimeout(timeout)');assert(start>0);const tail=source.slice(start);
+ const labels=[];const context={Buffer,Error,Promise,setTimeout,clearTimeout,process:{exit(){throw Error('exit');},exitCode:0},console:{log:x=>labels.push(x),error:x=>labels.push(x)},stopChild:async()=>{if(failure)throw Error('failed');},shutdown:async()=>{},setImmediate,diag:{stage:'complete'},diagnostic:()=> 'FAIL phase=cleanup'};
  const program='(async()=>{let done=true,timeout,cleanupTimer,pending=Buffer.alloc(0),held,privateInput,child,proxy,backend,ingress;try{'+tail;
  vm.runInNewContext(program,context);await new Promise(resolve=>setImmediate(resolve));
  assert.equal(labels.filter(x=>x.startsWith('PASS')).length,failure?0:1);if(failure)assert.equal(context.process.exitCode,1);
 }
-(async()=>{await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
+(async()=>{diagnostic();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
