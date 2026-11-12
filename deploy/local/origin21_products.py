@@ -36,6 +36,9 @@ def _command(args,timeout=30,*,token=None,app_image=None,capture_network=None,ed
         if not re.fullmatch('[0-9a-f]{32}',edge_token): raise ValueError('invalid edge token')
         env['ORIGIN21_EDGE_TOKEN']=edge_token
     if not args or args[0]!='docker': raise ValueError('unsupported product command')
+    from deploy.local import docker_metadata
+    routed=docker_metadata.dispatch(args,timeout,env,origin21_transport._run)
+    if routed is not None: return routed
     binary=shutil.which('docker')
     if binary is None: raise RuntimeError('local Docker CLI unavailable')
     return origin21_transport._run([binary,*args[1:]],'',deadline=timeout,env=env).encode('utf-8')

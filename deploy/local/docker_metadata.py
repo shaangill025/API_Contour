@@ -1,4 +1,4 @@
-"""Private, bounded, fresh Docker metadata reads; not integrated into dispatch.
+"""Private, bounded, fresh Docker metadata reads for opt-in qualification dispatch.
 
 This transport returns observations only, never authority. Its use requires
 independent CLI equality checks and current-context/source binding.
@@ -236,32 +236,40 @@ class Session:
         self.tool = self.endpoint = self.directory = None
         self._guard = threading.Lock(); self._cancel = threading.Event()
 
-    def _context(self):
+    def _context(self, deadline=None):
+        limit = min(self.deadline,deadline) if deadline is not None and self.deadline is not None else (deadline or self.deadline)
+        if limit is not None and time.monotonic() >= limit: raise TimeoutError()
         if _tool(self.docker) != self.tool or _socket(self.socket) != self.endpoint or _config(self.config) != self.directory: _fail()
-        if self.deadline is not None and time.monotonic() >= self.deadline: raise TimeoutError()
+        if limit is not None and time.monotonic() >= limit: raise TimeoutError()
         if self.process is not None and self.process.poll() is not None: _fail()
 
     def __enter__(self):
+        return self.start()
+
+    def start(self, deadline=None):
         if not self._guard.acquire(blocking=False):
             self._cancel.set()
             raise MetadataError('metadata session failed') from None
         try:
             if self._cancel.is_set() or self.active or self.process is not None or self.deadline is not None: _fail()
             self.deadline = time.monotonic()+SESSION_SECONDS
+            limit = min(self.deadline, deadline) if deadline is not None else self.deadline
+            if time.monotonic() >= limit: raise TimeoutError()
             self.tool = _tool(self.docker,True); self.endpoint = _socket(self.socket); self.directory = _config(self.config)
             env = {'PATH':'/usr/bin:/bin','DOCKER_CONFIG':self.config}
             if 'HOME' in os.environ: env['HOME'] = os.environ['HOME']
             prefix = [self.docker,'--config',self.config,'--host','unix://'+self.socket]
-            version = _version(prefix+['version','--format','{{json .}}'],env,min(self.deadline,time.monotonic()+OP_SECONDS))
+            if time.monotonic() >= limit: raise TimeoutError()
+            version = _version(prefix+['version','--format','{{json .}}'],env,min(limit,time.monotonic()+OP_SECONDS))
             if not isinstance(version,dict) or not isinstance(version.get('Client'),dict) or not isinstance(version.get('Server'),dict): _fail()
             if version['Client'].get('ApiVersion') != API or version['Server'].get('ApiVersion') != API: _fail()
-            self._context()
+            self._context(limit)
             if self._cancel.is_set(): _fail()
             self.process = subprocess.Popen(prefix+['system','dial-stdio'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL,env=env,close_fds=True,bufsize=0)
-            server = _request(self.process,'/version',min(self.deadline,time.monotonic()+OP_SECONDS))
+            server = _request(self.process,'/version',min(limit,time.monotonic()+OP_SECONDS))
             if not isinstance(server,dict) or server.get('ApiVersion') != API or self._cancel.is_set(): _fail()
-            self._context(); self.active = True
+            self._context(limit); self.active = True
             return self
         except BaseException as error:
             self._close()
@@ -270,7 +278,7 @@ class Session:
         finally:
             self._guard.release()
 
-    def read(self,args):
+    def read(self,args,deadline=None):
         route = _route(args)
         if route is None: return None
         if not self._guard.acquire(blocking=False):
@@ -278,11 +286,12 @@ class Session:
             raise MetadataError('metadata session failed') from None
         try:
             if self._cancel.is_set() or not self.active or self.calls >= MAX_CALLS: _fail()
-            self._context(); self.calls += 1
-            item = _request(self.process,route,min(self.deadline,time.monotonic()+OP_SECONDS))
+            limit = min(self.deadline,deadline) if deadline is not None else self.deadline
+            self._context(limit); self.calls += 1
+            item = _request(self.process,route,min(limit,time.monotonic()+OP_SECONDS))
             if self._cancel.is_set() or not isinstance(item,dict): _fail()
-            self._context()
-            if self._cancel.is_set(): _fail()
+            self._context(limit)
+            if self._cancel.is_set() or time.monotonic() >= limit: _fail()
             return [item]
         except BaseException as error:
             self._close()
@@ -313,3 +322,112 @@ class Session:
         finally:
             self._guard.release()
         return False
+
+
+# Qualification-only dispatch scope. Each participating thread owns a separate
+# proxy; sharing one response stream across threads is prohibited.
+import contextlib
+import contextvars
+
+_ACTIVE = contextvars.ContextVar('apicontour_fresh_metadata', default=None)
+
+
+class _Pool:
+    def __init__(self, proof, config):
+        self.proof = proof; self.config = config; self.sessions = {}
+        self.lock = threading.Lock(); self.closed = False
+
+    def _session(self,timeout,deadline):
+        current = threading.current_thread()
+        remaining = deadline-time.monotonic()
+        if remaining <= 0 or not self.lock.acquire(timeout=remaining): raise TimeoutError('metadata deadline')
+        try:
+            if self.closed: _fail()
+            if time.monotonic() >= deadline: raise TimeoutError('metadata deadline')
+            session = self.sessions.get(current)
+            if session is not None and (session.calls >= MAX_CALLS-1 or time.monotonic()+max(2*OP_SECONDS+2,timeout+2) >= session.deadline):
+                session.__exit__(None,None,None); del self.sessions[current]; session = None
+                if time.monotonic() >= deadline: raise TimeoutError('metadata deadline')
+            if session is None:
+                session = Session(docker=DOCKER,sha256=DOCKER_SHA256,socket=SOCKET,config=str(self.config))
+                session.start(deadline); self.sessions[current] = session
+            if time.monotonic() >= deadline:
+                session.__exit__(None,None,None); del self.sessions[current]
+                raise TimeoutError('metadata deadline')
+            return session
+        finally: self.lock.release()
+
+    def command(self,args,timeout,env,runner,deadline=None):
+        if deadline is None: deadline = time.monotonic()+timeout
+        if time.monotonic() >= deadline: raise TimeoutError('metadata deadline')
+        session = self._session(timeout,deadline)
+        route = _route(args)
+        if route is not None:
+            value = session.read(args,deadline=deadline)
+            encoded = json.dumps(value,separators=(',',':'),allow_nan=False).encode('utf-8')
+            if time.monotonic() >= deadline: raise TimeoutError('metadata deadline')
+            return encoded
+        if not session._guard.acquire(blocking=False):
+            session._cancel.set(); _fail()
+        try:
+            if session._cancel.is_set() or not session.active: _fail()
+            session._context(deadline)
+            try:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0: raise TimeoutError('metadata deadline')
+                result = runner([DOCKER,'--config',str(self.config),'--host','unix://'+SOCKET,*args[1:]],'',deadline=remaining,env=env)
+            finally:
+                session._context(deadline)
+            if session._cancel.is_set() or time.monotonic() >= deadline: _fail()
+            encoded = result.encode('utf-8')
+            if session._cancel.is_set() or time.monotonic() >= deadline: _fail()
+            return encoded
+        finally:
+            session._guard.release()
+            if self.closed and session.active: session.__exit__(None,None,None)
+
+    def close(self):
+        with self.lock:
+            self.closed = True; sessions = list(self.sessions.values()); self.sessions.clear()
+        failures = []
+        for session in sessions:
+            try: session.__exit__(None,None,None)
+            except BaseException as error: failures.append(error)
+        if failures: raise BaseExceptionGroup('metadata pool cleanup failed',failures)
+
+
+def dispatch(args,timeout,env,runner):
+    """Return None when no private scope is bound; never retry a failed read."""
+    started = time.monotonic()
+    pool = _ACTIVE.get()
+    return None if pool is None else pool.command(args,timeout,env,runner,started+timeout)
+
+
+@contextlib.contextmanager
+def qualification_scope(proof):
+    from deploy.local import origin21_managed_qualification as qualification
+    if type(proof) is not qualification.OwnedManagedQualification or _ACTIVE.get() is not None: _fail()
+    proof.verify()
+    config = proof.folder/'docker-metadata-config'
+    os.mkdir(config,0o700)
+    pool = _Pool(proof,config); token = None; error = None
+    try:
+        proof.verify(); _config(str(config))
+        token = _ACTIVE.set(pool)
+        yield
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        if token is not None: _ACTIVE.reset(token)
+        failures = []
+        try: pool.close()
+        except BaseException as exc: failures.append(exc)
+        if not failures:
+            try:
+                proof.verify(); _config(str(config)); os.rmdir(config)
+            except BaseException as exc: failures.append(exc)
+        if failures:
+            if error is not None: raise BaseExceptionGroup('metadata scope and cleanup failed',[error,*failures]) from None
+            if len(failures) == 1: raise failures[0]
+            raise BaseExceptionGroup('metadata scope cleanup failed',failures)
