@@ -35,7 +35,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -84,7 +84,7 @@ def failure_lines(error,phase):
 
 
 def _source_guard():
-    required={SOURCE,M5_HELPER,'deploy/local/docker_metadata.py','deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
+    required={SOURCE,M5_HELPER,'deploy/local/docker_metadata.py','deploy/local/origin21_readiness_profile.py','deploy/local/origin21_managed_qualification.py','deploy/local/origin21_managed_qualification_cleanup.py','deploy/local/origin21_managed_init.py','deploy/local/origin21_managed_cleanup.py','tests/fixtures/managed-origin-qualification/destination.js','tests/fixtures/managed-origin-qualification/client.js','tests/fixtures/managed-origin-qualification/control.js','tests/fixtures/managed-origin-qualification/publisher.js'}
     if not required.issubset(set(origin21_state.MANAGED_SOURCE_FILES)): raise RuntimeError('qualification source closure incomplete')
     return origin21_state._source_identity(context=profiles.MANAGED)
 
@@ -542,9 +542,10 @@ def main(argv):
     """Run using an exact clean worktree and its already verified build receipt."""
     from deploy.local import origin21_managed_qualification as qualification,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
     global _PHASE
-    if len(argv)==4: fresh_metadata=False
-    elif len(argv)==5 and argv[-1]=='--fresh-metadata': fresh_metadata=True
-    else: raise ValueError('build evidence required')
+    if len(argv)<4: raise ValueError('build evidence required')
+    flags=argv[4:]
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness') for flag in flags): raise ValueError('invalid qualification flags')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags
     image,head,receipt,digest=argv[:4]
     _set_phase('source-check')
     source=_source_guard()
@@ -558,6 +559,18 @@ def main(argv):
             cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
             _set_phase('transport')
             transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
+            if profile_readiness:
+                from deploy.local import origin21_readiness_profile,origin21_managed_cleanup
+                _set_phase('initial-readiness')
+                with origin21_readiness_profile.Profile(proof) as profile:
+                    readiness=origin21_ready.check(_commitments(),selected=profiles.MANAGED,transport=transport)
+                if readiness!={'product_tls_and_catalog_verified':True,'ui_verified':False}: raise ValueError('readiness diagnostic result')
+                for line in profile.lines(): print(line,flush=True)
+                _set_phase('volume-disposal')
+                origin21_managed_cleanup.teardown(qualification=proof)
+                disposal.dispose_synthetic_volume(proof)
+                if _source_guard()!=source: raise ValueError('qualification source changed')
+                return {'scope':'single-full-readiness-diagnostic','component':True}
             _set_phase('positive-streams')
             positive=qualify_positive_streams(transport,proof)
             _set_phase('negative-cases')
@@ -580,7 +593,9 @@ def main(argv):
 
 if __name__=='__main__':
     try:
-        main(sys.argv[1:]); print('managed Origin qualification passed')
+        result=main(sys.argv[1:])
+        if result.get('scope')=='single-full-readiness-diagnostic': print('managed-component scope=single-full-readiness-diagnostic result=pass')
+        else: print('managed Origin qualification passed')
     except BaseException as error:
         for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)
         print('managed Origin qualification failed; owned state retained',file=sys.stderr)

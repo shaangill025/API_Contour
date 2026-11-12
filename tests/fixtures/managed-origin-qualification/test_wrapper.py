@@ -43,6 +43,13 @@ class ManagedWrapperTests(unittest.TestCase):
         sentinel=self.child/'keep'; sentinel.write_text('foreign')
         wrapper.cleanup_private(self.command,self.child,self.owner,self.head)
         self.assertFalse(self.base.exists()); self.assertEqual(sentinel.read_text(),'foreign')
+    def test_readiness_component_requires_no_lost_ack_intent(self):
+        with self.assertRaises(ValueError): wrapper.cleanup_private(self.command,self.child,self.owner,self.head,profile_readiness=True)
+        self.assertTrue(self.base.exists())
+        (self.base/'managed-edge'/'state'/'publication.exec.intent').unlink()
+        wrapper.cleanup_private(self.command,self.child,self.owner,self.head,profile_readiness=True)
+        self.assertFalse(self.base.exists())
+
     def test_surviving_resource_or_unsafe_entry_retains_state(self):
         self.survives=True
         with self.assertRaises(ValueError): wrapper.cleanup_private(self.command,self.child,self.owner,self.head)

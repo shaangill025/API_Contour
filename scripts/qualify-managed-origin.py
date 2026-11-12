@@ -28,7 +28,7 @@ _ALLOWED_FRAMES={
     'deploy/local/origin21_managed_cli.py', 'deploy/local/origin21_managed_qualification.py',
     'deploy/local/origin21_managed_qualification_cleanup.py', 'deploy/local/origin21_managed_cleanup.py',
     'deploy/local/origin21_ready.py', 'deploy/local/origin21_products.py',
-    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py',
+    'deploy/local/origin21_transport.py', 'deploy/local/origin21_sql_runner.py', 'deploy/local/docker_metadata.py', 'deploy/local/origin21_readiness_profile.py',
     'deploy/gateway/managed_edge.py', 'scripts/test-managed-native-edge.py',
     'scripts/qualify-origin21-onboarding.py',
 }
@@ -75,7 +75,10 @@ def child_failure_lines(owner):
     timings=[line.decode('ascii') for line in raw.splitlines() if diagnostic.fullmatch(line)][:160]
     stream_diagnostic=re.compile(rb'managed-stream name=(?:prefix|publish|confirm|activation|release) ms=(?:0|[1-9][0-9]{0,8}) count=[1-5]')
     streams=[line.decode('ascii') for line in raw.splitlines() if stream_diagnostic.fullmatch(line)][:20]
-    return failures+timings+streams
+    labels='|'.join(_PROFILE_LABELS)
+    profiler=re.compile(('managed-profile name=(?:'+labels+r') calls=(?:0|[1-9][0-9]{0,5}) inclusive_ms=(?:0|[1-9][0-9]{0,8}) max_ms=(?:0|[1-9][0-9]{0,8})').encode())
+    profiles=[line.decode('ascii') for line in raw.splitlines() if profiler.fullmatch(line)][:len(_PROFILE_LABELS)]
+    return failures+timings+streams+profiles
 
 
 def helper():
@@ -106,7 +109,21 @@ def read_record(path):
     return value
 
 
-def cleanup_private(run,child,owner,head):
+_PROFILE_LABELS=('products_command','edge_command','transport_run','source_identity','managed_source',
+    'owned_worktree','proof_verify','recorded_topology','peer_inspect','sql_run')
+
+
+def profile_lines(raw):
+    if not isinstance(raw,bytes) or len(raw)>4096: raise ValueError('profile output')
+    try: lines=raw.decode('ascii').splitlines()
+    except UnicodeError: raise ValueError('profile output') from None
+    if len(lines)!=len(_PROFILE_LABELS)+2 or lines[0]!='managed-profile totals=inclusive-overlap-not-additive' or lines[-1]!='managed-component scope=single-full-readiness-diagnostic result=pass': raise ValueError('profile output')
+    for label,line in zip(_PROFILE_LABELS,lines[1:-1],strict=True):
+        if not re.fullmatch(r'managed-profile name='+label+r' calls=(?:0|[1-9][0-9]{0,5}) inclusive_ms=(?:0|[1-9][0-9]{0,8}) max_ms=(?:0|[1-9][0-9]{0,8})',line): raise ValueError('profile output')
+    return tuple(lines[:-1])
+
+
+def cleanup_private(run,child,owner,head,*,profile_readiness=False):
     """Delete the owned synthetic private tree only after exact resource absence."""
     owner.verify(); base=child/'.local-mvp-managed'; st=os.lstat(base)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o700: raise ValueError('managed state identity invalid')
@@ -127,7 +144,10 @@ def cleanup_private(run,child,owner,head):
     if done!={'version':1,'token':token,'intent_sha256':digest,'containers_removed':containers,'networks_removed':networks} or disposed!={'version':1,'token':token,'volume':volume}: raise ValueError('qualification cleanup incomplete')
     initializer=read_record(base/'initializer.intent'); edge=read_record(base/'managed-edge'/'intent.json')
     if type(initializer) is not dict or set(initializer)!={'version','head','build_image','build_receipt_sha256','token','network','volume'} or initializer.get('version')!=1 or initializer.get('head')!=head or initializer.get('volume')!=volume or initializer.get('build_image')!=intent['build_image'] or initializer.get('build_receipt_sha256')!=intent['build_receipt_sha256'] or not re.fullmatch('[0-9a-f]{32}',initializer.get('token','')) or type(edge) is not dict or set(edge)!={'version','origin_token','edge_token'} or edge.get('version')!=1 or not re.fullmatch('[0-9a-f]{32}',edge.get('edge_token','')): raise ValueError('ownership identity changed')
-    read_record(edge_dir/'state'/'publication.exec.intent')
+    publication=edge_dir/'state'/'publication.exec.intent'
+    if profile_readiness:
+        if os.path.lexists(publication): raise ValueError('unexpected publication intent')
+    else: read_record(publication)
     for cid in containers:
         if run(['docker','ps','-aq','--no-trunc','--filter','id='+cid],cwd=child,timeout=15).strip(): raise ValueError('owned container remains')
     for nid in networks:
@@ -150,7 +170,7 @@ def cleanup_private(run,child,owner,head):
     if os.path.lexists(base): raise RuntimeError('private state remains')
 
 
-def qualify(run,owner,token,h,*,fresh_metadata=False):
+def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False):
     global _PHASE
     _PHASE="worktree"
     head,source=h['snapshot'](run,ROOT); child=owner.path/'worktree'; tag='apicontour-origin21-build:'+token
@@ -170,26 +190,31 @@ def qualify(run,owner,token,h,*,fresh_metadata=False):
     _PHASE='inner-qualification'
     inner=[sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest]
     if fresh_metadata: inner.append('--fresh-metadata')
-    run(inner,cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
+    if profile_readiness: inner.append('--profile-readiness')
+    inner_output=run(inner,cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
+    profile_output=profile_lines(inner_output) if profile_readiness else ()
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
     if h['image_identity'](run,child,tag,token,head)!=image: raise ValueError('build image changed')
     h['require_registration'](run,ROOT,child,head)
     owner.verify(); run(['docker','image','rm',tag],cwd=child,timeout=30)
     if run(['docker','image','ls','-q','--no-trunc','--filter','reference='+tag],cwd=child,timeout=20).strip(): raise RuntimeError('build image remains')
     _PHASE='private-cleanup'
-    cleanup_private(run,child,owner,head)
+    if profile_readiness: cleanup_private(run,child,owner,head,profile_readiness=True)
+    else: cleanup_private(run,child,owner,head)
     if run(['git','ls-files','--others','--ignored','--exclude-standard','-z'],cwd=child,timeout=15): raise RuntimeError('ignored worktree state retained')
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed before removal')
     h['require_registration'](run,ROOT,child,head); owner.verify()
     run(['git','worktree','remove',str(child)],cwd=ROOT,timeout=120)
     h['require_registration'](run,ROOT,child,head,expected=False)
     if os.path.lexists(child) or h['snapshot'](run,ROOT)!=(head,source): raise RuntimeError('worktree cleanup uncertain')
+    for line in profile_output: print(line)
 
 
 def main():
     global _PHASE
-    if sys.argv[1:] not in ([],['--fresh-metadata']): raise ValueError('invalid arguments')
-    fresh_metadata = sys.argv[1:] == ['--fresh-metadata']
+    flags=sys.argv[1:]
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness') for flag in flags): raise ValueError('invalid arguments')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags
     if not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in ('P_PID','WEXITED','WNOHANG','WNOWAIT')):
         print('qualification requires configured Python 3.13 with POSIX waitid/WNOWAIT',file=sys.stderr)
         raise RuntimeError('qualification runtime unavailable')
@@ -200,8 +225,10 @@ def main():
     owner=h['OwnedDirectory'](folder); failures=[]
     try:
         run=h['Runner'](deadline,owner)
-        if fresh_metadata: qualify(run,owner,uuid.uuid4().hex,h,fresh_metadata=True)
-        else: qualify(run,owner,uuid.uuid4().hex,h)
+        options={}
+        if fresh_metadata: options['fresh_metadata']=True
+        if profile_readiness: options['profile_readiness']=True
+        qualify(run,owner,uuid.uuid4().hex,h,**options)
         owner.remove()
     except BaseException as error:
         failures.append(error)
@@ -219,7 +246,10 @@ def main():
 
 
 if __name__=='__main__':
-    try: main(); print('managed Origin qualification passed')
+    try:
+        main()
+        if '--profile-readiness' in sys.argv[1:]: print('managed-component scope=single-full-readiness-diagnostic result=pass')
+        else: print('managed Origin qualification passed')
     except BaseException as error:
         for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)
         print('managed Origin qualification failed; owned state retained',file=sys.stderr)
