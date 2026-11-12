@@ -151,15 +151,15 @@ class FreshPsqlTransport:
             if status in (124, 125, 126, 127, 137): raise TransportError('fixture query completion uncertain')
             if status != 0:
                 if self.diagnostic_context == 'observer-v1':
-                    phase, state = _observer_failure(text, out, err)
-                    raise _ObserverQueryFailed(phase,state)
+                    phase, state, column, function, line = _observer_failure(text, out, err)
+                    raise _ObserverQueryFailed(phase,state,column,function,line)
                 raise _QueryFailed()
             decoded = base64.b64decode(b''.join(out.split()), validate=True)
             return decoded.decode(locale.getpreferredencoding(False)).replace('\r\n', '\n').replace('\r', '\n').strip()
         except _BeforeSendDeadline:
             raise TimeoutError('fixture query deadline') from None
         except _ObserverQueryFailed as failure:
-            raise ObserverQueryError(failure.phase,failure.sqlstate) from None
+            raise ObserverQueryError(failure.phase,failure.sqlstate,failure.column,failure.function,failure.line) from None
         except _QueryFailed:
             raise RuntimeError('authority fixture command failed') from None
         except BaseException as exc:
@@ -234,29 +234,42 @@ class _QueryFailed(Exception):
     pass
 
 
-_OBSERVER_PREFIX = b'\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'
-_OBSERVER_STEPS = ('runtime-source','profile','runtime-enroll','session','generation','marker','gateway','proof','canonical','cases')
+_OBSERVER_PREFIX = b'\\set VERBOSITY verbose\n\\echo observer-step=runtime-source\n'
+_OBSERVER_STEPS = ('runtime-source','profile','runtime-enroll','session','generation','marker','gateway','proof','canonical','cases','parser','first-accept','replay','negativeclaims','quota','graph','chains')
+_OBSERVER_COLUMNS = frozenset(('raw','proof','claim','epoch','generation','tenant_id','collector_id','source_id','project_id','service_id','environment_id','deployment_id','instance_id','lifecycle_id','credential_id','grant_id','leaf_sha256','runtime_id','batch_id','record_id','proof_id','gateway_id','gateway_generation','delivery_handle','session_epoch','attempt','retry_of','marker_digest','marker_root','marker_activity','marker_public','canonical_fact','fact_digest','receipt','receipt_id','accepted_at','expires_at','charged_bytes','used_bytes','metadata','root','activity','kind','name','seq','n','version','status','issued_at','policy_revision','policy_envelope','signed_envelope','count','value','k','v','p','r','x','j','b','col','leaf','gen','handle','prev','rec','bid','ep','md','c','e','g','q','w','z','origin','initial_at','final_at','floor_at','receipt_cutoff','stored_receipt','extra','charge','gateway','gateway2','binding','marker','reservation','old','ancestor_count','descendant_count','closes_cycle','at_time'))
+_OBSERVER_FUNCTIONS = frozenset(('inline_code_block','contour.accept_causal_observer','contour.observer_wire','contour.human_observation_origin','contour.catalog_origin_mapping','contour.causal_json_canonical','contour.causal_session_locked','contour.causal_marker_product_current','contour.gateway_claim_current','contour.begin_origin_operation','contour.lock_origin_collector','contour.lock_origin_credential','contour.ensure_origin_tenant_state','contour.collector_lock_key','contour.immutable_row'))
 
 class ObserverQueryError(RuntimeError):
     """Definite failure metadata; no database output is retained."""
-    def __init__(self, phase, sqlstate):
+    def __init__(self, phase, sqlstate, column, function, line):
         self.phase = phase if phase in _OBSERVER_STEPS else 'unavailable'
         self.sqlstate = sqlstate if re.fullmatch('[0-9A-Z]{5}',sqlstate) else 'unavailable'
-        super().__init__('authority fixture command failed (observer-step='+self.phase+', sqlstate='+self.sqlstate+')')
+        self.column = column if column in _OBSERVER_COLUMNS else 'unavailable'
+        self.function = function if function in _OBSERVER_FUNCTIONS else 'unavailable'
+        self.line = line if type(line) is int and 1 <= line <= 9999 and self.function != 'unavailable' else None
+        super().__init__('authority fixture command failed (observer-step='+self.phase+', sqlstate='+self.sqlstate+', column='+self.column+', function='+self.function+', line='+(str(self.line) if self.line is not None else 'unavailable')+')')
 
 class _ObserverQueryFailed(Exception):
-    def __init__(self,phase,sqlstate): self.phase,self.sqlstate=phase,sqlstate
+    def __init__(self,phase,sqlstate,column,function,line): self.phase,self.sqlstate,self.column,self.function,self.line=phase,sqlstate,column,function,line
 
 def _observer_failure(text, out, err):
-    """Parse only a fixed monotone marker sequence and a single SQLSTATE."""
-    unavailable=('unavailable','unavailable')
+    """Return only allowlisted context from a definite observer SQL failure."""
+    unavailable=('unavailable','unavailable','unavailable','unavailable',None)
     if not text.encode('utf-8').startswith(_OBSERVER_PREFIX): return unavailable
     try:
         stdout=base64.b64decode(b''.join(out.split()),validate=True)
         steps=re.findall(rb'(?m)^observer-step=([^\r\n]*)\r?$',stdout)
         decoded=[step.decode('ascii') for step in steps]
         if not decoded or decoded!=list(_OBSERVER_STEPS[:len(decoded)]): return unavailable
-        states=re.findall(rb'(?m)^(?:psql:<stdin>:[0-9]+: )?ERROR:[ \t]+([0-9A-Z]{5})[ \t]*$',err)
-        state=states[0].decode('ascii') if len(states)==1 else 'unavailable'
-        return decoded[-1],state
+        errors=re.findall(rb'(?m)^(?:psql:<stdin>:[0-9]+: )?ERROR:[ \t]+([0-9A-Z]{5}): ([^\r\n]*)\r?$',err)
+        if len(errors)!=1: return decoded[-1],*unavailable[1:]
+        code,message=errors[0]; state=code.decode('ascii'); column='unavailable'
+        match=re.fullmatch(rb'column reference "([a-z_][a-z_0-9]*)" is ambiguous',message)
+        if state=='42702' and match and match[1].decode('ascii') in _OBSERVER_COLUMNS: column=match[1].decode('ascii')
+        contexts=re.findall(rb'(?m)^CONTEXT:[ \t]+PL/pgSQL function ([a-z_][a-z_0-9.]*)(?:\([^\r\n]*\))? line ([1-9][0-9]{0,3}) at [^\r\n]*\r?$',err)
+        function='unavailable'; line=None
+        if contexts:
+            candidate=contexts[0][0].decode('ascii')
+            if candidate in _OBSERVER_FUNCTIONS: function=candidate; line=int(contexts[0][1])
+        return decoded[-1],state,column,function,line
     except (ValueError,UnicodeError): return unavailable

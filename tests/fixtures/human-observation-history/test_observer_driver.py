@@ -54,8 +54,13 @@ class DriverTests(unittest.TestCase):
     def test_diagnostics_preserve_fixture_exactly(self):
         fixture=(ROOT/'db/tests/causal_observer_inbox.sql').read_text()
         sql=module._diagnostic_sql(module.SEED_SQL,fixture)
-        self.assertTrue(sql.startswith('\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'))
-        self.assertTrue(sql.endswith('\\echo observer-step=cases\n'+fixture))
+        self.assertTrue(sql.startswith('\\set VERBOSITY verbose\n\\echo observer-step=runtime-source\n'))
+        marked=sql.split('\\echo observer-step=cases\n',1)[1]
+        for label in ('parser','first-accept','replay','negativeclaims','quota','graph','chains'):
+            marker='\\echo observer-step='+label+'\n'
+            self.assertEqual(marked.count(marker),1);marked=marked.replace(marker,'',1)
+        self.assertEqual(marked,fixture)
+        with self.assertRaises(ValueError):module._diagnostic_sql(module.SEED_SQL,fixture+'\n-- Disposable PostgreSQL only.')
         for label in ('profile','runtime-enroll','session','generation','marker','gateway','proof','canonical'):
             self.assertEqual(sql.count('observer-step='+label+'\n'),1)
         with self.assertRaises(ValueError):module._diagnostic_sql('bad',fixture)

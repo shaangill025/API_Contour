@@ -103,7 +103,17 @@ def _diagnostic_sql(seed, fixture):
     for token, label in markers:
         if seed.count(token)!=1: raise ValueError('observer diagnostic boundary changed')
         seed=seed.replace(token, '\\echo observer-step='+label+'\n'+token,1)
-    return '\\set VERBOSITY sqlstate\n\\echo observer-step=runtime-source\n'+seed+'\n\\echo observer-step=cases\n'+fixture
+    anchors=(('-- Disposable PostgreSQL only.', 'parser'),
+             ('-- First fact may precede producer-attempt and receiver facts,', 'first-accept'),
+             ('CREATE TEMP TABLE observer_usage AS SELECT', 'replay'),
+             ('DO $$ DECLARE r bytea; p contour.verified_observer_claim; x contour.causal_session_claim; BEGIN', 'negativeclaims'),
+             ('-- New, correctly linked backend delivery cannot consume quota', 'quota'),
+             ('-- Materialize canonical adversarial delivery graphs under owner;', 'graph'),
+             ('-- Build two detached 31-delivery fragments.', 'chains'))
+    for token,label in anchors:
+        if fixture.count(token)!=1: raise ValueError('observer case diagnostic boundary changed')
+        fixture=fixture.replace(token, '\\echo observer-step='+label+'\n'+token,1)
+    return '\\set VERBOSITY verbose\n\\echo observer-step=runtime-source\n'+seed+'\n\\echo observer-step=cases\n'+fixture
 
 
 # One psql backend is essential: all claim rows and observer_seed are temporary.

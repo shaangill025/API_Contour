@@ -115,31 +115,36 @@ print(str(os.getpid()) + ':' + s, end='')
         text=mod._OBSERVER_PREFIX.decode()+'SELECT fixture;'
         frame=lambda data:base64.b64encode(data)
         good=frame(b'observer-step=runtime-source\nobserver-step=profile\n')
-        phase,state=mod._observer_failure(text,good,b'psql:<stdin>:77: ERROR:  23514\nsecret-sentinel\n')
-        self.assertEqual((phase,state),('profile','23514'))
-        error=mod.ObserverQueryError(phase,state)
-        self.assertNotIn('secret-sentinel',str(error)); self.assertEqual(set(vars(error)),{'phase','sqlstate'})
-        for out in (b'not-base64', frame(b'observer-step=profile\n'),
-                    frame(b'observer-step=runtime-source\nobserver-step=evil-secret-sentinel\n'),
-                    frame(b'observer-step=runtime-source\nobserver-step=runtime-source\n')):
-            self.assertEqual(mod._observer_failure(text,out,b'23514\n'),('unavailable','unavailable'))
-        self.assertEqual(mod._observer_failure(text,good,b'ERROR:  23514\n'),('profile','23514'))
-        self.assertEqual(mod._observer_failure(text,good,b'prefix ERROR:  23514 secret-sentinel\n'),('profile','unavailable'))
-        self.assertEqual(mod._observer_failure(text,good,b'23514\n'),('profile','unavailable'))
-        self.assertEqual(mod._observer_failure('other',good,b'ERROR:  23514\n'),('unavailable','unavailable'))
-        self.assertEqual(mod._observer_failure(text,good,b'ERROR:  23514\npsql:<stdin>:2: ERROR:  42501\n'),('profile','unavailable'))
-        self.assertEqual(mod._observer_failure(text,good,b'psql: secret-sentinel\n'),('profile','unavailable'))
-        self.assertNotIn('secret-sentinel',str(mod.ObserverQueryError('secret-sentinel','secret-sentinel')))
+        unavailable=('unavailable','unavailable','unavailable','unavailable',None)
+        failure=(b'psql:<stdin>:77: ERROR:  42702: column reference "epoch" is ambiguous\n'
+                 b'CONTEXT:  PL/pgSQL function contour.accept_causal_observer(bytea,contour.verified_observer_claim) line 93 at SQL statement\n'
+                 b'DETAIL: secret-sentinel\n')
+        parsed=mod._observer_failure(text,good,failure)
+        self.assertEqual(parsed,('profile','42702','epoch','contour.accept_causal_observer',93))
+        error=mod.ObserverQueryError(*parsed)
+        self.assertNotIn('secret-sentinel',str(error)); self.assertEqual(set(vars(error)),{'phase','sqlstate','column','function','line'})
+        for out in (b'not-base64',frame(b'observer-step=profile\n'),frame(b'observer-step=runtime-source\nobserver-step=secret-sentinel\n'),frame(b'observer-step=runtime-source\nobserver-step=runtime-source\n')):
+            self.assertEqual(mod._observer_failure(text,out,failure),unavailable)
+        self.assertEqual(mod._observer_failure('other',good,failure),unavailable)
+        invalid=('profile','unavailable','unavailable','unavailable',None)
+        self.assertEqual(mod._observer_failure(text,good,b'ERROR:  42702: secret\nERROR:  42501: another\n'),invalid)
+        self.assertEqual(mod._observer_failure(text,good,b'prefix ERROR: 42702: secret-sentinel\n'),invalid)
+        self.assertEqual(mod._observer_failure(text,good,b'42702\n'),invalid)
+        inline=b'ERROR:  42702: column reference "raw" is ambiguous\nCONTEXT:  PL/pgSQL function inline_code_block line 3 at SQL statement\n'
+        self.assertEqual(mod._observer_failure(text,good,inline),('profile','42702','raw','inline_code_block',3))
+        spoof=b'ERROR:  42702: column reference "secret_sentinel" is ambiguous\nCONTEXT:  PL/pgSQL function evil(secret) line 10 at SQL statement\n'
+        self.assertEqual(mod._observer_failure(text,good,spoof),('profile','42702','unavailable','unavailable',None))
+        self.assertNotIn('secret-sentinel',str(mod.ObserverQueryError('secret-sentinel','secret-sentinel','secret-sentinel','secret-sentinel',99999)))
 
     def test_observer_failure_remains_definite_and_generic_other_modes(self):
         self.transport.diagnostic_context='observer-v1'
         out=base64.b64encode(b'observer-step=runtime-source\n')
         def exchange(worker,request,nonce,deadline):
-            return out,b'ERROR:  23514\n'+nonce.encode()+b' STATUS 3\n'
+            return out,b'ERROR:  23514: secret-sentinel\n'+nonce.encode()+b' STATUS 3\n'
         self.transport._exchange=exchange
         with self.assertRaises(mod.ObserverQueryError) as caught:self.transport.execute(mod._OBSERVER_PREFIX.decode()+'SELECT fixture;')
         self.assertEqual((caught.exception.phase,caught.exception.sqlstate),('runtime-source','23514'))
-        self.assertFalse(self.calls)
+        self.assertNotIn('secret-sentinel',str(caught.exception));self.assertFalse(self.calls)
 
     def test_timeout_contains_and_never_replays(self):
         with self.assertRaises(mod.TransportError): self.transport.execute('SLOW',timeout=.1)
