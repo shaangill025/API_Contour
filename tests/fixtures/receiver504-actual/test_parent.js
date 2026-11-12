@@ -29,18 +29,26 @@ function diagnostic(){
  const section=source.slice(source.indexOf('const STAGES='),source.indexOf('function readPrivate()'));
  const api=vm.runInNewContext(section+'\n({diag,diagnostic})',{Set,Number,Math});
  api.diag.stage='metadata';api.diag.hello=true;api.diag.spawned=true;api.diag.refresh=123;api.diag.proxy='nonzero';
- assert.equal(api.diagnostic(),'FAIL phase=metadata hello=1 spawned=1 ready=0 refresh=16 proxy=nonzero preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown');
+ assert.equal(api.diagnostic(),'FAIL phase=metadata hello=1 spawned=1 ready=0 refresh=16 proxy=nonzero preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown missing=0 extra=0 known=0 unknown=0');
  api.diag.failure='private-path-secret';api.diag.stage='unknown-secret';api.diag.proxy='private-error';api.diag.refresh=Infinity;api.diag.hello='private';
- const value=api.diagnostic();assert.equal(value,'FAIL phase=input hello=0 spawned=1 ready=0 refresh=0 proxy=other preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown');assert(!value.includes('private'));
- api.diag.failure='request';api.diag.stage='cleanup';assert(api.diagnostic().includes('phase=request'));
+ const value=api.diagnostic();assert.equal(value,'FAIL phase=input hello=0 spawned=1 ready=0 refresh=0 proxy=other preflight=none env=0 exec=0 args=0 tty=0 argv_probe=0 bootstrap=unknown missing=0 extra=0 known=0 unknown=0');assert(!value.includes('private'));
+ api.diag.failure='request';api.diag.stage='cleanup';api.diag.probe={state:'private-name',bootstrap:'private-name',missing_mask:1024,known_mask:128,extra_count:17,unknown_extra:'private-value'};const bounded=api.diagnostic();assert(bounded.includes('phase=request'));assert(bounded.includes('missing=0 extra=0 known=0 unknown=0'));assert(!bounded.includes('private'));
+}
+function probeMask(){
+ const probe=fs.readFileSync(__dirname+'/proxy-preflight.js','utf8');let output='';
+ const allowed=['FLOWS','HOME','HOSTNAME','LANG','NODE_PATH','NODE_RED_VERSION','NODE_VERSION','PATH','TZ','YARN_VERSION'];const env=Object.fromEntries(allowed.map(k=>[k,'private-value']));delete env.HOME;env.QEMU_EXECVE='private-value';env['malicious-key-name']='private-value';
+ const fake={env,execPath:'/usr/local/bin/node',execArgv:[],argv:['/usr/local/bin/node','/work/tests/fixtures/receiver504-actual/proxy-preflight.js'],stdin:{},stdout:{write(x){output+=x;}},stderr:{}};
+ vm.runInNewContext(probe,{process:fake,require(){return {};},SyntaxError});const v=JSON.parse(output);assert.equal(v.missing_mask,2);assert.equal(v.extra_count,2);assert.equal(v.known_mask,2);assert.equal(v.unknown_extra,true);assert.equal(v.env_keys,false);assert(!output.includes('malicious'));assert(!output.includes('private'));
+ for(let i=0;i<30;i++)env['private-'+i]='private-value';output='';vm.runInNewContext(probe,{process:fake,require(){return {};},SyntaxError});assert.equal(JSON.parse(output).extra_count,16);assert(!output.includes('private'));
 }
 async function preflight(mode){
  let child,args,options;const timers=[];function spawn(...values){[args,options]=[values[1],values[2]];child=new EventEmitter();child.stdin=new EventEmitter();child.stdin.end=()=>{};child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};return child;}
  const section=source.slice(source.indexOf('function runPreflight('),source.indexOf('function processStart('));
  const run=vm.runInNewContext(section+'\nrunPreflight',{spawn,Buffer,JSON,Object,Number,Promise,Error,setTimeout(fn,ms){const t={fn,ms};timers.push(t);return t;},clearTimeout(){}});
  const result=run({synthetic:'environment'});assert.deepEqual(Array.from(args),['/work/tests/fixtures/receiver504-actual/proxy-preflight.js']);assert.deepEqual(Array.from(options.stdio),['pipe','pipe','pipe']);
- if(mode==='ok')child.stdout.emit('data',Buffer.from(JSON.stringify({env_keys:true,exec_path:true,exec_argv:true,pipe_tty:true,argv_probe:true,bootstrap:'ok'})));
+ if(mode==='ok')child.stdout.emit('data',Buffer.from(JSON.stringify({env_keys:true,missing_mask:0,extra_count:0,known_mask:0,unknown_extra:false,exec_path:true,exec_argv:true,pipe_tty:true,argv_probe:true,bootstrap:'ok'})));
  if(mode==='bad')child.stdout.emit('data',Buffer.from('{"secret":"do-not-copy"}'));
+ if(mode==='inconsistent')child.stdout.emit('data',Buffer.from(JSON.stringify({env_keys:true,missing_mask:0,extra_count:1,known_mask:0,unknown_extra:false,exec_path:true,exec_argv:true,pipe_tty:true,argv_probe:true,bootstrap:'ok'})));
  child.emit('close',0,null);const value=await result;assert.equal(value.state,mode==='ok'?'ok':'other');assert(!JSON.stringify(value).includes('secret'));
 }
 async function preflightFailure(mode){
@@ -66,4 +74,4 @@ async function tail(failure){
  vm.runInNewContext(program,context);await new Promise(resolve=>setImmediate(resolve));
  assert.equal(labels.filter(x=>x.startsWith('PASS')).length,failure?0:1);if(failure)assert.equal(context.process.exitCode,1);
 }
-(async()=>{diagnostic();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await preflight('ok');await preflight('bad');for(const mode of ['stdout','stderr','timeout','missing-close'])await preflightFailure(mode);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
+(async()=>{diagnostic();probeMask();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await preflight('ok');await preflight('bad');await preflight('inconsistent');for(const mode of ['stdout','stderr','timeout','missing-close'])await preflightFailure(mode);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
