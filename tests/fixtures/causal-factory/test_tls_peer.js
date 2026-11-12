@@ -44,4 +44,5 @@ assert.equal(request.calls[0].port, 1880);
 assert.equal(request.calls[0].path, '/run');
 assert.equal(request.calls[0].method, 'POST');
 assert.equal(request.calls[0].rejectUnauthorized, true);
-assert.equal(request.calls[1], JSON.stringify('serial'));
+assert.equal(request.calls[0].headers['content-type'], 'text/plain');
+assert.equal(request.calls[1], 'serial');

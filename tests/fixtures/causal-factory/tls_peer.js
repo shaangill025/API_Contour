@@ -35,12 +35,12 @@ if (mode === 'serve') {
 } else if (mode === 'request') {
   const request = https.request({hostname: 'causal-node', port: 1880, path: '/run', method: 'POST',
     ca: read('ca.pem'), cert: read('client.pem'), key: read('client.key'), rejectUnauthorized: true,
-    headers: {'content-type': 'application/json'}}, response => {
+    headers: {'content-type': 'text/plain'}}, response => {
     let size = 0;
     response.on('data', chunk => { size += chunk.length; if (size > 65536) request.destroy(Error('size')); });
     response.on('end', () => { if (response.statusCode !== 200) process.exitCode = 1; });
   });
   request.setTimeout(5000, () => request.destroy(Error('timeout')));
   request.on('error', () => { process.exitCode = 1; });
-  request.end(JSON.stringify('serial'));
+  request.end('serial');
 } else { throw Error('mode'); }
