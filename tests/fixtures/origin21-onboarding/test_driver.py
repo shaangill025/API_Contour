@@ -17,6 +17,55 @@ spec=importlib.util.spec_from_file_location('origin21_qualification',Path(__file
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 
+class PendingSnapshotTests(unittest.TestCase):
+    def test_real_replacement_is_retryable_before_and_after_read(self):
+        for replace_on in (1,2):
+            with self.subTest(replace_on=replace_on), tempfile.TemporaryDirectory() as directory:
+                path=Path(directory)/'pending.json'; replacement=Path(directory)/'replacement'
+                path.write_bytes(b'{"old":true}'); replacement.write_bytes(b'{"new":true}')
+                path.chmod(0o600); replacement.chmod(0o600)
+                real_fstat=os.fstat; calls=0
+                def raced(fd):
+                    nonlocal calls
+                    calls+=1
+                    if calls==replace_on: os.replace(replacement,path)
+                    return real_fstat(fd)
+                with mock.patch.object(driver.os,'fstat',side_effect=raced):
+                    with self.assertRaises(FileNotFoundError): driver.read_pending_snapshot(path)
+                self.assertEqual(driver.read_pending_snapshot(path),b'{"new":true}')
+
+    def test_unsafe_file_shapes_remain_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); path=root/'pending.json'
+            path.write_bytes(b'{}'); path.chmod(0o644)
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            path.chmod(0o600); os.link(path,root/'hardlink')
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            (root/'hardlink').unlink(); path.unlink(); path.symlink_to(root/'missing')
+            with self.assertRaises(OSError): driver.read_pending_snapshot(path)
+            path.unlink(); os.mkfifo(path,0o600)
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            path.unlink(); path.write_bytes(b'x'*4097); path.chmod(0o600)
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            path.write_bytes(b'');
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            path.write_bytes(b'{}'); real_fstat=os.fstat
+            def foreign(fd):
+                from types import SimpleNamespace
+                info=real_fstat(fd)
+                return SimpleNamespace(st_mode=info.st_mode,st_uid=os.getuid()+1,st_nlink=info.st_nlink,st_size=info.st_size)
+            with mock.patch.object(driver.os,'fstat',side_effect=foreign):
+                with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+
+    def test_malformed_and_wrong_target_are_never_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'pending.json'; path.write_bytes(b'{'); path.chmod(0o600)
+            with self.assertRaises(ValueError): driver.pending_identity(directory,{})
+            path.write_bytes(b'{"identity":{}}')
+            with mock.patch.object(origin21_sql_runner,'_validate_intent',side_effect=ValueError('wrong target')):
+                with self.assertRaisesRegex(ValueError,'wrong target'): driver.pending_identity(directory,{})
+
+
 class ReadinessTests(unittest.TestCase):
     def test_temporary_acceptance_does_not_count_as_final(self):
         from types import SimpleNamespace

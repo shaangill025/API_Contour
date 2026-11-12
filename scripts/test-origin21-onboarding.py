@@ -431,9 +431,32 @@ class ContinuityGuard:
         self.child.stdout.close()
 
 
+def read_pending_snapshot(path):
+    """Read a private pending record; an atomically replaced descriptor is not ready."""
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        def check():
+            info=os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or
+                info.st_mode & 0o077 or info.st_nlink not in (0,1) or not 1<=info.st_size<=4096):
+                raise ValueError('unsafe private file')
+            if info.st_nlink==0: raise FileNotFoundError('pending snapshot replaced')
+        check()
+        chunks=[]; left=4097
+        while left:
+            part=os.read(fd,min(left,65536))
+            if not part: break
+            chunks.append(part); left-=len(part)
+        data=b''.join(chunks)
+        if not 1<=len(data)<=4096: raise ValueError('private file size')
+        check()
+        return data
+    finally: os.close(fd)
+
+
 def pending_identity(directory,target):
     from deploy.local import capture_renew, origin21_sql_runner
-    value=capture_renew.exact_json(capture_renew.read_file(Path(directory)/'pending.json',4096))
+    value=capture_renew.exact_json(read_pending_snapshot(Path(directory)/'pending.json'))
     origin21_sql_runner._validate_intent(value,target)
     if value['identity'] is None: raise RuntimeError('supervisor has not reached durable READY')
     return value
