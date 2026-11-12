@@ -84,7 +84,14 @@ def validate_input(image, role, arch):
     if not isinstance(env, list) or [x for x in env if isinstance(x, str) and x.startswith('NODE_VERSION=')] != ['NODE_VERSION='+expected['version']]: raise ValueError('input version')
     config = EXPECTED[arch][0 if role == 'node' else 1]
     descriptor = image.get('Descriptor')
-    if image.get('Id') == expected['index']:
+    if image.get('Id') == expected['child'][arch]:
+        if not isinstance(descriptor, dict) or descriptor.get('digest') != expected['child'][arch] or descriptor.get('mediaType') != 'application/vnd.oci.image.manifest.v1+json': raise ValueError('input descriptor')
+        platform = descriptor.get('platform')
+        if not isinstance(platform, dict) or platform.get('os') != 'linux' or platform.get('architecture') != arch: raise ValueError('input descriptor platform')
+        digests = image.get('RepoDigests')
+        if not isinstance(digests, list) or expected['repo']+'@'+expected['index'] not in digests: raise ValueError('input repository digest')
+        model = 'containerd-platform-manifest'
+    elif image.get('Id') == expected['index']:
         if not isinstance(descriptor, dict) or descriptor.get('digest') != expected['index'] or descriptor.get('mediaType') != 'application/vnd.oci.image.index.v1+json': raise ValueError('input descriptor')
         digests = image.get('RepoDigests')
         if not isinstance(digests, list) or expected['repo']+'@'+expected['index'] not in digests: raise ValueError('input repository digest')

@@ -23,6 +23,17 @@ class InputIdentityTests(unittest.TestCase):
                     result=m.validate_input(image,role,arch)
                     self.assertEqual(result['model'],'containerd-index')
                     self.assertFalse(result['engine_child_config_binding_verified'])
+                    child=self.value(role,arch)
+                    child['Id']=m.INPUTS[role]['child'][arch]
+                    child['Descriptor']={'digest':child['Id'],'mediaType':'application/vnd.oci.image.manifest.v1+json','platform':{'os':'linux','architecture':arch}}
+                    self.assertEqual(m.validate_input(child,role,arch)['model'],'containerd-platform-manifest')
+                    for mutation in ('digest','mediaType','platform','repo'):
+                        bad=copy.deepcopy(child)
+                        if mutation=='digest':bad['Descriptor']['digest']=m.INPUTS[role]['index']
+                        if mutation=='mediaType':bad['Descriptor']['mediaType']='application/vnd.oci.image.index.v1+json'
+                        if mutation=='platform':bad['Descriptor']['platform']['architecture']='amd64' if arch=='arm64' else 'arm64'
+                        if mutation=='repo':bad['RepoDigests']=[]
+                        with self.assertRaises(ValueError):m.validate_input(bad,role,arch)
                     image['Id']=m.EXPECTED[arch][0 if role=='node' else 1]
                     image.pop('Descriptor')
                     self.assertEqual(m.validate_input(image,role,arch)['model'],'legacy-config')
