@@ -406,7 +406,7 @@ fn hash_executable(path: &Path) -> Result<([u8; 32], Identity), ProcessError> {
     if Identity::from(&file.metadata().map_err(|_| ProcessError::Io)?) != Identity::from(&m) {
         return Err(ProcessError::Unsafe);
     }
-    let mut h = Sha256::new();
+    let mut h = ring::digest::Context::new(&ring::digest::SHA256);
     let mut count = 0u64;
     let mut buf = [0u8; 65536];
     loop {
@@ -426,7 +426,12 @@ fn hash_executable(path: &Path) -> Result<([u8; 32], Identity), ProcessError> {
     {
         return Err(ProcessError::Unsafe);
     }
-    Ok((h.finalize().into(), Identity::from(&m)))
+    let hash: [u8; 32] = h
+        .finish()
+        .as_ref()
+        .try_into()
+        .map_err(|_| ProcessError::Unsafe)?;
+    Ok((hash, Identity::from(&m)))
 }
 impl DockerPolicy {
     /// The digest is supplied by the operator's approved local executable
@@ -1365,6 +1370,28 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+    #[test]
+    fn executable_hash_matches_sha256_across_read_boundaries() {
+        let p = dir();
+        let executable = p.join("executable");
+        for size in [1, 55, 56, 63, 64, 65, 65535, 65536, 65537, 131073] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i * 37 % 251) as u8).collect();
+            std::fs::write(&executable, &bytes).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (actual, _) = hash_executable(&executable).unwrap();
+            let expected: [u8; 32] = Sha256::digest(&bytes).into();
+            assert_eq!(actual, expected, "size {size}");
+        }
+        let alias = p.join("alias");
+        symlink(&executable, &alias).unwrap();
+        assert!(matches!(hash_executable(&alias), Err(ProcessError::Unsafe)));
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o722)).unwrap();
+        assert!(matches!(
+            hash_executable(&executable),
+            Err(ProcessError::Unsafe)
+        ));
+        std::fs::remove_dir_all(p).unwrap();
     }
     #[test]
     fn durable_exclusive_intent_never_adopts() {
