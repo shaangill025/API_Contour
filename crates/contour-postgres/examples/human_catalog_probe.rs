@@ -92,11 +92,77 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(item) => json!({"outcome":"Read", "item":value(&item)}), Err(e) => json!({"outcome":e.to_string()})
             }
         };
+        finish_close(&a[6], &outcome, db.close().await)?;
         println!("{outcome}");
-        db.close().await?;
         Ok::<(),Box<dyn std::error::Error>>(())
     })
 }
 fn value(o: &contour_postgres::HumanCatalogOperation) -> serde_json::Value {
     json!({"id":o.id,"project_id":o.project_id,"service_id":o.service_id,"environment_id":o.environment_id,"protocol":o.protocol,"direction":o.direction,"operation":o.operation,"route_template":o.route_template,"approved_contract_id":o.approved_contract_id,"last_seen":o.last_seen,"visibility":o.visibility,"completeness":o.completeness,"origin_evidence_available":o.origin_evidence_available,"origins_truncated":o.origins_truncated,"origins":o.origins.iter().map(|origin| json!({"project_id":origin.ids[0],"service_id":origin.ids[1],"environment_id":origin.ids[2],"deployment_id":origin.ids[3],"instance_id":origin.ids[4]})).collect::<Vec<_>>()})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancelled_invalidated_connection_accepts_only_expected_shutdown() {
+        let cancelled = json!({"outcome":"Cancelled","reuse":"Invalidated"});
+        assert!(
+            finish_close(
+                "historical-cancel",
+                &cancelled,
+                Err(contour_postgres::TransportError::Shutdown)
+            )
+            .is_ok()
+        );
+        for bad in [
+            json!({"outcome":"NotCancelled","reuse":"Invalidated"}),
+            json!({"outcome":"Cancelled","reuse":"Read"}),
+        ] {
+            assert!(
+                finish_close(
+                    "historical-cancel",
+                    &bad,
+                    Err(contour_postgres::TransportError::Shutdown)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            finish_close(
+                "historical-cancel",
+                &cancelled,
+                Err(contour_postgres::TransportError::Deadline)
+            )
+            .is_err()
+        );
+        assert!(finish_close("historical-cancel", &cancelled, Ok(())).is_err());
+        assert!(
+            finish_close(
+                "other",
+                &cancelled,
+                Err(contour_postgres::TransportError::Shutdown)
+            )
+            .is_err()
+        );
+        assert!(finish_close("other", &json!({}), Ok(())).is_ok());
+    }
+}
+
+fn finish_close(
+    mode: &str,
+    outcome: &serde_json::Value,
+    result: Result<(), contour_postgres::TransportError>,
+) -> Result<(), contour_postgres::TransportError> {
+    if mode == "historical-cancel" {
+        if *outcome == json!({"outcome":"Cancelled","reuse":"Invalidated"})
+            && result == Err(contour_postgres::TransportError::Shutdown)
+        {
+            return Ok(());
+        }
+        return Err(result
+            .err()
+            .unwrap_or(contour_postgres::TransportError::Shutdown));
+    }
+    result
 }
