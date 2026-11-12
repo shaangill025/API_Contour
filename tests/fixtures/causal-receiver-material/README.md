@@ -1,0 +1,1 @@
+Synthetic test certificates and private keys only; never use for production. Leaf validity 2020–2045; expired leaf 2020–2021. Marker seed is 32 bytes of 0x07. Files exist solely for negative and positive local validation tests.

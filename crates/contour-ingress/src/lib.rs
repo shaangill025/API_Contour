@@ -34,6 +34,7 @@ pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
 #[cfg(unix)]
 pub use causal_launch_inspect::{CandidateSources, InspectError, InspectedDeployment};
 pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
+mod causal_receiver_material;
 pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
 #[cfg(unix)]
 pub use causal_launch_process::{
@@ -44,6 +45,9 @@ pub use causal_launch_protocol::{ProtocolError, RelayCodec, RelayEvent};
 pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
 #[cfg(unix)]
 pub use causal_permit::CausalPermitOwner;
+pub use causal_receiver_material::{
+    LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
+};
 pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
 use rustls::{

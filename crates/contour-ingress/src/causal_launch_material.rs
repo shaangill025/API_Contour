@@ -40,7 +40,7 @@ fn one_pem<'a>(bytes: &'a [u8], allowed: &[&str]) -> Result<&'a [u8], MaterialEr
     }
     Err(MaterialError::Invalid)
 }
-fn certificate(pem: &[u8]) -> Result<CertificateDer<'static>, MaterialError> {
+pub(crate) fn certificate(pem: &[u8]) -> Result<CertificateDer<'static>, MaterialError> {
     let pem = one_pem(pem, &["CERTIFICATE"])?;
     let mut it = CertificateDer::pem_slice_iter(pem);
     let item = it
@@ -52,7 +52,7 @@ fn certificate(pem: &[u8]) -> Result<CertificateDer<'static>, MaterialError> {
     }
     Ok(item)
 }
-fn certified(cert: &[u8], key: &[u8]) -> Result<CertifiedKey, MaterialError> {
+pub(crate) fn certified(cert: &[u8], key: &[u8]) -> Result<CertifiedKey, MaterialError> {
     let cert = certificate(cert)?;
     let pem = one_pem(key, &["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"])?;
     let mut keys = PrivateKeyDer::pem_slice_iter(pem);
@@ -88,7 +88,7 @@ fn separate_keys(marker: &[u8], product: &[u8], export: &[u8]) -> Result<(), Mat
     }
     Ok(())
 }
-fn digest(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
