@@ -64,15 +64,18 @@ function create({base,authority,tenantId,runtimeId,epoch,queueTtlMs,clock=()=>pe
   for(const ticket of selected.members){const e=entries.get(ticket);if(e&&e.state==='queued')e.state='committed';}
   return true;
  },false);}
+ function fact(e){
+  const b=e.binding,raw={wire_version:1,tenant_id:b.tenant_id,gateway_id:b.gateway_id,gateway_generation:b.gateway_generation,delivery_handle:b.delivery_handle,receiver_runtime_id:b.receiver_runtime_id,receiver_session_epoch:b.receiver_session_epoch,local_root:e.root,binding_digest:e.digest};
+  return decode('receiver',Buffer.from(JSON.stringify(raw)));
+ }
  function drain(ticket){return run(()=>{
   const e=entries.get(ticket);if(!e||e.state!=='committed')return undefined;
-  const b=e.binding,raw={wire_version:1,tenant_id:b.tenant_id,gateway_id:b.gateway_id,gateway_generation:b.gateway_generation,delivery_handle:b.delivery_handle,receiver_runtime_id:b.receiver_runtime_id,receiver_session_epoch:b.receiver_session_epoch,local_root:e.root,binding_digest:e.digest};
-  const result=decode('receiver',Buffer.from(JSON.stringify(raw)));
-  entries.delete(ticket);if(roots.get(e.root)===ticket)roots.delete(e.root);bytes-=e.charge;return result;
+  const result=fact(e);entries.delete(ticket);if(roots.get(e.root)===ticket)roots.delete(e.root);bytes-=e.charge;return result;
  },undefined);}
+ function peek(){return run(()=>{for(const [ticket,e] of entries)if(e.state==='committed')return Object.freeze({ticket,fact:fact(e),deadline:e.deadline});return undefined;},undefined);}
  const producer=Object.freeze({prepare,root,offerRoot,cancel});
  const exporter=Object.freeze({gate:()=>run(()=>true,false),freeze,ack});
- const outbox=Object.freeze({drain,cancel});
+ const outbox=Object.freeze({drain,peek,cancel});
  return Object.freeze({producer,exporter,outbox,close});
 }
 module.exports=Object.freeze({create});
