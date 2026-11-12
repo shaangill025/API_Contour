@@ -10,6 +10,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use time::OffsetDateTime;
+use zeroize::Zeroize;
 
 const MAX_STREAMS: usize = 16;
 const MAX_RAW: usize = 1024 * 1024;
@@ -37,7 +38,7 @@ struct Stream {
 }
 impl Drop for Stream {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        self.bytes.zeroize();
     }
 }
 impl Stream {
@@ -218,7 +219,7 @@ impl CollectorOwner {
         if bytes.len() > limit.saturating_sub(stream.bytes.len()) {
             // The inspected prefix is no longer useful. Wipe it immediately and
             // retain only a typed limit marker, never the overflowing fragment.
-            stream.bytes.fill(0);
+            stream.bytes.zeroize();
             stream.bytes = Vec::new();
             stream.limited = true;
             self.guard()?;
