@@ -362,29 +362,21 @@ fn checked_path(path: &Path) -> Result<std::fs::Metadata, ProcessError> {
         return Err(ProcessError::Unsafe);
     }
     let m = std::fs::symlink_metadata(path).map_err(|_| ProcessError::Unsafe)?;
-    // libc's device, mode and link-count types differ on Linux and Darwin.
+    // libc's device and mode types differ on Linux and Darwin.
     #[cfg(target_os = "linux")]
-    let (device, inode, mode, links) = (st.st_dev, st.st_ino, st.st_mode, st.st_nlink);
+    let (device, inode, mode) = (st.st_dev, st.st_ino, st.st_mode);
     #[cfg(target_os = "macos")]
-    let (device, inode, mode, links) = (
-        st.st_dev as u64,
-        st.st_ino,
-        st.st_mode as u32,
-        st.st_nlink as u64,
-    );
+    let (device, inode, mode) = (st.st_dev as u64, st.st_ino, st.st_mode as u32);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let (device, inode, mode, links) = (
-        st.st_dev as u64,
-        st.st_ino as u64,
-        st.st_mode as u32,
-        st.st_nlink as u64,
-    );
+    let (device, inode, mode) = (st.st_dev as u64, st.st_ino as u64, st.st_mode as u32);
     if m.file_type().is_symlink()
         || m.dev() != device
         || m.ino() != inode
         || m.mode() != mode
         || m.uid() != st.st_uid
-        || m.nlink() != links
+        // Link counts are u32 on Linux ARM and u64 on Linux x86_64;
+        // Darwin uses u16. Widen both sides without truncation on any target.
+        || u128::from(m.nlink()) != u128::from(st.st_nlink)
     {
         return Err(ProcessError::Unsafe);
     }
