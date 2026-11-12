@@ -221,7 +221,13 @@ def _completed_evidence_scope(path,identity,source,state,operations,selected,ena
     lock=_ACTIVE_SETUP_LOCKS.get(lock_capability)
     if lock is None or lock[1] is not selected.profile or lock[2]!=path.parent/'setup.lock': raise ValueError('setup lock unavailable')
     lock_fd=lock[0]
-    if not stat.S_ISREG(os.fstat(lock_fd).st_mode) or os.fstat(lock_fd).st_ino!=os.lstat(lock[2]).st_ino or os.fstat(lock_fd).st_dev!=os.lstat(lock[2]).st_dev: raise ValueError('setup lock unavailable')
+    def lock_current():
+        held=os.fstat(lock_fd); current=os.lstat(lock[2])
+        return (_ACTIVE_SETUP_LOCKS.get(lock_capability)==lock and
+                stat.S_ISREG(held.st_mode) and held.st_uid==os.getuid() and
+                stat.S_IMODE(held.st_mode)==0o600 and held.st_nlink==1 and
+                stat.S_ISREG(current.st_mode) and (held.st_dev,held.st_ino)==(current.st_dev,current.st_ino))
+    if not lock_current(): raise ValueError('setup lock unavailable')
     if state['completed']!=len(PHASES) or state['pending'] is not None: raise ValueError('committed setup required')
     evidence=operations['operator_evidence']
     if type(evidence) is not origin21_evidence.Evidence or evidence.profile is not selected.profile: raise ValueError('invalid evidence scope')
@@ -258,7 +264,7 @@ def _completed_evidence_scope(path,identity,source,state,operations,selected,ena
     finally:
         active[0]=False
         primary=sys.exc_info()[1]; errors=[]
-        for check in (lambda: _encode(state)==sealed_journal and _encode(_read(path,identity,source))==sealed_journal, lambda: _source_identity(context=selected)==source, lambda: evidence.profile is selected.profile and evidence.inspect_slot is sealed_inspector and evidence.path==sealed_path and evidence.expected==expected and all(a is b for a,b in zip(selected.bound.origins,sealed_slots,strict=True)) and _ACTIVE_SETUP_LOCKS.get(lock_capability)==lock, lambda: fresh()==before):
+        for check in (lambda: _encode(state)==sealed_journal and _encode(_read(path,identity,source))==sealed_journal, lambda: _source_identity(context=selected)==source, lambda: evidence.profile is selected.profile and evidence.inspect_slot is sealed_inspector and evidence.path==sealed_path and evidence.expected==expected and all(a is b for a,b in zip(selected.bound.origins,sealed_slots,strict=True)) and _ACTIVE_SETUP_LOCKS.get(lock_capability)==lock, lambda: fresh()==before, lock_current):
             try:
                 if not check(): raise ValueError('completed evidence scope drift')
             except BaseException as error: errors.append(error)

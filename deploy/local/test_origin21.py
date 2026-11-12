@@ -982,6 +982,37 @@ class CompletedEvidenceScopeTests(unittest.TestCase):
                         with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): pass
             finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
 
+    def test_replaced_setup_lock_blocks_completion_callback(self):
+        import fcntl
+        from deploy.local import origin21_enrollment, capture_renew
+        selected=origin21_profile.STATIC
+        for replaced in (False,True):
+            with self.subTest(replaced=replaced), tempfile.TemporaryDirectory() as root:
+                path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+                fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+                evidence=object.__new__(origin21_evidence.Evidence); evidence.profile=selected.profile; evidence.expected=(b'a'*32,b'b'*32); evidence.path=Path(root)/'evidence'; evidence.inspect_slot=lambda _:None
+                state={'completed':len(origin21_state.PHASES),'pending':None,'credential_digest':'c'*64,'evidence_digest':hashlib.sha256(b'fixed').hexdigest()}
+                operations={phase:mock.Mock() for phase in origin21_state.PHASES}
+                for op in operations.values(): op.inspect.return_value=origin21_state.EXACT
+                operations['credentials'].commitment.return_value='c'*64; operations['operator_evidence']=evidence
+                for number,slot in enumerate(selected.bound.origins,1):
+                    for kind in ('lifecycle','credential','grant'):
+                        operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,lambda _:None,slot,kind,evidence.slot_digest)
+                def context(_, *, checked_evidence=False):
+                    if replaced:
+                        replacement=Path(root)/'replacement'; replacement.touch(mode=0o600); os.replace(replacement,lock)
+                callback=mock.Mock()
+                try:
+                    with mock.patch.object(origin21_state.os.path,'lexists',return_value=True), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'), mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_enrollment.Fact,'inspect',return_value=origin21_state.EXACT), mock.patch.object(evidence,'inspect',return_value=origin21_state.EXACT):
+                        def run(): return origin21_state._reconcile(path,'identity','source',operations,set_context=context,after_complete=callback,require_complete=True,selected=selected,completed_check_only=True,_lock_capability=capability)
+                        if replaced:
+                            with self.assertRaises(ValueError): run()
+                            callback.assert_not_called()
+                        else:
+                            run(); callback.assert_called_once()
+                finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
+
     def test_completed_reconcile_reduces_nine_full_checks_to_two(self):
         import fcntl
         from deploy.local import origin21_enrollment, capture_renew
