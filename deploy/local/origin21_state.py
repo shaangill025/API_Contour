@@ -4,12 +4,14 @@ All phases remain blocked by the absent reference comparator. A future caller
 must supply closed, trusted operations with strict independent inspection; the
 journal is not database authority or a readiness attestation.
 """
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import sys
 
 from deploy.local import capture_renew, origin21_profile, origin21_schema
 
@@ -90,6 +92,7 @@ HUMAN_SOURCE_FILES = MANAGED_SOURCE_FILES + (
     'tests/fixtures/managed-human/legacy-membership.json',
 )
 MAX_JOURNAL = 4096
+_ACTIVE_SETUP_LOCKS = {}
 
 
 def _encode(value):
@@ -168,7 +171,7 @@ def _status(operation):
     return result
 
 
-def run(profile, operations, *, snapshot=None, set_context=None, after_complete=None, require_complete=False, identities_only=False):
+def run(profile, operations, *, snapshot=None, set_context=None, after_complete=None, require_complete=False, identities_only=False, completed_check_only=False):
     """Reconcile only a complete fixed phase set after an approved reference.
 
     Partial initial writes and drift fail closed; an unplanned exact state is
@@ -176,7 +179,7 @@ def run(profile, operations, *, snapshot=None, set_context=None, after_complete=
     """
     selected=origin21_profile.context_for_profile(profile)
     origin21_profile.require_context(selected)
-    if type(identities_only) is not bool or type(require_complete) is not bool or (identities_only and require_complete): raise ValueError('invalid setup mode')
+    if type(completed_check_only) is not bool or (completed_check_only and (not require_complete or identities_only)) or type(identities_only) is not bool or type(require_complete) is not bool or (identities_only and require_complete): raise ValueError('invalid setup mode')
     phases=PHASES[:1] if identities_only else PHASES
     if type(operations) is not dict or set(operations)!=set(phases): raise ValueError('invalid operations')
     for stage in range(14,22): origin21_schema.require_reference(stage,'pre')
@@ -195,18 +198,77 @@ def run(profile, operations, *, snapshot=None, set_context=None, after_complete=
     if stat.S_IMODE(os.lstat(profile.state).st_mode)!=0o700: raise ValueError('unsafe state directory')
     lock=profile.state/'setup.lock'
     fd=os.open(lock,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+    capability=None
     try:
         info=os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1: raise ValueError('unsafe lock')
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        capability=object(); _ACTIVE_SETUP_LOCKS[capability]=(fd,profile,lock)
         source=_source_identity(snapshot,selected)
         if _source_identity(context=selected)!=source: raise ValueError('source snapshot drift')
-        return _reconcile(profile.state/'setup.json',_identity(profile),source,operations,set_context=set_context,after_complete=after_complete,require_complete=require_complete,phases=phases,selected=selected)
+        return _reconcile(profile.state/'setup.json',_identity(profile),source,operations,set_context=set_context,after_complete=after_complete,require_complete=require_complete,phases=phases,selected=selected,completed_check_only=completed_check_only,_lock_capability=capability)
     finally:
+        if capability is not None: _ACTIVE_SETUP_LOCKS.pop(capability,None)
         os.close(fd)
 
 
-def _reconcile(path, identity, source, operations, *, set_context=None, after_complete=None, require_complete=False, phases=PHASES, selected=origin21_profile.STATIC):
+@contextlib.contextmanager
+def _completed_evidence_scope(path,identity,source,state,operations,selected,enabled,lock_capability):
+    if not enabled:
+        yield None
+        return
+    from deploy.local import origin21_enrollment, origin21_evidence
+    lock=_ACTIVE_SETUP_LOCKS.get(lock_capability)
+    if lock is None or lock[1] is not selected.profile or lock[2]!=path.parent/'setup.lock': raise ValueError('setup lock unavailable')
+    lock_fd=lock[0]
+    if not stat.S_ISREG(os.fstat(lock_fd).st_mode) or os.fstat(lock_fd).st_ino!=os.lstat(lock[2]).st_ino or os.fstat(lock_fd).st_dev!=os.lstat(lock[2]).st_dev: raise ValueError('setup lock unavailable')
+    if state['completed']!=len(PHASES) or state['pending'] is not None: raise ValueError('committed setup required')
+    evidence=operations['operator_evidence']
+    if type(evidence) is not origin21_evidence.Evidence or evidence.profile is not selected.profile: raise ValueError('invalid evidence scope')
+    def fresh():
+        if evidence.inspect()!=EXACT: raise ValueError('operator evidence drift')
+        return hashlib.sha256(capture_renew.read_file(evidence.path,8192)).hexdigest()
+    sealed_journal=_encode(state)
+    before=fresh()
+    if before!=state['evidence_digest']: raise ValueError('evidence commitment drift')
+    expected=tuple(evidence.expected)
+    sealed_inspector=evidence.inspect_slot; sealed_path=evidence.path; sealed_slots=tuple(selected.bound.origins)
+    if len(expected)!=2 or any(type(x) is not bytes or len(x)!=32 for x in expected): raise ValueError('invalid evidence scope')
+    active=[True]
+    class CheckedEvidence:
+        def inspect(self):
+            if not active[0]: raise ValueError('evidence scope closed')
+            return EXACT
+        def commitment(self):
+            if not active[0]: raise ValueError('evidence scope closed')
+            return before
+    checked=dict(operations); checked['operator_evidence']=CheckedEvidence()
+    try:
+        for number,slot in enumerate(selected.bound.origins,1):
+            for kind in ('lifecycle','credential','grant'):
+                name=f'origin_{number}_{kind}'; op=operations[name]
+                if type(op) is not origin21_enrollment.Fact or op.profile is not selected.bound or op.slot is not slot or op.kind!=kind or getattr(op.evidence,'__self__',None) is not evidence or getattr(op.evidence,'__func__',None) is not origin21_evidence.Evidence.slot_digest: raise ValueError('invalid evidence fact scope')
+                used=[False]
+                def digest_for(actual, *, wanted=slot, value=expected[number-1].hex(), once=used):
+                    if not active[0] or once[0] or actual is not wanted: raise ValueError('invalid evidence scope use')
+                    once[0]=True
+                    return value
+                checked[name]=origin21_enrollment.Fact(op.profile,op.psql,op.slot,op.kind,digest_for)
+        yield checked
+    finally:
+        active[0]=False
+        primary=sys.exc_info()[1]; errors=[]
+        for check in (lambda: _encode(state)==sealed_journal and _encode(_read(path,identity,source))==sealed_journal, lambda: _source_identity(context=selected)==source, lambda: evidence.profile is selected.profile and evidence.inspect_slot is sealed_inspector and evidence.path==sealed_path and evidence.expected==expected and all(a is b for a,b in zip(selected.bound.origins,sealed_slots,strict=True)) and _ACTIVE_SETUP_LOCKS.get(lock_capability)==lock, lambda: fresh()==before):
+            try:
+                if not check(): raise ValueError('completed evidence scope drift')
+            except BaseException as error: errors.append(error)
+        if errors:
+            if primary is not None: raise BaseExceptionGroup('evidence scope and final verification failed',[primary,*errors]) from None
+            if len(errors)==1: raise errors[0]
+            raise BaseExceptionGroup('evidence scope final verification failed',errors)
+
+
+def _reconcile(path, identity, source, operations, *, set_context=None, after_complete=None, require_complete=False, phases=PHASES, selected=origin21_profile.STATIC, completed_check_only=False, _lock_capability=None):
     origin21_profile.require_context(selected)
     def source_now():
         return _source_identity() if selected is origin21_profile.STATIC else _source_identity(context=selected)
@@ -217,11 +279,15 @@ def _reconcile(path, identity, source, operations, *, set_context=None, after_co
         _initial(path,state)
     if state['completed']>len(phases) or (state['pending'] is not None and state['pending'] not in phases): raise ValueError('setup prefix cannot inspect later phases')
     if require_complete and (state['completed']!=len(PHASES) or state['pending'] is not None): raise ValueError('committed setup required')
-    if set_context is not None: set_context(state)
-    for phase in PHASES[:state['completed']]:
-        if _status(operations[phase])!=EXACT: raise ValueError('completed phase drift')
-        if phase=='credentials' and operations[phase].commitment()!=state['credential_digest']: raise ValueError('credential commitment drift')
-        if phase=='operator_evidence' and operations[phase].commitment()!=state['evidence_digest']: raise ValueError('evidence commitment drift')
+    with _completed_evidence_scope(path,identity,source,state,operations,selected,completed_check_only,_lock_capability) as checked:
+        checked_ops=checked if checked is not None else operations
+        if set_context is not None:
+            if checked is not None: set_context(state,checked_evidence=True)
+            else: set_context(state)
+        for phase in PHASES[:state['completed']]:
+            if _status(checked_ops[phase])!=EXACT: raise ValueError('completed phase drift')
+            if phase=='credentials' and checked_ops[phase].commitment()!=state['credential_digest']: raise ValueError('credential commitment drift')
+            if phase=='operator_evidence' and checked_ops[phase].commitment()!=state['evidence_digest']: raise ValueError('evidence commitment drift')
     while state['completed']<len(phases):
         phase=phases[state['completed']]; op=operations[phase]
         if state['pending'] is None:

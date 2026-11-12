@@ -147,7 +147,7 @@ def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slo
         operations[f'origin_{number}_target']=origin21_enrollment.Target(bound,psql,slot)
         for kind in ('lifecycle','credential','grant'):
             operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(bound,psql,slot,kind,evidence.slot_digest)
-    def set_context(current):
+    def set_context(current, *, checked_evidence=False):
         n=current['completed']; pending=current['pending']
         if n>origin21_state.PHASES.index('observer') or pending=='observer':
             if observer.policy() is not None: credential.allow_observer_policy=True
@@ -155,7 +155,7 @@ def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slo
             if renewal is not None and not renew: raise ValueError('origin21 renewal requires reconciliation')
             credential.allow_renewal_artifacts=frozenset(allowed)
         if n>origin21_state.PHASES.index('operator_evidence') or pending=='operator_evidence':
-            if evidence.inspect()==origin21_state.EXACT: credential.allow_operator_evidence=True
+            if checked_evidence or evidence.inspect()==origin21_state.EXACT: credential.allow_operator_evidence=True
             elif os.path.lexists(evidence.path): raise ValueError('operator evidence drift')
         if n>origin21_state.PHASES.index('runtime_configs') or pending=='runtime_configs':
             credential.allow_runtime_configs=origin21_configs.Configs(profile).inspect()==origin21_state.EXACT
@@ -169,5 +169,5 @@ def prepare(*, psql=None, sensitive_execute=None, authenticate=None, inspect_slo
         if not renew: return None
         executor=transport.sensitive if selected is not origin21_profile.STATIC else sensitive_execute
         return origin21_renewal.renew_locked(bound,executor,check_source=check_source)
-    origin21_state.run(profile,operations,snapshot=snapshot,set_context=set_context,after_complete=completed,require_complete=(renew or check_only))
+    origin21_state.run(profile,operations,snapshot=snapshot,set_context=set_context,after_complete=completed,require_complete=(renew or check_only), completed_check_only=check_only)
     return {'setup_reconciled':True,'pilot_ready':False}

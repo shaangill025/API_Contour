@@ -909,3 +909,180 @@ class Origin21Tests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+class CompletedEvidenceScopeTests(unittest.TestCase):
+    def test_two_observations_bounded_fact_access_and_cleanup(self):
+        import fcntl
+        from deploy.local import origin21_enrollment, capture_renew
+        selected=origin21_profile.STATIC
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+            fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+            evidence=object.__new__(origin21_evidence.Evidence)
+            evidence.profile=selected.profile; evidence.expected=(b'a'*32,b'b'*32); evidence.path=Path(root)/'evidence'; evidence.inspect_slot=lambda _:None
+            state={'completed':len(origin21_state.PHASES),'pending':None,'evidence_digest':hashlib.sha256(b'fixed').hexdigest()}
+            operations={'operator_evidence':evidence}
+            for number,slot in enumerate(selected.bound.origins,1):
+                for kind in ('lifecycle','credential','grant'):
+                    operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,lambda _:None,slot,kind,evidence.slot_digest)
+            try:
+                with mock.patch.object(evidence,'inspect',return_value=origin21_state.EXACT) as inspect, mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                    with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability) as checked:
+                        self.assertEqual(inspect.call_count,1)
+                        with self.assertRaises(ValueError): checked['origin_1_lifecycle'].evidence(selected.bound.origins[1])
+                        for number,slot in enumerate(selected.bound.origins,1):
+                            for kind in ('lifecycle','credential','grant'):
+                                fact=checked[f'origin_{number}_{kind}']
+                                self.assertEqual(fact.evidence(slot),evidence.expected[number-1].hex())
+                                with self.assertRaises(ValueError): fact.evidence(slot)
+                        saved=checked['origin_1_lifecycle'].evidence
+                    self.assertEqual(inspect.call_count,2)
+                    with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,False,None) as unchecked:
+                        self.assertIsNone(unchecked)
+                    self.assertEqual(inspect.call_count,2)
+                    state['completed']-=1
+                    with self.assertRaises(ValueError):
+                        with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): pass
+                    self.assertEqual(inspect.call_count,2); state['completed']+=1
+                    state['pending']='runtime_configs'
+                    with self.assertRaises(ValueError):
+                        with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): pass
+                    self.assertEqual(inspect.call_count,2); state['pending']=None
+                    with self.assertRaises(ValueError): saved(selected.bound.origins[0])
+                    with self.assertRaises(ValueError): checked['operator_evidence'].inspect()
+            finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
+
+    def test_final_inspection_runs_when_journal_drifts_or_body_fails(self):
+        import fcntl
+        from deploy.local import origin21_enrollment, capture_renew
+        selected=origin21_profile.STATIC
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+            fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+            evidence=object.__new__(origin21_evidence.Evidence); evidence.profile=selected.profile; evidence.expected=(b'a'*32,b'b'*32); evidence.path=Path(root)/'evidence'; evidence.inspect_slot=lambda _:None
+            state={'completed':len(origin21_state.PHASES),'pending':None,'evidence_digest':hashlib.sha256(b'fixed').hexdigest()}
+            operations={'operator_evidence':evidence}
+            for number,slot in enumerate(selected.bound.origins,1):
+                for kind in ('lifecycle','credential','grant'):
+                    operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,lambda _:None,slot,kind,evidence.slot_digest)
+            try:
+                with mock.patch.object(evidence,'inspect',return_value=origin21_state.EXACT) as inspect, mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_state,'_read',side_effect=ValueError('journal drift')), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                    with self.assertRaises(BaseExceptionGroup):
+                        with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): raise RuntimeError('fact failure')
+                    self.assertEqual(inspect.call_count,2)
+                with mock.patch.object(evidence,'inspect',return_value=origin21_state.EXACT) as inspect, mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                    with self.assertRaises(ValueError):
+                        with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): state['pending']='tampered'
+                    self.assertEqual(inspect.call_count,2)
+                    state['pending']=None
+                with mock.patch.object(evidence,'inspect',side_effect=[origin21_state.EXACT,origin21_state.DRIFT]), mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                    with self.assertRaises(ValueError):
+                        with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability): pass
+            finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
+
+    def test_completed_reconcile_reduces_nine_full_checks_to_two(self):
+        import fcntl
+        from deploy.local import origin21_enrollment, capture_renew
+        selected=origin21_profile.STATIC
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+            fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+            evidence=object.__new__(origin21_evidence.Evidence); evidence.profile=selected.profile; evidence.expected=(b'a'*32,b'b'*32); evidence.path=Path(root)/'evidence'; evidence.inspect_slot=lambda _:None
+            state={'completed':len(origin21_state.PHASES),'pending':None,'credential_digest':'c'*64,'evidence_digest':hashlib.sha256(b'fixed').hexdigest()}
+            operations={phase:mock.Mock() for phase in origin21_state.PHASES}
+            for op in operations.values(): op.inspect.return_value=origin21_state.EXACT
+            operations['credentials'].commitment.return_value='c'*64; operations['operator_evidence']=evidence
+            for number,slot in enumerate(selected.bound.origins,1):
+                for kind in ('lifecycle','credential','grant'):
+                    operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,lambda _:None,slot,kind,evidence.slot_digest)
+            def context(_, *, checked_evidence=False):
+                if not checked_evidence: self.assertEqual(evidence.inspect(),origin21_state.EXACT)
+            def fact_inspect(fact): fact.evidence(fact.slot); return origin21_state.EXACT
+            try:
+                with mock.patch.object(origin21_state.os.path,'lexists',return_value=True), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'), mock.patch.object(capture_renew,'read_file',return_value=b'fixed'), mock.patch.object(origin21_enrollment.Fact,'inspect',fact_inspect), mock.patch.object(evidence,'inspect',return_value=origin21_state.EXACT) as inspect:
+                    origin21_state._reconcile(path,'identity','source',operations,set_context=context,require_complete=True,selected=selected)
+                    self.assertEqual(inspect.call_count,9)
+                    inspect.reset_mock()
+                    origin21_state._reconcile(path,'identity','source',operations,set_context=context,require_complete=True,selected=selected,completed_check_only=True,_lock_capability=capability)
+                    self.assertEqual(inspect.call_count,2)
+                    with self.assertRaises(ValueError): origin21_state._reconcile(path,'identity','source',operations,set_context=context,require_complete=True,selected=selected,completed_check_only=True)
+            finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
+
+    def test_fresh_final_descriptor_leaf_and_collision_drift(self):
+        import fcntl
+        from deploy.local import origin21_enrollment
+        selected=origin21_profile.STATIC
+        for drift in ('descriptor','leaf','collision'):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as root:
+                path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+                fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+                leaves=[b'synthetic-one',b'synthetic-two']; values=[dict(container_id=str(i)*64,image_id='sha256:'+'a'*64,image_ref=origin21_evidence.IMAGE,namespace='owned-network',service_label='replica'+str(i),app_image_id='sha256:'+'f'*64,build_head='e'*40,build_receipt_sha256='d'*64,deployment_sha256='c'*64,leaf_sha256=hashlib.sha256(leaves[i-1]).hexdigest(),started_at='2026-11-07T12:00:00Z') for i in (1,2)]
+                expected=tuple(origin21_evidence.digest(v) for v in values)
+                calls=[]
+                def inspect(index): calls.append(index); return dict(values[index-1])
+                def leaf(path): return leaves[0] if 'replica1' in str(path) else leaves[1]
+                evidence=origin21_evidence.Evidence(selected.profile,inspect,expected); evidence.path=Path(root)/'evidence'
+                operations={'operator_evidence':evidence}
+                for number,slot in enumerate(selected.bound.origins,1):
+                    for kind in ('lifecycle','credential','grant'):
+                        operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,lambda _:None,slot,kind,evidence.slot_digest)
+                try:
+                    with mock.patch.object(origin21_evidence.origin_credentials,'_file',side_effect=leaf):
+                        evidence.apply(); calls.clear()
+                        state={'completed':len(origin21_state.PHASES),'pending':None,'evidence_digest':hashlib.sha256(evidence.path.read_bytes()).hexdigest()}
+                        with mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                            with self.assertRaises(ValueError):
+                                with origin21_state._completed_evidence_scope(path,'identity','source',state,operations,selected,True,capability):
+                                    if drift=='descriptor': values[1]['container_id']='3'*64
+                                    elif drift=='leaf': leaves[1]=b'changed-leaf'
+                                    else: values[1]['container_id']=values[0]['container_id']
+                            self.assertEqual(calls[:2],[1,2]); self.assertGreaterEqual(len(calls),3)
+                finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
+
+    def test_completed_check_keeps_live_fact_terminal_and_policy_queries(self):
+        import fcntl
+        from deploy.local import origin21_enrollment
+        selected=origin21_profile.STATIC
+        for failure in ('none','fact','terminal','policy'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                path=Path(root)/'setup.json'; lock=Path(root)/'setup.lock'; lock.touch(mode=0o600)
+                fd=os.open(lock,os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                capability=object(); origin21_state._ACTIVE_SETUP_LOCKS[capability]=(fd,selected.profile,lock)
+                leaves=[b'synthetic-one',b'synthetic-two']; values=[dict(container_id=str(i)*64,image_id='sha256:'+'a'*64,image_ref=origin21_evidence.IMAGE,namespace='owned-network',service_label='replica'+str(i),app_image_id='sha256:'+'f'*64,build_head='e'*40,build_receipt_sha256='d'*64,deployment_sha256='c'*64,leaf_sha256=hashlib.sha256(leaves[i-1]).hexdigest(),started_at='2026-11-07T12:00:00Z') for i in (1,2)]
+                expected=tuple(origin21_evidence.digest(v) for v in values); calls=[]; queries=[]; policies=[]
+                def inspect(index): calls.append(index); return dict(values[index-1])
+                def leaf(path): return leaves[0] if 'replica1' in str(path) else leaves[1]
+                def psql(sql):
+                    queries.append(sql)
+                    if failure in ('fact','terminal') and 'contour.origin_credentials' in sql: return origin21_state.DRIFT
+                    return origin21_state.EXACT
+                evidence=origin21_evidence.Evidence(selected.profile,inspect,expected); evidence.path=Path(root)/'evidence'
+                operations={phase:mock.Mock() for phase in origin21_state.PHASES}
+                for op in operations.values(): op.inspect.return_value=origin21_state.EXACT
+                operations['credentials'].commitment.return_value='c'*64; operations['operator_evidence']=evidence
+                def policy_check():
+                    policies.append('checked')
+                    return origin21_state.DRIFT if failure=='policy' else origin21_state.EXACT
+                operations['observer'].inspect.side_effect=policy_check
+                for number,slot in enumerate(selected.bound.origins,1):
+                    for kind in ('lifecycle','credential','grant'):
+                        operations[f'origin_{number}_{kind}']=origin21_enrollment.Fact(selected.bound,psql,slot,kind,evidence.slot_digest)
+                try:
+                    with mock.patch.object(origin21_evidence.origin_credentials,'_file',side_effect=leaf), mock.patch.object(origin21_enrollment.Fact,'_leaf',return_value=hashlib.sha256(leaves[0]).hexdigest()):
+                        evidence.apply(); calls.clear()
+                        state={'completed':len(origin21_state.PHASES),'pending':None,'credential_digest':'c'*64,'evidence_digest':hashlib.sha256(evidence.path.read_bytes()).hexdigest()}
+                        with mock.patch.object(origin21_state.os.path,'lexists',return_value=True), mock.patch.object(origin21_state,'_read',return_value=state), mock.patch.object(origin21_state,'_source_identity',return_value='source'):
+                            def run(): return origin21_state._reconcile(path,'identity','source',operations,set_context=lambda _,**kw:None,require_complete=True,selected=selected,completed_check_only=True,_lock_capability=capability)
+                            if failure=='none': run()
+                            else:
+                                with self.assertRaises(ValueError): run()
+                            self.assertEqual(calls,[1,2,1,2]); self.assertEqual(policies,['checked'])
+                            if failure!='policy':
+                                self.assertTrue(queries)
+                                self.assertTrue(all('contour.origin_terminal_events' in q for q in queries))
+                                if failure=='none': self.assertEqual(len(queries),6)
+                finally: origin21_state._ACTIVE_SETUP_LOCKS.pop(capability,None); os.close(fd)
