@@ -22,7 +22,7 @@ def ledger(version):
     return '{'+','.join(map(str,range(1,version+1)))+'}'
 
 
-def capture_forward(execute,source,write,fence,*,verify21,ledger_sql,inventory_sql):
+def capture_forward(execute,source,write,fence,*,verify21,ledger_sql,inventory_sql,_after_stage=None):
     if execute(ledger_sql)!=ledger(21): raise ValueError('stage 21 ledger mismatch')
     verify21(execute)
     fence()
@@ -34,6 +34,8 @@ def capture_forward(execute,source,write,fence,*,verify21,ledger_sql,inventory_s
             type(value['version']) is not int or value['version']!=1 or value['server_major']!=16 or
             type(value['items']) is not list or not value['items']): raise ValueError('invalid reference inventory')
         raw=(json.dumps({'stage':version,'phase':'enrolled','inventory':value},sort_keys=True,separators=(',',':'))+'\n').encode()
+        if _after_stage is not None:
+            fence();_after_stage(version,execute)
         fence(); write(version,raw); fence()
 
 
@@ -135,7 +137,7 @@ def load_tracked(name):
     finally: os.close(fd)
 
 
-def main(argv):
+def main(argv,*,_hooks=None):
     if len(argv)!=1: raise ValueError('expected a new private output directory')
     sys.dont_write_bytecode=True;os.umask(0o077)
     if not (ROOT/'.git').is_file() or (ROOT/'.git').is_symlink(): raise ValueError('isolated worktree required')
@@ -162,6 +164,7 @@ def main(argv):
     if fixture['clean_head'](call)!=head or fixture['tracked_snapshot'](call)!=sources: raise RuntimeError('source changed')
     required=['scripts/capture-origin25-reference.py','scripts/test-origin21-onboarding.py','scripts/test-postgres-causal-bridge.py','scripts/fixture_psql_transport.py']+['db/opt-in-migrations/'+name+'.sql' for name in MIGRATIONS.values()]
     if any(name not in sources for name in required): raise ValueError('capture source not tracked')
+    if _hooks is not None: _hooks.preflight(sources)
     from deploy.local import origin21_logins,origin21_profile,origin21_schema,origin21_setup,origin21_transport,provision
     fresh=load_tracked('scripts/fixture_psql_transport.py')['FreshPsqlTransport']
     source_bytes={version:(ROOT/'db/opt-in-migrations'/(name+'.sql')).read_bytes() for version,name in MIGRATIONS.items()}
@@ -247,6 +250,8 @@ def main(argv):
         for version in range(15,22):
             path=ROOT/origin21_setup.MIGRATIONS[version]
             origin21_setup.Migration(execute,version,path.read_bytes(),context).apply()
+            if version==17 and _hooks is not None:
+                fence();_hooks.after_stage17(execute);fence()
         class SyntheticLogins(origin21_logins.Logins):
             def _password(self,name):
                 if name not in ('ingress','worker'): raise ValueError('invalid synthetic role')
@@ -261,11 +266,15 @@ def main(argv):
         phase='capture22_25'
         capture_forward(execute,source,write,fence,
             verify21=lambda cb:origin21_schema.require_ready(list(range(1,22)),cb,stage=21,phase='enrolled'),
-            ledger_sql=LEDGER_SQL,inventory_sql=origin21_schema.inventory_sql())
+            ledger_sql=LEDGER_SQL,inventory_sql=origin21_schema.inventory_sql(),
+            **({'_after_stage':_hooks.after_forward} if _hooks is not None else {}))
+        if _hooks is not None and not _hooks.complete: raise RuntimeError('qualification hook incomplete')
         fence()
-        receipt=record({'version':1,'kind':'unreviewed-metadata-capture','source_head':head,
+        receipt_value={'version':1,'kind':'unreviewed-metadata-capture','source_head':head,
             'source_snapshot_sha256':hashlib.sha256(json.dumps(sources,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
-            'image_ref':IMAGE,'image_id':image_id,'postgres_version_num':int(version_text),'inventories':artifacts})
+            'image_ref':IMAGE,'image_id':image_id,'postgres_version_num':int(version_text),'inventories':artifacts}
+        if _hooks is not None: receipt_value['qualification']=_hooks.receipt()
+        receipt=record(receipt_value)
     except BaseException as error:
         primary=error
         kind=type(error).__name__ if type(error) in (ValueError,RuntimeError,TimeoutError,OSError) else 'OtherError'
