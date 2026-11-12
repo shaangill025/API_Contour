@@ -1,7 +1,9 @@
 """Offline orchestration checks; these do not execute or validate SQL."""
+import ast
 import base64
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -51,6 +53,23 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(combined),1)
         self.assertIn('trusted synthetic observer seed required',combined[0])
         self.assertIn('nodered_5_0_9_wire_v1',combined[0])
+    def test_runtime_export_pin_matches_claim_and_does_not_alias_https_product(self):
+        seed=module.SEED_SQL
+        enrollment=next(line for line in seed.splitlines() if line.startswith('SELECT contour.enroll_causal_runtime('))
+        claim=next(line for line in seed.splitlines() if line.startswith('INSERT INTO observer_claim(claim)'))
+        def export_leaf(statement):
+            match=re.search(r"decode\(repeat\('([0-9a-f]{2})',32\),'hex'\)",statement)
+            self.assertIsNotNone(match)
+            return bytes.fromhex(match.group(1))*32
+        enrolled=export_leaf(enrollment)
+        self.assertEqual(enrolled,export_leaf(claim))
+        https=ast.parse((ROOT/'scripts/test-postgres-origin-https.py').read_text())
+        fingerprint=next(node.value for node in ast.walk(https) if isinstance(node,ast.Assign)
+                         and any(isinstance(target,ast.Name) and target.id=='fingerprint' for target in node.targets))
+        self.assertIsInstance(fingerprint,ast.BinOp)
+        self.assertIsInstance(fingerprint.op,ast.Mult)
+        product=ast.literal_eval(fingerprint.left)*ast.literal_eval(fingerprint.right)
+        self.assertNotEqual(enrolled,bytes.fromhex(product))
     def test_diagnostics_preserve_fixture_exactly(self):
         fixture=(ROOT/'db/tests/causal_observer_inbox.sql').read_text()
         sql=module._diagnostic_sql(module.SEED_SQL,fixture)

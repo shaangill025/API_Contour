@@ -131,10 +131,10 @@ INSERT INTO contour.policy_revisions VALUES ('%(t)s','%(rc)s',1,decode('%(renv)s
 UPDATE contour.collector_authorization SET active_revision=1,enabled=true WHERE tenant_id='%(t)s' AND collector_id='%(rc)s'; COMMIT;
 SET ROLE contour_causal_provisioner;
 SELECT contour.register_causal_profile('%(t)s','%(profile)s',decode('%(artifact)s','hex'));
-SELECT contour.enroll_causal_runtime('%(t)s','%(rid)s','%(rc)s','%(rs)s','%(op)s','%(os)s','%(oe)s','%(od)s','%(oi)s','%(life)s','%(profile)s',decode('%(artifact)s','hex'),decode(repeat('33',32),'hex'));
+SELECT contour.enroll_causal_runtime('%(t)s','%(rid)s','%(rc)s','%(rs)s','%(op)s','%(os)s','%(oe)s','%(od)s','%(oi)s','%(life)s','%(profile)s',decode('%(artifact)s','hex'),decode(repeat('ce',32),'hex'));
 RESET ROLE;
 CREATE TEMP TABLE observer_claim (claim contour.causal_session_claim NOT NULL, epoch numeric);
-INSERT INTO observer_claim(claim) VALUES (ROW('%(t)s'::uuid,'%(rid)s'::uuid,'%(rc)s'::uuid,'%(rs)s'::uuid,'%(op)s'::uuid,'%(os)s'::uuid,'%(oe)s'::uuid,'%(od)s'::uuid,'%(oi)s'::uuid,'%(life)s'::uuid,decode(repeat('33',32),'hex'),'nodered_5_0_9_wire_v1',decode('%(artifact)s','hex'),'%(n)s'::uuid,1,decode(repeat('ab',32),'hex'),'%(issued)s'::timestamptz,'%(expires)s'::timestamptz,1,decode('%(renv)s','hex'),'%(issued)s'::timestamptz,'%(expires)s'::timestamptz,900000000,10,1024,1024,60)::contour.causal_session_claim);
+INSERT INTO observer_claim(claim) VALUES (ROW('%(t)s'::uuid,'%(rid)s'::uuid,'%(rc)s'::uuid,'%(rs)s'::uuid,'%(op)s'::uuid,'%(os)s'::uuid,'%(oe)s'::uuid,'%(od)s'::uuid,'%(oi)s'::uuid,'%(life)s'::uuid,decode(repeat('ce',32),'hex'),'nodered_5_0_9_wire_v1',decode('%(artifact)s','hex'),'%(n)s'::uuid,1,decode(repeat('ab',32),'hex'),'%(issued)s'::timestamptz,'%(expires)s'::timestamptz,1,decode('%(renv)s','hex'),'%(issued)s'::timestamptz,'%(expires)s'::timestamptz,900000000,10,1024,1024,60)::contour.causal_session_claim);
 GRANT SELECT,UPDATE ON observer_claim TO contour_causal_issuer;
 SET ROLE contour_causal_issuer;
 UPDATE observer_claim SET epoch=(SELECT epoch FROM contour.issue_causal_session(claim));
