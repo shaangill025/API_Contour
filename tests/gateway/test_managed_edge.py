@@ -137,11 +137,26 @@ class ManagedEdgeTests(unittest.TestCase):
         calls=[]
         def command(args,timeout=10):
             calls.append(args)
-            if args[1]=='image': return json.dumps(['PATH=/usr/bin'] if args[-2]=='{{json .Config.Env}}' else publisher.image_id).encode()
+            if args[1]=='image': return (json.dumps(publisher.image_id)+'\n'+json.dumps(['PATH=/usr/bin'])+'\n').encode()
             if args[1]=='exec': return b'DOC_VERIFIED\nPUBLISHED\n'
             return ('\n'.join(json.dumps(v) for v in values)+'\n').encode()
         with mock.patch.object(edge,'_command',side_effect=command): publisher.publish(b'document','a'*32)
-        self.assertEqual([args[1] for args in calls],['inspect','image','image','exec','inspect','image','image'])
+        self.assertEqual([args[1] for args in calls],['inspect','image','exec','inspect','image'])
+        for args in (calls[1],calls[4]): self.assertEqual(args,['docker','image','inspect','--format','{{json .Id}}\n{{json .Config.Env}}',edge._NODE_IMAGE])
+        image_results=[
+            b'', b'null\n', b'{}\n[]\nextra\n', b'not-json\n[]\n',
+            (json.dumps('sha256:'+'4'*64)+'\n'+json.dumps(['PATH=/usr/bin'])+'\n').encode(),
+            (json.dumps(publisher.image_id)+'\n'+json.dumps(['PATH=/other'])+'\n').encode(),
+            (json.dumps(publisher.image_id)+'\nnull\n').encode(),
+        ]
+        for result in image_results:
+            calls.clear()
+            def invalid_image(args,timeout=10):
+                if args[1]=='image': calls.append(args); return result
+                return command(args,timeout)
+            with self.subTest(result=result),mock.patch.object(edge,'_command',side_effect=invalid_image):
+                with self.assertRaises((ValueError,TypeError)): publisher.publish(b'document','a'*32)
+            self.assertNotIn('exec',[args[1] for args in calls])
         for index,bad in [(1,'sha256:'+'4'*64),(5,False),(6,'2026-11-08T01:00:00Z'),(7,'bridge'),(8,[]),(9,False),(10,[]),(11,['no-new-privileges','seccomp=unconfined']),(13,['/bin/sh']),(14,['-e','evil()']),(15,['NODE_OPTIONS=--require=evil']),(16,True),(17,['SYS_ADMIN']),(18,'host'),(19,'host'),(20,'host'),(21,'host'),(22,[{'PathOnHost':'/dev/sda'}]),(23,[{'Driver':'evil'}]),(24,['c 1:3 rwm'])]:
             previous=values[index]; values[index]=bad
             calls.clear()
