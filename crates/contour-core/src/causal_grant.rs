@@ -100,6 +100,14 @@ struct Payload {
     queue_ttl_seconds: u64,
 }
 
+fn supported_profile(name: &str, hash: &str) -> bool {
+    name == "nodered_5_0_9_v1"
+        || (name == "nodered_5_0_9_wire_v1"
+            && hash == "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e")
+        || (name == "nodered_5_0_9_receiver_v1"
+            && hash == "c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0")
+}
+
 /// Valid signature and checked grant data, not enrollment or capture authorization.
 pub struct VerifiedCausalGrant(Payload, [u8; 32]);
 impl fmt::Debug for VerifiedCausalGrant {
@@ -164,10 +172,7 @@ impl VerifiedCausalGrant {
             ]
             .iter()
             .any(|id| !policy::uuid(id))
-            || !(p.causal_profile == "nodered_5_0_9_v1"
-                || (p.causal_profile == "nodered_5_0_9_wire_v1"
-                    && p.profile_sha256
-                        == "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e"))
+            || !supported_profile(&p.causal_profile, &p.profile_sha256)
             || p.profile_sha256.len() != 64
             || !p
                 .profile_sha256
@@ -259,5 +264,58 @@ impl VerifiedCausalGrant {
     /// Digest of exact authenticated payload bytes, for future revision consistency checks.
     pub fn payload_digest(&self) -> [u8; 32] {
         self.1
+    }
+}
+
+#[cfg(test)]
+mod receiver_profile_tests {
+    use super::{CausalGrantError, CausalGrantKeys, VerifiedCausalGrant, supported_profile};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn receiver_profile_is_fixed_and_separate_from_wire_and_artifact() {
+        let manifest = "c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0";
+        let artifact = "707e7b359fb757c668d8a22c999e067556b5f2a785f9c3333c12fca7debfa660";
+        let wire = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
+        assert!(supported_profile("nodered_5_0_9_receiver_v1", manifest));
+        assert!(!supported_profile("nodered_5_0_9_receiver_v1", artifact));
+        assert!(!supported_profile("nodered_5_0_9_receiver_v1", wire));
+        assert!(!supported_profile("nodered_5_0_9_wire_v1", manifest));
+        assert!(supported_profile("nodered_5_0_9_wire_v1", wire));
+        assert!(supported_profile("nodered_5_0_9_v1", manifest));
+    }
+    #[test]
+    fn signed_receiver_grant_is_data_only_and_requires_exact_manifest() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let keys = CausalGrantKeys::new(&[("test", key.verifying_key().to_bytes())]).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/signed-causal-grant-openssl.json"
+        ))
+        .unwrap();
+        let mut payload = fixture["payload"].clone();
+        payload["causal_profile"] = json!("nodered_5_0_9_receiver_v1");
+        let now = crate::Timestamp::parse("2026-10-07T12:00:00Z")
+            .unwrap()
+            .instant();
+        let signed = |value: &Value| {
+            let raw = serde_json::to_vec(value).unwrap();
+            let signature = key.sign(&[super::DOMAIN, &raw].concat());
+            serde_json::to_vec(&json!({"payload_base64url":URL_SAFE_NO_PAD.encode(&raw),
+                "signature_base64url":URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+                "key_id":"test","signature_profile":"ed25519-v1"}))
+            .unwrap()
+        };
+        payload["profile_sha256"] =
+            json!("c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0");
+        let checked = VerifiedCausalGrant::from_signed_json(&signed(&payload), &keys, now).unwrap();
+        assert_eq!(checked.causal_profile(), "nodered_5_0_9_receiver_v1");
+        payload["profile_sha256"] =
+            json!("707e7b359fb757c668d8a22c999e067556b5f2a785f9c3333c12fca7debfa660");
+        assert!(matches!(
+            VerifiedCausalGrant::from_signed_json(&signed(&payload), &keys, now),
+            Err(CausalGrantError::Semantic)
+        ));
     }
 }
