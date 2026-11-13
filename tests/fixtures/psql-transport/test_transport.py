@@ -28,6 +28,8 @@ class ReceiverInboxDiagnosticTests(unittest.TestCase):
         error=b'psql:<stdin>:321: ERROR:  42702: SECRET_SENTINEL\nCONTEXT:  PL/pgSQL function contour.accept_causal_receiver(secret) line 9 at SECRET_SENTINEL\n'
         values=mod._receiver_inbox_failure(text,output,error)
         self.assertEqual(values,('cases','observer-first','42702','contour.accept_causal_receiver',9,321))
+        seedout=base64.b64encode(b'receiver29-step=migration28\nreceiver29-step=migration29\nreceiver29-step=observer-regression\nreceiver29-step=seed\nreceiver29-seed=authority\nreceiver29-seed=session\nreceiver29-seed=enrollment\n')
+        self.assertEqual(mod._receiver_inbox_failure(text,seedout,error)[0],'seed-enrollment')
         self.assertNotIn('SECRET_SENTINEL',str(mod.ReceiverInboxQueryError(*values)))
         malformed=base64.b64encode(b'receiver29-step=SECRET_SENTINEL\nreceiver-case=SECRET_SENTINEL\n')
         self.assertEqual(mod._receiver_inbox_failure(text,malformed,error)[:2],('unavailable','unavailable'))

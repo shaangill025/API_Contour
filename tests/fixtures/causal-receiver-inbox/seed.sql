@@ -1,6 +1,7 @@
 -- Synthetic assertions only, in the same psql backend as observer_seed.
 -- The observer's V2 REQUEST/origin proof was produced by the existing ingress
 -- and catalog path; no proof or catalog row is inserted here.
+\echo receiver29-seed=authority
 GRANT SELECT ON observer_claim TO contour_admin;
 BEGIN; SET LOCAL ROLE contour_admin;
 SELECT contour.lock_collector((SELECT (claim).tenant_id FROM observer_claim),(SELECT (claim).collector_id FROM observer_claim));
@@ -16,6 +17,7 @@ SET ROLE contour_causal_provisioner;
 SELECT contour.register_causal_profile((SELECT (claim).tenant_id FROM observer_claim),'00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'));
 SELECT contour.enroll_causal_runtime((c.claim).tenant_id,'00000000-0000-4000-8000-00000000ce0b',(c.claim).collector_id,'00000000-0000-4000-8000-00000000ce0f',(c.claim).project_id,(c.claim).service_id,(c.claim).environment_id,(c.claim).deployment_id,'00000000-0000-4000-8000-00000000ce0d','00000000-0000-4000-8000-00000000ce0e','00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),decode(repeat('d7',32),'hex')) FROM observer_claim c;
 RESET ROLE;
+\echo receiver29-seed=session
 CREATE TEMP TABLE receiver_claim29 AS SELECT claim,NULL::numeric AS epoch FROM observer_claim;
 DO $$ DECLARE x contour.causal_session_claim; BEGIN
  SELECT (c.claim).* INTO STRICT x FROM receiver_claim29 c;
@@ -29,17 +31,18 @@ GRANT SELECT,UPDATE ON receiver_claim29 TO contour_causal_issuer;
 SET ROLE contour_causal_issuer;
 UPDATE receiver_claim29 SET epoch=(SELECT epoch FROM contour.issue_causal_session(claim));
 RESET ROLE;
+\echo receiver29-seed=enrollment
 CREATE TEMP TABLE receiver_product29 AS SELECT '00000000-0000-4000-8000-00000000ce10'::uuid AS product_credential_id,decode(repeat('d6',32),'hex') AS product_leaf_sha256;
 CREATE TEMP TABLE receiver_enrollment29(generation text,credential_id uuid,issued_at timestamptz,expires_at timestamptz,commitment bytea);
 GRANT SELECT ON receiver_claim29,receiver_product29 TO contour_causal_evidence_provisioner;
 GRANT SELECT,INSERT ON receiver_enrollment29 TO contour_causal_evidence_provisioner;
 SET ROLE contour_causal_evidence_provisioner;
-INSERT INTO receiver_enrollment29 SELECT * FROM contour.enroll_causal_receiver(ROW(
+INSERT INTO receiver_enrollment29 SELECT result.* FROM receiver_claim29 c CROSS JOIN receiver_product29 m CROSS JOIN LATERAL contour.enroll_causal_receiver(ROW(
  (c.claim).tenant_id,(c.claim).runtime_id,c.epoch,(c.claim).instance_id,(c.claim).lifecycle_id,
  m.product_credential_id,m.product_leaf_sha256,(c.claim).export_leaf,decode(repeat('d8',32),'hex'),decode(repeat('d9',32),'hex'),decode(repeat('da',32),'hex'),
- (c.claim).grant_issued,(c.claim).grant_expires,(c.claim).policy_issued,(c.claim).policy_expires,60000000)::contour.receiver_enrollment_claim)
- FROM receiver_claim29 c CROSS JOIN receiver_product29 m;
+ (c.claim).grant_issued,(c.claim).grant_expires,(c.claim).policy_issued,(c.claim).policy_expires,60000000)::contour.receiver_enrollment_claim) AS result;
 RESET ROLE;
+\echo receiver29-seed=pairs
 CREATE TEMP TABLE receiver_pairs(name text PRIMARY KEY,receiver_raw bytea NOT NULL,receiver_proof contour.verified_receiver_claim NOT NULL,observer_raw bytea NOT NULL,observer_proof contour.verified_observer_claim NOT NULL);
 GRANT SELECT ON observer_seed,receiver_claim29,receiver_enrollment29 TO contour_owner;
 GRANT INSERT ON receiver_pairs TO contour_owner;

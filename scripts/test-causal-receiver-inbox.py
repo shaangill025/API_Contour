@@ -99,7 +99,7 @@ def require_receipt(directory):
 
 _ERROR_TYPES=frozenset(('ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','ReceiverInboxQueryError','ObserverQueryError','TransportError'))
 _ERROR_FILES=frozenset(('test-causal-receiver-inbox.py','test-causal-observer-inbox.py','test-human-origin.py','test-postgres-origin-submit.py','test-postgres-v2-submit.py','test-postgres-submit.py','test-postgres-authority.py','test-postgres-tls.py','fixture_psql_transport.py'))
-_ERROR_STEPS=frozenset(('migration28','migration29','observer-regression','seed','cases'))
+_ERROR_STEPS=frozenset(('migration28','migration29','observer-regression','seed','cases','seed-authority','seed-session','seed-enrollment','seed-pairs'))
 _ERROR_CASES=frozenset(('parser','observer-first','receiver-first','receiver-first-mismatch','quota','revoked-product'))
 _ERROR_STATES=frozenset(('22P02','23502','23503','23505','23514','40001','42501','42601','42702','42703','42804','42883','42P01','42P07','42710','55000','54000','P0001','XX000'))
 _ERROR_FUNCTIONS=frozenset(('inline_code_block','contour.accept_causal_observer','contour.observer_wire','contour.human_observation_origin','contour.catalog_origin_mapping','contour.receiver_inbox_wire','contour.receiver_enrollment_current','contour.receiver_assignment_current','contour.receiver_assignment_metadata','contour.receiver_tombstone_metadata','contour.receiver_observer_current','contour.accept_causal_receiver','contour.enroll_causal_receiver','contour.current_causal_receiver','contour.receiver_claim_current','contour.causal_session_locked','contour.gateway_claim_current','contour.begin_origin_operation','contour.lock_origin_credential','contour.lock_origin_collector','contour.causal_json_canonical'))

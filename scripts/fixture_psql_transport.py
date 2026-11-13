@@ -294,7 +294,7 @@ _RECEIVER29_FUNCTIONS=_RECEIVER_FUNCTIONS | _OBSERVER_FUNCTIONS | frozenset(('co
 
 class ReceiverInboxQueryError(RuntimeError):
     def __init__(self,step,case,state,function,line,source_line):
-        self.step=step if step in _RECEIVER29_STEPS else 'unavailable'
+        self.step=step if step in _RECEIVER29_STEPS or step in ('seed-authority','seed-session','seed-enrollment','seed-pairs') else 'unavailable'
         self.case=case if case in _RECEIVER29_CASES else 'unavailable'
         self.sqlstate=state if state in _RECEIVER29_STATES else 'unavailable'
         self.function=function if function in _RECEIVER29_FUNCTIONS else 'unavailable'
@@ -314,6 +314,8 @@ def _receiver_inbox_failure(text,out,err):
         steps=[x.decode('ascii') for x in re.findall(rb'(?m)^receiver29-step=([^\r\n]*)\r?$',stdout)]
         step=steps[-1] if steps and steps==list(_RECEIVER29_STEPS[:len(steps)]) else 'unavailable'
         cases=[x.decode('ascii') for x in re.findall(rb'(?m)^receiver-case=([^\r\n]*)\r?$',stdout)]
+        seeds=[x.decode('ascii') for x in re.findall(rb'(?m)^receiver29-seed=([^\r\n]*)\r?$',stdout)]
+        if step=='seed' and seeds and seeds==['authority','session','enrollment','pairs'][:len(seeds)]: step='seed-'+seeds[-1]
         case=cases[-1] if cases and cases==list(_RECEIVER29_CASES[:len(cases)]) else ('revoked-product' if cases==['revoked-product'] and text.startswith('\\set VERBOSITY verbose\n\\echo receiver-case=revoked-product\n') else 'unavailable')
         errors=re.findall(rb'(?m)^(?:psql:<stdin>:([1-9][0-9]{0,5}): )?ERROR:[ \t]+([0-9A-Z]{5}):[^\r\n]*\r?$',err)
         if len(errors)!=1: return (step,case,'unavailable','unavailable',None,None)
