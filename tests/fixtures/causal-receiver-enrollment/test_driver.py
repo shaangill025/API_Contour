@@ -31,6 +31,9 @@ class DriverTests(unittest.TestCase):
         hook = object.__new__(driver.Hooks)
         hook.base = Base()
         hook.complete = False
+        hook.existing = object()
+        hook.race_results = ()
+        hook.race_module = {'run_races': lambda *_: ('exact_retry',), 'RESULTS': ('exact_retry',)}
         hook.files = {'m26': b'original26', 'm27': b'original27',
                       'm28': b'original28', 'fixture': b'fixture'}
         seen = []
@@ -69,7 +72,8 @@ class DriverTests(unittest.TestCase):
     def test_receipt_does_not_claim_races_or_peer(self):
         hook = object.__new__(driver.Hooks)
         hook.complete = True
-        self.assertEqual(hook.receipt()['public_enrollment_races_verified'], False)
+        hook.race_results = ('exact_retry',)
+        self.assertEqual(hook.receipt()['public_enrollment_races_verified'], ['exact_retry'])
         self.assertEqual(hook.receipt()['authenticated_transport'], False)
         hook.complete = False
         with self.assertRaises(RuntimeError):

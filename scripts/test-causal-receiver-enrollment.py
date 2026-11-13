@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable SQL28 fixture; no deployment, peer, TLS or race qualification."""
+"""Disposable SQL28 fixture; no deployment, peer or TLS qualification."""
 import hashlib
 import importlib.util
 from pathlib import Path
@@ -13,6 +13,7 @@ FILES = {
     'm27': 'db/opt-in-migrations/0027_causal_observer_inbox.sql',
     'm28': 'db/opt-in-migrations/0028_causal_receiver_enrollment.sql',
     'fixture': 'db/tests/causal_receiver_enrollment.sql',
+    'races': 'scripts/receiver_enrollment_races.py',
 }
 
 
@@ -50,13 +51,17 @@ class Hooks:
     diagnostic_context = 'receiver-v1'
     def __init__(self, existing, schema):
         self.base = existing.QualificationHooks('schema25', schema)
+        self.existing = existing
+        self.race_results = ()
+        self.race_module = None
         self.files = None
         self.complete = False
 
     def preflight(self, sources):
         self.base.preflight(sources)
         required = ['scripts/test-causal-receiver-enrollment.py',
-                    'tests/fixtures/causal-receiver-enrollment/test_driver.py', *FILES.values()]
+                    'tests/fixtures/causal-receiver-enrollment/test_driver.py',
+                    'tests/fixtures/causal-receiver-enrollment/test_races.py', *FILES.values()]
         if any(name not in sources for name in required):
             raise ValueError('receiver source missing')
         self.files = {}
@@ -69,6 +74,10 @@ class Hooks:
                 raise ValueError('receiver source changed')
             self.files[key] = raw
         require_applicable(self.files['m28'])
+        namespace={'__name__':'receiver_enrollment_races','__file__':str(ROOT / FILES['races'])}
+        exec(compile(self.files['races'],namespace['__file__'],'exec'),namespace)
+        if (ROOT / FILES['races']).read_bytes()!=self.files['races']: raise ValueError('race source changed')
+        self.race_module=namespace
 
     def after_stage17(self, execute):
         self.base.after_stage17(execute)
@@ -93,13 +102,17 @@ class Hooks:
             expected = '{' + ','.join(str(x) for x in range(1, 29)) + '}'
             if execute('SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;') != expected:
                 raise RuntimeError('receiver ledger mismatch')
+            if self.race_module is None: raise RuntimeError('receiver race source unavailable')
+            print('receiver-stage=races',file=sys.stderr,flush=True)
+            self.race_results=self.race_module['run_races'](execute,self.existing)
+            if self.race_results!=self.race_module['RESULTS']: raise RuntimeError('receiver races incomplete')
             self.complete = True
 
     def receipt(self):
         if not self.complete:
             raise RuntimeError('receiver qualification incomplete')
         return {'mode': 'receiver28', 'schema_stage': 28, 'scope': 'synthetic-sql-only',
-                'authenticated_transport': False, 'public_enrollment_races_verified': False}
+                'authenticated_transport': False, 'public_enrollment_races_verified': list(self.race_results)}
 
 
 def main(argv):
@@ -119,7 +132,7 @@ def main(argv):
     capture['main']([str(path)], _hooks=hooks)
     if not hooks.complete:
         raise RuntimeError('receiver qualification incomplete')
-    print('PASS: receiver28 synthetic SQL; public enrollment races unverified', flush=True)
+    print('PASS: receiver28 synthetic SQL and public enrollment races', flush=True)
 
 
 if __name__ == '__main__':
