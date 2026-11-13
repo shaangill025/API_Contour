@@ -367,6 +367,35 @@ def signed_payload(template,domain,key,directory,name):
     return json.dumps(envelope,separators=(',',':')).encode()
 
 
+def inbox_context_unknown(base,work,env,execute):
+    """Prove a post-commit context leak for one exact synthetic batch."""
+    batch_id=str(uuid.uuid4()); tenant,runtime=IDS[:2]
+    if any(not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',x) for x in (tenant,runtime,batch_id)): raise ValueError('context fixture identity')
+    query=f"SELECT count(*) FROM contour.causal_inbox_batches WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND batch_id='{batch_id}';"
+    if execute(query)!='0': raise AssertionError('context batch already exists')
+    batch={'wire_version':1,'batch_id':batch_id,'tenant_id':tenant,'runtime_id':runtime,'session_epoch':1,'first_seq':2,'last_seq':2,'events':[{'kind':'root','event_id':'2'*32,'seq':2,'root':'b'*32}]}
+    path=work/'inbox-context-batch.json';path.write_text(json.dumps(batch,separators=(',',':')))
+    setup=("BEGIN; CREATE FUNCTION contour.fixture_inbox_context_leak() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+           "PERFORM set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000002',false); RETURN NEW; END $$; "
+           "CREATE CONSTRAINT TRIGGER fixture_inbox_context_leak AFTER INSERT ON contour.causal_inbox_batches DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+           f"WHEN (NEW.tenant_id='{tenant}'::uuid AND NEW.runtime_id='{runtime}'::uuid AND NEW.batch_id='{batch_id}'::uuid) "
+           "EXECUTE FUNCTION contour.fixture_inbox_context_leak(); COMMIT;")
+    execute(setup)
+    try:
+        args=list(base);args[11]=str(path);result=None;probe_error=None
+        try: result=run_process(args+['inbox_context_unknown'],timeout=40,env=env,limit=4096)
+        except Exception as error: probe_error=error
+        committed=execute(query)
+        if committed!='1': raise AssertionError('context failure did not commit exact batch')
+        outcomes={b'CONTEXT_OUTCOME_UNKNOWN\n':'unknown',b'CONTEXT_UNEXPECTED_SUCCESS\n':'unexpected-success',b'CONTEXT_WRONG_OUTCOME\n':'wrong'}
+        outcome=outcomes.get(result.stdout,'wrong') if result is not None and result.returncode==0 and not result.stderr else 'wrong'
+        print('inbox-context committed=1 outcome='+outcome,flush=True)
+        if probe_error is not None: raise probe_error
+        if outcome!='unknown': raise AssertionError('context failure protocol mismatch')
+    finally:
+        execute('DROP TRIGGER fixture_inbox_context_leak ON contour.causal_inbox_batches; DROP FUNCTION contour.fixture_inbox_context_leak();')
+
+
 def run_probe_cases(base,work,env,counts,state):
     """Run all explicit negative and positive probe cases with checked effects."""
     def stage(name): state['stages'].append(name)
@@ -565,6 +594,9 @@ def main():
             def counts():
                 return execute("SELECT (SELECT count(*) FROM contour.causal_sessions)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_batches)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_events)::text||'|'||coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='"+IDS[0]+"'),'0')||'|'||coalesce((SELECT sum(octet_length(canonical_batch))::text FROM contour.causal_inbox_batches),'0')||'|'||(SELECT count(DISTINCT receipt_id) FROM contour.causal_inbox_batches)::text;")
             run_probe_cases(base,work,env,counts,state)
+            state['status']='failed';state['current_case']='inbox_context_unknown'
+            inbox_context_unknown(base,work,env,execute)
+            state['stages'].append('inbox_context_unknown');state.pop('current_case',None);state['status']='passed'
     except Exception as error:
         state['failure_type']=type(error).__name__
         state['failure_category']=failure_category(error)

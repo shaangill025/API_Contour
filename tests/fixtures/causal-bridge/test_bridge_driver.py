@@ -13,6 +13,29 @@ G=MODULE['main'].__globals__
 
 
 class DriverTests(unittest.TestCase):
+    def test_inbox_context_checks_exact_commit_before_protocol_and_always_cleans(self):
+        import contextlib,io
+        for output, expected_error in ((b'CONTEXT_OUTCOME_UNKNOWN\n',False),(b'CONTEXT_UNEXPECTED_SUCCESS\n',True),(b'private-canary',True)):
+            calls=[]; captured=io.StringIO()
+            def execute(sql):
+                if sql.startswith('SELECT count(*)'):
+                    calls.append('count');return '0' if calls.count('count')==1 else '1'
+                if sql.startswith('BEGIN; CREATE FUNCTION'):
+                    self.assertIn('DEFERRABLE INITIALLY DEFERRED',sql);calls.append('setup');return ''
+                if sql.startswith('DROP TRIGGER'):
+                    calls.append('cleanup');return ''
+                raise AssertionError('unexpected query')
+            def runner(args,**kwargs):
+                calls.append('probe');self.assertEqual(args[-1],'inbox_context_unknown')
+                return subprocess.CompletedProcess(args,0,output,b'')
+            with tempfile.TemporaryDirectory() as temp, mock.patch.dict(G,{'run_process':runner}), contextlib.redirect_stdout(captured):
+                if expected_error:
+                    with self.assertRaises(AssertionError): MODULE['inbox_context_unknown'](['probe']*24,Path(temp),{},execute)
+                else: MODULE['inbox_context_unknown'](['probe']*24,Path(temp),{},execute)
+            self.assertEqual(calls,['count','setup','probe','count','cleanup'])
+            self.assertNotIn('private-canary',captured.getvalue())
+            self.assertIn('inbox-context committed=1 outcome=',captured.getvalue())
+
     def test_all_probe_cases_and_persisted_effects(self):
         calls=[]; state={'stages':[]}; work=Path('/synthetic'); base=['probe']+['original']*23
         expected=[('untrusted_tls_ca',4,'/synthetic/untrusted.crt','fixture issuer TLS failed'),
