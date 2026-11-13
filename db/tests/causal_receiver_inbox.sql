@@ -43,6 +43,7 @@ DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='contour_causal_receiver_writer' AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls)
  OR NOT has_function_privilege('contour_causal_receiver_writer','contour.accept_causal_receiver(bytea,contour.verified_receiver_claim)','EXECUTE')
  OR has_function_privilege('contour_runtime','contour.accept_causal_receiver(bytea,contour.verified_receiver_claim)','EXECUTE')
+ OR has_function_privilege('contour_causal_receiver_writer','contour.causal_json_canonical(jsonb)','EXECUTE')
  OR has_table_privilege('contour_causal_receiver_writer','contour.causal_receiver_inbox','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
  OR has_table_privilege('contour_causal_receiver_writer','contour.causal_receiver_assignments','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
  OR has_table_privilege('contour_causal_receiver_writer','contour.causal_receiver_tombstones','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
@@ -60,6 +61,16 @@ INSERT INTO receiver_receipts SELECT name,contour.accept_causal_receiver(receive
 RESET ROLE;
 CREATE TEMP TABLE receiver_usage AS SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id=(SELECT (convert_from(receiver_raw,'UTF8')::jsonb->>'tenant_id')::uuid FROM receiver_pairs WHERE name='observer-first');
 GRANT SELECT ON receiver_usage TO contour_causal_receiver_writer;
+-- Prepare canonical adversarial inputs as the fixture owner. The restricted
+-- writer must not gain access to private canonicalization helpers for a test.
+CREATE TEMP TABLE receiver_mutations AS
+ SELECT name,
+ convert_to(contour.causal_json_canonical(jsonb_set(convert_from(receiver_raw,'UTF8')::jsonb,'{local_root}',to_jsonb(repeat('f',32)))),'UTF8') AS changed_root,
+ convert_to(contour.causal_json_canonical(jsonb_set(convert_from(receiver_raw,'UTF8')::jsonb,'{receiver_session_epoch}',to_jsonb(((convert_from(receiver_raw,'UTF8')::jsonb->>'receiver_session_epoch')::numeric+1)::text))),'UTF8') AS changed_epoch,
+ convert_to(contour.causal_json_canonical(jsonb_set(convert_from(receiver_raw,'UTF8')::jsonb,'{gateway_id}',to_jsonb('00000000-0000-4000-8000-00000000ceff'::text))),'UTF8') AS changed_gateway,
+ convert_to(contour.causal_json_canonical(jsonb_set(convert_from(receiver_raw,'UTF8')::jsonb,'{tenant_id}',to_jsonb('00000000-0000-4000-8000-00000000cefe'::text))),'UTF8') AS changed_tenant
+ FROM receiver_pairs WHERE name='observer-first';
+GRANT SELECT ON receiver_mutations TO contour_causal_receiver_writer;
 SET ROLE contour_causal_receiver_writer;
 DO $$ DECLARE r bytea; BEGIN
  SELECT contour.accept_causal_receiver(receiver_raw,receiver_proof) INTO STRICT r FROM receiver_pairs WHERE name='observer-first';
@@ -69,7 +80,7 @@ DO $$ DECLARE pair record; altered bytea; proof contour.verified_receiver_claim;
  SELECT * INTO STRICT pair FROM receiver_pairs WHERE name='observer-first';
  proof:=pair.receiver_proof;proof.evidence_peer_leaf:=decode(repeat('ff',32),'hex');
  BEGIN PERFORM contour.accept_causal_receiver(pair.receiver_raw,proof); RAISE EXCEPTION 'wrong receiver peer admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
- altered:=convert_to(contour.causal_json_canonical(jsonb_set(convert_from(pair.receiver_raw,'UTF8')::jsonb,'{local_root}',to_jsonb(repeat('f',32)))),'UTF8');
+ SELECT changed_root INTO STRICT altered FROM receiver_mutations WHERE name=pair.name;
  BEGIN PERFORM contour.accept_causal_receiver(altered,pair.receiver_proof); RAISE EXCEPTION 'changed receiver assignment admitted'; EXCEPTION WHEN unique_violation THEN NULL; END;
 END $$;
 DO $$ DECLARE pair record; proof contour.verified_receiver_claim; BEGIN
@@ -77,13 +88,13 @@ DO $$ DECLARE pair record; proof contour.verified_receiver_claim; BEGIN
  proof:=pair.receiver_proof;proof.enrollment_generation:=repeat('f',32);
  BEGIN PERFORM contour.accept_causal_receiver(pair.receiver_raw,proof); RAISE EXCEPTION 'wrong receiver generation admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
-DO $$ DECLARE pair record; body jsonb; changed bytea; BEGIN
- SELECT * INTO STRICT pair FROM receiver_pairs WHERE name='observer-first';body:=convert_from(pair.receiver_raw,'UTF8')::jsonb;
- changed:=convert_to(contour.causal_json_canonical(jsonb_set(body,'{receiver_session_epoch}',to_jsonb(((body->>'receiver_session_epoch')::numeric+1)::text))),'UTF8');
+DO $$ DECLARE pair record; changed bytea; BEGIN
+ SELECT * INTO STRICT pair FROM receiver_pairs WHERE name='observer-first';
+ SELECT changed_epoch INTO STRICT changed FROM receiver_mutations WHERE name=pair.name;
  BEGIN PERFORM contour.accept_causal_receiver(changed,pair.receiver_proof); RAISE EXCEPTION 'wrong receiver epoch admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
- changed:=convert_to(contour.causal_json_canonical(jsonb_set(body,'{gateway_id}',to_jsonb('00000000-0000-4000-8000-00000000ceff'::text))),'UTF8');
+ SELECT changed_gateway INTO STRICT changed FROM receiver_mutations WHERE name=pair.name;
  BEGIN PERFORM contour.accept_causal_receiver(changed,pair.receiver_proof); RAISE EXCEPTION 'wrong gateway admitted'; EXCEPTION WHEN check_violation THEN NULL; END;
- changed:=convert_to(contour.causal_json_canonical(jsonb_set(body,'{tenant_id}',to_jsonb('00000000-0000-4000-8000-00000000cefe'::text))),'UTF8');
+ SELECT changed_tenant INTO STRICT changed FROM receiver_mutations WHERE name=pair.name;
  BEGIN PERFORM contour.accept_causal_receiver(changed,pair.receiver_proof); RAISE EXCEPTION 'wrong tenant admitted'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END $$;
 RESET ROLE;
