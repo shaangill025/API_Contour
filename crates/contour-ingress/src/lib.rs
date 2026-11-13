@@ -36,6 +36,8 @@ pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
 pub use causal_launch_inspect::{CandidateSources, InspectError, InspectedDeployment};
 pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
 mod causal_receiver_material;
+#[cfg(unix)]
+mod causal_receiver_material_checked;
 pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
 #[cfg(unix)]
 pub use causal_launch_process::{
@@ -48,6 +50,11 @@ pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
 pub use causal_permit::CausalPermitOwner;
 pub use causal_receiver_material::{
     LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
+};
+#[cfg(unix)]
+pub use causal_receiver_material_checked::{
+    CheckedReceiverMaterial, ReceiverMaterialCheckError, ReceiverMaterialPaths,
+    check_receiver_material,
 };
 pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_metadata};
 pub use causal_service::{CausalRegistry, CausalServer};

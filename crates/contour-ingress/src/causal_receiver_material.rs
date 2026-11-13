@@ -79,7 +79,7 @@ pub fn check_local_receiver_material(
     )
 }
 
-fn check_at(
+pub(crate) fn check_at(
     input: &ReceiverMaterialInputs<'_>,
     now: UnixTime,
 ) -> Result<LocalReceiverMaterialIdentity, MaterialError> {

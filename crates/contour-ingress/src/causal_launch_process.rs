@@ -275,7 +275,7 @@ pub struct DockerPolicy {
     digest: [u8; 32],
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
+pub(crate) struct Identity {
     dev: u64,
     ino: u64,
     mode: u32,
@@ -288,7 +288,13 @@ struct Identity {
     ctime_ns: i64,
 }
 impl Identity {
-    fn from(m: &std::fs::Metadata) -> Self {
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        self.dev == other.dev
+            && self.ino == other.ino
+            && self.mode == other.mode
+            && self.uid == other.uid
+    }
+    pub(crate) fn from(m: &std::fs::Metadata) -> Self {
         Self {
             dev: m.dev(),
             ino: m.ino(),
@@ -305,7 +311,7 @@ impl Identity {
 }
 // Component-safe path resolution. The last component may be a socket; parent
 // directories must be controlled by root or the operator and not group writable.
-fn checked_path(path: &Path) -> Result<std::fs::Metadata, ProcessError> {
+pub(crate) fn checked_path(path: &Path) -> Result<std::fs::Metadata, ProcessError> {
     let bytes = path.as_os_str().as_bytes();
     if !path.is_absolute()
         || bytes.ends_with(b"/")
@@ -383,7 +389,7 @@ fn checked_path(path: &Path) -> Result<std::fs::Metadata, ProcessError> {
     Ok(m)
 }
 
-fn hash_executable(path: &Path) -> Result<([u8; 32], Identity), ProcessError> {
+pub(crate) fn hash_executable(path: &Path) -> Result<([u8; 32], Identity), ProcessError> {
     let m = checked_path(path)?;
     // SAFETY: geteuid has no arguments.
     if !m.is_file()
@@ -774,7 +780,7 @@ impl DockerPolicy {
         })
     }
 }
-fn check_deadline(deadline: Instant) -> Result<(), ProcessError> {
+pub(crate) fn check_deadline(deadline: Instant) -> Result<(), ProcessError> {
     let now = Instant::now();
     if deadline <= now || deadline.duration_since(now) > PRELAUNCH_MAX {
         Err(ProcessError::Unsafe)
@@ -895,7 +901,7 @@ impl Drop for SpawnGuard {
             });
     }
 }
-fn launch(mut cmd: Command, deadline: Instant) -> Result<LocalProcess, ProcessError> {
+pub(crate) fn launch(mut cmd: Command, deadline: Instant) -> Result<LocalProcess, ProcessError> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
