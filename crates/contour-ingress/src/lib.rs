@@ -35,6 +35,13 @@ pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
 #[cfg(unix)]
 pub use causal_launch_inspect::{CandidateSources, InspectError, InspectedDeployment};
 pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
+#[cfg(unix)]
+mod causal_receiver_image;
+#[cfg(unix)]
+pub use causal_receiver_image::{
+    ReceiverImageEvidence, ReceiverImageRequest, StageError as ReceiverImageError,
+    observe_receiver_image,
+};
 mod causal_receiver_material;
 #[cfg(unix)]
 mod causal_receiver_material_checked;

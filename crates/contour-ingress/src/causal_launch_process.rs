@@ -562,6 +562,86 @@ pub(crate) struct FixedCreateSpec<'a> {
     pub(crate) mounts: Vec<(&'a str, &'a str)>,
 }
 impl DockerPolicy {
+    // Fixed 504 image recipes; results are untrusted process output, not evidence.
+    pub(crate) fn receiver_image_inspect(
+        &self,
+        image: [u8; 32],
+        arm64: bool,
+        deadline: Instant,
+    ) -> Result<LocalProcess, ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        let mut cmd = Command::new(&self.binary);
+        let image = format!("sha256:{}", hex(&image));
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args([
+                "image",
+                "inspect",
+                "--platform",
+                if arm64 { "linux/arm64" } else { "linux/amd64" },
+                &image,
+            ]);
+        launch(cmd, deadline)
+    }
+    pub(crate) fn receiver_image_save(
+        &self,
+        stage: &crate::causal_receiver_image::ImageStage,
+        deadline: Instant,
+    ) -> Result<LocalProcess, ProcessError> {
+        const DONOR: &str = "docker.io/library/node:24.22.3-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5";
+        const MAX_ARCHIVE: libc::rlim_t = 1024 * 1024 * 1024;
+        check_deadline(deadline)?;
+        stage.revalidate(false).map_err(|_| ProcessError::Unsafe)?;
+        self.revalidate()?;
+        check_deadline(deadline)?;
+        let mut cmd = Command::new(&self.binary);
+        let image = format!("sha256:{}", hex(&stage.image()));
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args([
+                "image",
+                "save",
+                "--platform",
+                if stage.arm64() {
+                    "linux/arm64"
+                } else {
+                    "linux/amd64"
+                },
+                "--output",
+            ])
+            .arg(stage.archive_path())
+            .args([DONOR, APPROVED_IMAGE, &image]);
+        // SAFETY: setrlimit is async-signal-safe and changes only the owned child.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::umask(0o077);
+                let limit = libc::rlimit {
+                    rlim_cur: MAX_ARCHIVE,
+                    rlim_max: MAX_ARCHIVE,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        launch(cmd, deadline)
+    }
+    pub(crate) fn receiver_revalidate(&self) -> Result<(), ProcessError> {
+        self.revalidate()
+    }
+
     pub(crate) fn daemon_endpoint(&self) -> String {
         format!("unix://{}", self.socket.to_string_lossy())
     }
