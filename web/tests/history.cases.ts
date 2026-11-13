@@ -218,3 +218,39 @@ test('pagination refuses a repeated cursor and display overflow',()=>{
   assert.throws(()=>acceptConnectionPage(null,seen,499,2));
   acceptConnectionPage(null,seen,499,1);
 });
+
+test('independently fenced detail and origin publish while connections remain pending',async()=>{
+  const {historyRead}=await import('../src/history-read.ts');
+  const previous=globalThis.fetch; const view='sv1_'+'m'.repeat(43);
+  globalThis.fetch=async()=>Response.json({authenticated:true},{headers:{'x-contour-session-view':view}});
+  try {
+    for (const connectionFails of [false,true]) {
+      let release!:()=>void; const deferred=new Promise<void>(resolve=>{release=resolve;});
+      const events:string[]=[]; const ctrl=new AbortController(); let pinned:string|null=null;
+      const onView=(value:string)=>{if(pinned!==null && pinned!==value) throw new Error('view changed'); pinned=value;};
+      const start=(name:string,read:()=>Promise<string>)=>historyRead(read,ctrl.signal,onView,()=>true,
+        value=>events.push(`${name}:${value}`),()=>events.push(`${name}:error`),()=>events.push(`${name}:finished`));
+      const detail=start('detail',async()=> 'ready'); const origin=start('origin',async()=> 'ready');
+      const links=start('connections',async()=>{await deferred; if(connectionFails) throw new Error('unavailable'); return 'ready';});
+      await Promise.all([detail,origin]);
+      assert.deepEqual(events.sort(),['detail:finished','detail:ready','origin:finished','origin:ready']);
+      release(); await links;
+      assert.ok(events.includes(connectionFails ? 'connections:error' : 'connections:ready'));
+      assert.ok(events.includes('connections:finished'));
+    }
+  } finally {globalThis.fetch=previous;}
+});
+
+test('independent history read discards stale success and errors',async()=>{
+  const {historyRead}=await import('../src/history-read.ts'); const previous=globalThis.fetch;
+  const view='sv1_'+'n'.repeat(43); globalThis.fetch=async()=>Response.json({authenticated:true},{headers:{'x-contour-session-view':view}});
+  try {
+    for(const rejects of [false,true]) {
+      let release!:()=>void; let started!:()=>void; const gate=new Promise<void>(resolve=>{release=resolve;});
+      const began=new Promise<void>(resolve=>{started=resolve;}); let current=true; const events:string[]=[];
+      const pending=historyRead(async()=>{started(); await gate; if(rejects) throw new Error('late'); return 'late';},new AbortController().signal,()=>{},()=>current,
+        ()=>events.push('publish'),()=>events.push('error'),()=>events.push('finish'));
+      await began; current=false; release(); await pending; assert.deepEqual(events,[]);
+    }
+  } finally {globalThis.fetch=previous;}
+});

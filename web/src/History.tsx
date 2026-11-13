@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import {api, ApiError, SessionChanged, SessionViewFailure, sessionFenced, onSessionInvalidated} from './api.ts';
 import type {HistoricalConnection, HistoricalOrigin, Observation} from './domain.ts';
 import {acceptConnectionPage, requestEpoch} from './domain.ts';
+import {historyRead} from './history-read.ts';
 
 // A keyed instance is scoped to one operation. Sequence numbers also prevent
 // overlapping requests within that instance from replacing newer results.
@@ -35,10 +36,10 @@ export function History({operationId}: {operationId: string}) {
     pending.current?.abort(); const controller=new AbortController(); pending.current=controller;
     return {controller,serial:generation.current.start()};
   }
-  function failed(e: unknown, serial: number, setMessage: (message:string)=>void) {
+  function failed(e: unknown, serial: number, setMessage: (message:string)=>void, fallback='Observation history could not be verified.') {
     if (!generation.current.current(serial)) return;
     if (e instanceof SessionChanged || e instanceof SessionViewFailure || (e instanceof ApiError && e.status===401)) { clearHistory(); setError('Session changed or expired. Reload history.'); return; }
-    setMessage(e instanceof ApiError ? e.message : 'Observation history could not be verified.');
+    setMessage(e instanceof ApiError ? e.message : fallback);
   }
   function captureView(serial:number, view:string) {
     if (!generation.current.current(serial)) throw new SessionChanged();
@@ -60,25 +61,19 @@ export function History({operationId}: {operationId: string}) {
     const {controller,serial}=begin(); setLoading(false);
     setDetail(null); setDetailError(''); setDetailLoading(true);
     setOrigin(null); setOriginError(''); setOriginLoading(true); clearConnections(); setConnectionLoading(true);
-    try {
-      const result=await sessionFenced(async (signal,view)=>{
-        const [item, evidence, links]=await Promise.all([api.observation(operationId,id,signal,view),api.observationOrigin(operationId,id,signal,view).then(value=>({value}),error=>({error})),api.observationConnections(operationId,id,undefined,signal,view).then(value=>({value}),error=>({error}))]);
-        if ('error' in evidence && (evidence.error instanceof SessionChanged || (evidence.error instanceof ApiError && evidence.error.status===401))) throw evidence.error;
-        if ('error' in links && (links.error instanceof SessionChanged || links.error instanceof SessionViewFailure || (links.error instanceof ApiError && links.error.status===401))) throw links.error;
-        return {item,evidence,links};
-      },controller.signal,view=>captureView(serial,view));
-      if (!generation.current.current(serial)) return;
-      setDetail(result.item);
-      if ('value' in result.evidence) setOrigin(result.evidence.value);
-      else setOriginError(result.evidence.error instanceof ApiError ? result.evidence.error.message : 'Historical origin could not be verified.');
-      if ('value' in result.links) { setConnections(result.links.value.items); setConnectionCursor(result.links.value.next_cursor); setConnectionLoaded(true); if (result.links.value.next_cursor) connectionCursors.current.add(result.links.value.next_cursor); }
-      else setConnectionError(result.links.error instanceof ApiError ? result.links.error.message : 'Historical connections could not be verified.');
-    } catch (e) { failed(e,serial,setDetailError); }
-    finally { if (generation.current.current(serial)) { setDetailLoading(false); setOriginLoading(false); setConnectionLoading(false); } }
+    const onView=(view:string)=>captureView(serial,view);
+    const current=()=>generation.current.current(serial);
+    void historyRead((signal,view)=>api.observation(operationId,id,signal,view),controller.signal,onView,current,
+      setDetail,e=>failed(e,serial,setDetailError),()=>setDetailLoading(false));
+    void historyRead((signal,view)=>api.observationOrigin(operationId,id,signal,view),controller.signal,onView,current,
+      setOrigin,e=>failed(e,serial,setOriginError,'Historical origin could not be verified.'),()=>setOriginLoading(false));
+    void historyRead((signal,view)=>api.observationConnections(operationId,id,undefined,signal,view),controller.signal,onView,current,
+      page=>{ setConnections(page.items); setConnectionCursor(page.next_cursor); setConnectionLoaded(true); if (page.next_cursor) connectionCursors.current.add(page.next_cursor); },
+      e=>failed(e,serial,setConnectionError,'Historical connections could not be verified.'),()=>setConnectionLoading(false));
   }
   async function moreConnections() {
     if (!detail || !connectionCursor || connectionLoading || connections.length>=500) return;
-    const requested=connectionCursor; const {controller,serial}=begin(); setConnectionLoading(true); setConnectionError('');
+    const requested=connectionCursor; const {controller,serial}=begin(); setOriginLoading(false); setConnectionLoading(true); setConnectionError('');
     try {
       const page=await sessionFenced((signal,view)=>api.observationConnections(operationId,detail.id,requested,signal,view),controller.signal,view=>captureView(serial,view));
       if (!generation.current.current(serial)) return;
