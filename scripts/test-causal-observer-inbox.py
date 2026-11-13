@@ -97,10 +97,13 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir, *
         observer_fixture=prefix+'\n'+observer_fixture+'\n'+suffix
     combined=_diagnostic_sql(seed,observer_fixture)
     edge = None
-    if sys.argv[1:] == ['--causal-edge-reconciliation']:
+    if sys.argv[1:] in (['--causal-edge-reconciliation'], ['--causal-human-connections']):
         if receiver_after is None: raise ValueError('edge requires receiver scenario')
         edge = runpy.run_path(str(ROOT / 'scripts/test-postgres-tls.py'))['checked_edge_loader']()
         combined += '\n' + edge['continuation_sql']()
+        if sys.argv[1:] == ['--causal-human-connections']:
+            human = runpy.run_path(str(ROOT / 'scripts/test-postgres-tls.py'))['checked_human_causal_loader']()
+            combined += '\n' + human['continuation_sql']()
     _run_combined(execute,combined,receiver_after,edge,directory)
     if receiver_scenario is not None:
         path=directory/'causal-receiver.done';fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)

@@ -162,6 +162,38 @@ def checked_edge_loader():
     return namespace
 
 
+def checked_human_causal_loader():
+    """Load only the committed fixed continuation and fingerprint its inputs."""
+    names = ('scripts/test-causal-human-connections.py',
+             'tests/fixtures/causal-human-connections/driver.py',
+             'db/opt-in-migrations/0032_human_causal_reader.sql',
+             'db/tests/human_causal_connections.sql',
+             'tests/fixtures/causal-human-connections/cases.sql')
+    if bounded_git(['status','--porcelain','--untracked-files=all'],16777216): raise ValueError('fixture source is not clean')
+    namespace = None
+    driver_namespace = None
+    for name in names:
+        path = ROOT / name
+        if any(candidate.is_symlink() for candidate in (path,*path.parents)): raise ValueError('fixture source has symlink ancestor')
+        tracked = bounded_git(['show','HEAD:'+name],2000000)
+        fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 2000000: raise ValueError('fixture source invalid')
+            with os.fdopen(fd,'rb',closefd=False) as source: raw = source.read(2000001)
+            after = os.fstat(fd)
+            if raw != tracked or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or hashlib.sha256(path.read_bytes()).digest()!=hashlib.sha256(raw).digest(): raise ValueError('fixture source changed')
+            if name == names[0]:
+                namespace = {'__file__':str(path),'__name__':'edge_fixture'}
+                exec(compile(raw,str(path),'exec'),namespace)
+            elif name == names[1]:
+                driver_namespace = {'__file__':str(path),'__name__':'edge_fixed_driver'}
+                exec(compile(raw,str(path),'exec'),driver_namespace)
+        finally: os.close(fd)
+    namespace['_fixed_driver'] = driver_namespace
+    return namespace
+
+
 def fixture_environment(password, target, sensor_image=None):
     environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password,
         CONTOUR_ORIGIN_PROBE=str(Path(target)/'debug/examples/origin_submit_probe'),
@@ -286,7 +318,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture','--historical-origin','--causal-observer','--causal-receiver','--causal-edge-reconciliation'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture','--historical-origin','--causal-observer','--causal-receiver','--causal-edge-reconciliation','--causal-human-connections'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     admission = flags == ['--origin-admission-only']
     replacement = flags == ['--origin-replacement-only'] or admission
@@ -295,13 +327,15 @@ def main():
     if origin_sensor:
         sys.dont_write_bytecode = True
     human_history = flags == ['--human-observation-history']
-    causal_edge = flags == ['--causal-edge-reconciliation']
+    causal_human = flags == ['--causal-human-connections']
+    causal_edge = flags == ['--causal-edge-reconciliation'] or causal_human
+    if causal_human: human_causal_fixture=checked_human_causal_loader()
     causal_receiver = flags == ['--causal-receiver'] or causal_edge
     if causal_edge: edge_fixture=checked_edge_loader()
     if causal_receiver:
         receiver_fixture=checked_receiver_loader()
         receiver_fixture['require_applicable'](receiver_fixture['source'](receiver_fixture['FILES'][1]))
-    causal_observer = flags in (['--causal-observer'],['--causal-receiver'],['--causal-edge-reconciliation'])
+    causal_observer = flags in (['--causal-observer'],['--causal-receiver'],['--causal-edge-reconciliation'],['--causal-human-connections'])
     historical_origin = flags == ['--historical-origin'] or causal_observer
     runtime_capture = flags == ['--runtime-capture']
     supervised = human_history or runtime_capture or historical_origin
@@ -653,7 +687,11 @@ def main():
                 if cleanup_errors:
                     if primary is not None: cleanup_errors.insert(0,primary)
                     raise BaseExceptionGroup('fixture and cleanup failures',cleanup_errors) from None
-                if primary is None: fixture_directory.complete=True
+                if primary is None:
+                    if causal_human:
+                        human_causal_fixture['write_receipt'](directory)
+                        human_causal_fixture['require_receipt'](directory)
+                    fixture_directory.complete=True
             else:
                 for kind, identity in [("container", container), ("volume", volume), ("network", network)]:
                     if identity:
