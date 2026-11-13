@@ -174,6 +174,7 @@ class WrapperTests(unittest.TestCase):
             with mock.patch.object(w.subprocess,'Popen',side_effect=fake_ps):
                 return w.group_members(100,time.monotonic()+3)
         self.assertEqual(inspect(b'100 100 S>\n101 100 R>+\n200 200 S<\n'),{100,101})
+        self.assertEqual(inspect(b'100 100 ?\n101 100 ?E\n200 200 S<\n'),{100,101})
         for raw in (b'100 100 S!\n',b'100 100 S\x01\n',b'100 100 S\n100 100 R\n',b'101 100 S\n'):
             with self.subTest(raw=raw),self.assertRaises((ValueError,RuntimeError)):
                 inspect(raw)

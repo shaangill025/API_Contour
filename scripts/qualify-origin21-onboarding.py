@@ -160,7 +160,7 @@ def group_members(group,deadline):
     members=set();seen=set()
     for line in data.splitlines():
         fields=line.split()
-        if len(fields)!=3 or not all(re.fullmatch(rb'[0-9]{1,10}',v) for v in fields[:2]) or not re.fullmatch(rb'[A-Za-z<>+]{1,24}',fields[2]): raise ValueError('group inspection invalid')
+        if len(fields)!=3 or not all(re.fullmatch(rb'[0-9]{1,10}',v) for v in fields[:2]) or not re.fullmatch(rb'[A-Za-z<>+?]{1,24}',fields[2]): raise ValueError('group inspection invalid')
         pid,pgid=map(int,fields[:2])
         if pid in seen: raise ValueError('duplicate process observation')
         seen.add(pid)
