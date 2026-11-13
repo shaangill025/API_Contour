@@ -686,6 +686,47 @@ impl DockerPolicy {
         self.revalidate()?;
         check_deadline(deadline)
     }
+    pub(crate) async fn verify_receiver_proxy_process(
+        &self,
+        cid: [u8; 32],
+        pid: u32,
+        start: u64,
+        deadline: Instant,
+    ) -> Result<(), ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        if cid == [0; 32] || pid == 0 || start == 0 {
+            return Err(ProcessError::Unsafe);
+        }
+        let script = PROXY_PROC_SCRIPT.replace(
+            "/adapter/live-integration/private-launch-proxy.js",
+            "/adapter/receiver-integration/private-launch-proxy-504.js",
+        );
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args([
+                "exec",
+                &hex(&cid),
+                "/usr/local/bin/node",
+                "-e",
+                &script,
+                "--",
+                &pid.to_string(),
+                &start.to_string(),
+            ]);
+        let bytes = launch(cmd, deadline)?.wait().await?;
+        if bytes != format!("OK {pid} {start}\n").as_bytes() {
+            return Err(ProcessError::Unsafe);
+        }
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)
+    }
     pub(crate) fn create_inert(
         &self,
         spec: &FixedCreateSpec<'_>,
@@ -808,6 +849,165 @@ impl DockerPolicy {
             "/adapter/live-integration/private-launch-proxy.js",
         ]);
         Ok(cmd)
+    }
+}
+pub(crate) struct FixedReceiverCreateSpec<'a> {
+    pub network: &'a str,
+    pub owner: [u8; 32],
+    pub image: [u8; 32],
+    pub arm64: bool,
+    pub mounts: Vec<(&'a str, &'a str)>,
+}
+impl DockerPolicy {
+    pub(crate) fn create_receiver_inert(
+        &self,
+        spec: &FixedReceiverCreateSpec<'_>,
+        deadline: Instant,
+    ) -> Result<LocalProcess, ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        if spec.owner == [0; 32]
+            || spec.image == [0; 32]
+            || spec.network.is_empty()
+            || spec.network.len() > 128
+            || !spec
+                .network
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let manifest: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../collectors/nodered/receiver-integration/manifest-504.json"
+        ))
+        .map_err(|_| ProcessError::Unsafe)?;
+        let mut targets: Vec<String> = manifest
+            .get("files")
+            .and_then(|v| v.as_object())
+            .ok_or(ProcessError::Unsafe)?
+            .keys()
+            .cloned()
+            .collect();
+        targets.extend(
+            [
+                "/adapter/receiver-integration/manifest-504.json",
+                "/adapter/receiver-integration/artifact-504.json",
+                "/adapter/live-integration/tree-arm64.json",
+                "/adapter/live-integration/tree-x64.json",
+                "/data/flows.json",
+                "/run/apicontour/live/product.pem",
+                "/run/apicontour/live/product.key",
+                "/run/apicontour/live/export.pem",
+                "/run/apicontour/live/export.key",
+                "/run/apicontour/live/server.pem",
+                "/run/apicontour/live/server.key",
+                "/run/apicontour/live/evidence.pem",
+                "/run/apicontour/live/evidence.key",
+                "/run/apicontour/live/ca.pem",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        targets.sort();
+        let mut actual: Vec<_> = spec.mounts.iter().map(|(_, d)| (*d).to_owned()).collect();
+        actual.sort();
+        if targets.len() != 38
+            || actual != targets
+            || spec.mounts.iter().any(|(p, _)| {
+                !p.starts_with('/')
+                    || !p.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-')
+                    })
+            })
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let owner = hex(&spec.owner);
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config);
+        cmd.args([
+            "create",
+            "--pull",
+            "never",
+            "--platform",
+            if spec.arm64 {
+                "linux/arm64"
+            } else {
+                "linux/amd64"
+            },
+            "--name",
+            &format!("contour-causal-{owner}"),
+            "--label",
+            &format!("org.apicontour.causal.owner={owner}"),
+            "--interactive",
+            "--attach",
+            "stdin",
+            "--attach",
+            "stdout",
+            "--init",
+            "--hostname",
+            "causal-live",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/data",
+            "--network",
+            spec.network,
+            "--network-alias",
+            "causal-node",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--log-driver",
+            "none",
+            "--memory",
+            "536870912",
+            "--cpus",
+            "1",
+            "--cgroupns",
+            "private",
+            "--shm-size",
+            "64m",
+            "--pids-limit",
+            "128",
+            "--tmpfs",
+            "/data:rw,nosuid,nodev,noexec,size=16m,mode=1777",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777",
+            "--entrypoint",
+            "/usr/local/bin/node",
+        ]);
+        for value in [
+            "FLOWS=flows.json",
+            "HOME=/data",
+            "HOSTNAME=causal-live",
+            "LANG=C.UTF-8",
+            "NODE_PATH=/usr/src/node-red/node_modules",
+            "NODE_RED_VERSION=v5.0.9",
+            "NODE_VERSION=24.22.3",
+            "PATH=/usr/src/node-red/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "TZ=UTC",
+            "UV_USE_IO_URING=0",
+            "YARN_VERSION=1.22.22",
+        ] {
+            cmd.arg("--env").arg(value);
+        }
+        for (source, dest) in &spec.mounts {
+            cmd.arg("--mount").arg(format!(
+                "type=bind,src={source},dst={dest},readonly,bind-propagation=rprivate"
+            ));
+        }
+        cmd.arg(format!("sha256:{}", hex(&spec.image)))
+            .arg("/adapter/receiver-integration/private-launch-proxy-504.js");
+        check_deadline(deadline)?;
+        launch(cmd, deadline)
     }
 }
 /// A fixed-recipe observation produced only by this module's local CLI worker.

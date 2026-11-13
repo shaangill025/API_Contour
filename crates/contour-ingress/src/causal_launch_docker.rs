@@ -278,7 +278,7 @@ pub enum OwnerLabel {
     Fixture,
 }
 impl OwnerLabel {
-    fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Causal => "org.apicontour.causal.owner",
             Self::Fixture => "org.apicontour.fixture-owner",
@@ -328,7 +328,7 @@ pub(crate) fn one_object(bytes: &[u8]) -> Result<Map<String, Value>, LaunchObser
         _ => Err(LaunchObserveError::Invalid),
     }
 }
-fn peer_metadata(
+pub(crate) fn peer_metadata(
     bytes: &[u8],
     id: [u8; 32],
     image: [u8; 32],
@@ -350,7 +350,7 @@ fn peer_metadata(
     }
     Ok(())
 }
-fn network_metadata(
+pub(crate) fn network_metadata(
     bytes: &[u8],
     id: [u8; 32],
     name: &str,
@@ -483,7 +483,7 @@ pub struct InertCreated<'a> {
     sources: CandidateSources,
     cid: [u8; 32],
 }
-fn parse_cid(bytes: &[u8]) -> Result<[u8; 32], LaunchObserveError> {
+pub(crate) fn parse_cid(bytes: &[u8]) -> Result<[u8; 32], LaunchObserveError> {
     if bytes.len() != 65
         || bytes[64] != b'\n'
         || !bytes[..64]

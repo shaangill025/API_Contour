@@ -17,6 +17,8 @@ mod causal_launch_protocol;
 mod causal_owner;
 #[cfg(unix)]
 mod causal_permit;
+#[cfg(unix)]
+mod causal_receiver_deploy;
 mod causal_receiver_metadata;
 mod causal_service;
 pub mod gateway;
@@ -57,6 +59,10 @@ pub use causal_launch_protocol::{ProtocolError, RelayCodec, RelayEvent};
 pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
 #[cfg(unix)]
 pub use causal_permit::CausalPermitOwner;
+#[cfg(unix)]
+pub use causal_receiver_deploy::{
+    Prelaunch504, ReceiverInertCreated, ReceiverInertStarted, ReceiverNetwork504, ReceiverPeer504,
+};
 pub use causal_receiver_material::{
     LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
 };

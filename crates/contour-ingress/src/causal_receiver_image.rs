@@ -589,6 +589,9 @@ impl ImageStage {
 }
 
 impl ReceiverImageEvidence {
+    pub(crate) fn deployment_image(&self) -> ([u8; 32], bool, [u8; 32], &serde_json::Value) {
+        (self.image, self.arm64, self.policy, &self.selected.full)
+    }
     /// Digest of the archive-verified candidate config.
     pub fn candidate_config(&self) -> &str {
         &self.candidate_config

@@ -118,6 +118,44 @@ pub struct CheckedReceiverMaterial {
     ca_after: i64,
 }
 impl CheckedReceiverMaterial {
+    pub(crate) fn deployment_commitment(&self) -> Result<[u8; 32], ReceiverMaterialCheckError> {
+        use sha2::{Digest, Sha256};
+        self.revalidate()?;
+        let mut hash = Sha256::new();
+        hash.update(b"apicontour/receiver504-material/1\n");
+        for file in &self.files {
+            hash.update((file.path.as_os_str().as_encoded_bytes().len() as u64).to_be_bytes());
+            hash.update(file.path.as_os_str().as_encoded_bytes());
+            hash.update(Sha256::digest(file.bytes.as_bytes()));
+        }
+        Ok(hash.finalize().into())
+    }
+    pub(crate) fn deployment_paths(
+        &self,
+    ) -> Result<Vec<(&Path, &'static str)>, ReceiverMaterialCheckError> {
+        self.revalidate()?;
+        let destinations = [
+            "/run/apicontour/live/product.pem",
+            "/run/apicontour/live/product.key",
+            "/run/apicontour/live/export.pem",
+            "/run/apicontour/live/export.key",
+            "/run/apicontour/live/server.pem",
+            "/run/apicontour/live/server.key",
+            "/run/apicontour/live/evidence.pem",
+            "/run/apicontour/live/evidence.key",
+            "/run/apicontour/live/ca.pem",
+        ];
+        if self.files.len() != 10 {
+            return Err(ReceiverMaterialCheckError::Invalid);
+        }
+        Ok(self
+            .files
+            .iter()
+            .skip(1)
+            .zip(destinations)
+            .map(|(f, d)| (f.path.as_path(), d))
+            .collect())
+    }
     pub fn identity(&self) -> &LocalReceiverMaterialIdentity {
         &self.identity
     }

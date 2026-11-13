@@ -267,6 +267,14 @@ impl CausalIssueOwner {
     ) -> Result<(), CausalError> {
         self.request.signature_preflight_503(peer, grants, policies)
     }
+    pub(crate) fn signature_preflight_504(
+        &self,
+        peer: &[u8; 32],
+        grants: &CausalGrantKeys,
+        policies: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        self.request.signature_preflight_504(peer, grants, policies)
+    }
     pub(crate) fn original_commitment(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut original = self.request.original_bytes();
