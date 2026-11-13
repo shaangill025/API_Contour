@@ -1099,7 +1099,7 @@ fn drive(
         });
         return (Err(ProcessError::CleanupUnknown), false);
     }
-    let (absent, probe_errno) = group_absent_until(
+    let (absent, _probe_errno) = group_absent_until(
         stop,
         || {
             // SAFETY: signal zero only observes the group; it sends no signal.
@@ -1124,7 +1124,7 @@ fn drive(
         eprintln!(
             "cleanup diagnostic: owned={owned} already_absent={already_absent} signaled={signaled} exited={exited} absent={absent} kill_errno={} probe_errno={}",
             safe_errno(kill_errno),
-            safe_errno(probe_errno)
+            safe_errno(_probe_errno)
         );
     }
     // An already-observed exited leader plus post-reap ESRCH also proves
