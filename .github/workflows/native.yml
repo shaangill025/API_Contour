@@ -85,6 +85,7 @@ jobs:
         run: |
           python3 -B -m unittest discover -s tests/fixtures/node243-qualification -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/node243-archive -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/receiver504-image-probe -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-nodered -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/receiver504-actual -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-enrollment -p 'test_*.py'
