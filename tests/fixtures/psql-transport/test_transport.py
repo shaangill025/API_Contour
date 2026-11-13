@@ -33,6 +33,9 @@ class ReceiverInboxDiagnosticTests(unittest.TestCase):
         self.assertEqual(mod._receiver_inbox_failure(text,malformed,error)[:2],('unavailable','unavailable'))
         self.assertEqual(mod._receiver_inbox_failure('untrusted',output,error),('unavailable',)*4+(None,None))
         self.assertEqual(mod._receiver_inbox_failure(text,output,error+error)[2],'unavailable')
+        bad_uuid=error.replace(b'42702',b'22P02')
+        self.assertEqual(mod._receiver_inbox_failure(text,output,bad_uuid)[2],'22P02')
+        self.assertNotIn('SECRET_SENTINEL',str(mod._receiver_inbox_failure(text,output,bad_uuid)))
         post='\\set VERBOSITY verbose\n\\echo receiver-case=revoked-product\nfixed'
         postout=base64.b64encode(b'receiver-case=revoked-product\n')
         self.assertEqual(mod._receiver_inbox_failure(post,postout,error),('unavailable','revoked-product','42702','contour.accept_causal_receiver',9,321))

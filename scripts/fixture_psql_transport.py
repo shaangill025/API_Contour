@@ -287,6 +287,7 @@ def _observer_failure(text, out, err):
 _RECEIVER_STATES=frozenset(('23502','23503','23505','23514','40001','42501','42601','42702','42703','42804','42883','42P01','42P07','42710','55000','54000','P0001','XX000'))
 _RECEIVER_FUNCTIONS=frozenset(('inline_code_block','contour.register_causal_profile','contour.enroll_causal_runtime','contour.issue_causal_session','contour.enroll_origin_credential','contour.enroll_causal_receiver','contour.current_causal_receiver','contour.close_causal_receiver','contour.receiver_claim_current','contour.receiver_enrollment_metadata','contour.receiver_enrollment_commitment','contour.receiver_terminal_body','contour.enroll_causal_gateway','contour.gateway_claim_current','contour.causal_session_locked','contour.causal_runtime_authority_locked','contour.causal_marker_product_current','contour.causal_json_canonical','contour.begin_origin_operation','contour.lock_origin_credential','contour.lock_origin_collector','contour.ensure_origin_tenant_state','contour.immutable_row'))
 
+_RECEIVER29_STATES=_RECEIVER_STATES | frozenset(('22P02',))
 _RECEIVER29_STEPS=('migration28','migration29','observer-regression','seed','cases')
 _RECEIVER29_CASES=('parser','observer-first','receiver-first','receiver-first-mismatch','quota','revoked-product')
 _RECEIVER29_FUNCTIONS=_RECEIVER_FUNCTIONS | _OBSERVER_FUNCTIONS | frozenset(('contour.receiver_inbox_wire','contour.receiver_enrollment_current','contour.receiver_assignment_current','contour.receiver_assignment_metadata','contour.receiver_tombstone_metadata','contour.receiver_observer_current','contour.accept_causal_receiver'))
@@ -295,7 +296,7 @@ class ReceiverInboxQueryError(RuntimeError):
     def __init__(self,step,case,state,function,line,source_line):
         self.step=step if step in _RECEIVER29_STEPS else 'unavailable'
         self.case=case if case in _RECEIVER29_CASES else 'unavailable'
-        self.sqlstate=state if state in _RECEIVER_STATES else 'unavailable'
+        self.sqlstate=state if state in _RECEIVER29_STATES else 'unavailable'
         self.function=function if function in _RECEIVER29_FUNCTIONS else 'unavailable'
         self.line=line if type(line) is int and 1<=line<=9999 and self.function!='unavailable' else None
         self.source_line=source_line if type(source_line) is int and 1<=source_line<=999999 else None
@@ -316,7 +317,7 @@ def _receiver_inbox_failure(text,out,err):
         case=cases[-1] if cases and cases==list(_RECEIVER29_CASES[:len(cases)]) else ('revoked-product' if cases==['revoked-product'] and text.startswith('\\set VERBOSITY verbose\n\\echo receiver-case=revoked-product\n') else 'unavailable')
         errors=re.findall(rb'(?m)^(?:psql:<stdin>:([1-9][0-9]{0,5}): )?ERROR:[ \t]+([0-9A-Z]{5}):[^\r\n]*\r?$',err)
         if len(errors)!=1: return (step,case,'unavailable','unavailable',None,None)
-        source,state=errors[0];state=state.decode('ascii');state=state if state in _RECEIVER_STATES else 'unavailable'
+        source,state=errors[0];state=state.decode('ascii');state=state if state in _RECEIVER29_STATES else 'unavailable'
         contexts=re.findall(rb'(?m)^(?:CONTEXT:[ \t]*)?[ \t]*PL/pgSQL function ([a-z_][a-z_0-9.]*)(?:\([^\r\n]*\))? line ([1-9][0-9]{0,3}) at [^\r\n]*\r?$',err)
         function='unavailable';line=None
         for name,number in contexts:

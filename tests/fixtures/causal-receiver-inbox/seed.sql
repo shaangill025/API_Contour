@@ -18,7 +18,7 @@ SELECT contour.enroll_causal_runtime((c.claim).tenant_id,'00000000-0000-4000-800
 RESET ROLE;
 CREATE TEMP TABLE receiver_claim29 AS SELECT claim,NULL::numeric AS epoch FROM observer_claim;
 DO $$ DECLARE x contour.causal_session_claim; BEGIN
- SELECT claim INTO STRICT x FROM receiver_claim29;
+ SELECT (c.claim).* INTO STRICT x FROM receiver_claim29 c;
  x.runtime_id:='00000000-0000-4000-8000-00000000ce0b'; x.source_id:='00000000-0000-4000-8000-00000000ce0f';
  x.instance_id:='00000000-0000-4000-8000-00000000ce0d'; x.lifecycle_id:='00000000-0000-4000-8000-00000000ce0e'; x.export_leaf:=decode(repeat('d7',32),'hex');
  x.profile_name:='nodered_5_0_9_receiver_v1'; x.profile_hash:=decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex');

@@ -74,6 +74,8 @@ class DriverTests(unittest.TestCase):
         seed=(ROOT/'tests/fixtures/causal-receiver-inbox/seed.sql').read_text()
         for v in ('ce0b','ce0d','ce0e','ce0f','ce10',"repeat('d6',32)","repeat('d7',32)","repeat('d8',32)","repeat('d9',32)"):
             self.assertIn(v,seed)
+        self.assertIn('SELECT (c.claim).* INTO STRICT x FROM receiver_claim29 c;',seed)
+        self.assertNotIn('SELECT claim INTO STRICT x FROM receiver_claim29',seed)
         self.assertIn('(proof).marker_attempt,(proof).marker_wire_digest',seed)
         self.assertNotIn('INSERT INTO contour.origin_proofs',seed)
         self.assertNotIn('INSERT INTO contour.observation_windows',seed)
