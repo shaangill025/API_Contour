@@ -76,7 +76,9 @@ BEGIN
   FOREACH endpoint IN ARRAY ARRAY['producer','receiver'] LOOP
    FOREACH k IN ARRAY ARRAY['project_id','service_id','environment_id','deployment_id','instance_id','batch_id','event_id','receipt_id'] LOOP
     v:=p->>(endpoint||'_'||k);
-    IF v IS NULL OR v COLLATE "C" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    IF v IS NULL OR jsonb_typeof(p->(endpoint||'_'||k)) IS DISTINCT FROM 'string'
+     OR (k='event_id' AND v COLLATE "C" !~ '^[0-9a-f]{32}$')
+     OR (k<>'event_id' AND v COLLATE "C" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
     THEN RAISE EXCEPTION 'causal connections unavailable' USING ERRCODE='23514'; END IF;
    END LOOP;
   END LOOP;

@@ -31,7 +31,8 @@ BEGIN
   IF (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(item->side) k) IS DISTINCT FROM
    ARRAY['batch_id','deployment_id','environment_id','event_id','instance_id','project_id','receipt_id','service_id'] THEN RAISE EXCEPTION 'endpoint shape'; END IF;
   FOREACH key IN ARRAY ARRAY['project_id','service_id','environment_id','deployment_id','instance_id','batch_id','event_id','receipt_id'] LOOP
-   IF (item->side->>key)::uuid IS DISTINCT FROM (c.expected_refs->side->>key)::uuid THEN RAISE EXCEPTION 'endpoint reference mismatch'; END IF;
+   IF jsonb_typeof(item->side->key) IS DISTINCT FROM 'string'
+    OR item->side->>key IS DISTINCT FROM c.expected_refs->side->>key THEN RAISE EXCEPTION 'endpoint reference mismatch'; END IF;
   END LOOP;
  END LOOP;
  denied:=false; BEGIN

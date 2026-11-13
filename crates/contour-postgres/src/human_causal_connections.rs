@@ -24,17 +24,18 @@ pub struct HumanCausalConnectionPage {
     pub next_cursor: Option<String>,
 }
 
+fn id128(s: &str) -> bool {
+    s.len() == 32
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
 fn cursor_parts(cursor: &str) -> Option<(&str, &str, &str)> {
     let mut parts = cursor.split('.');
     let gateway = parts.next()?;
     let generation = parts.next()?;
     let handle = parts.next()?;
-    let hex = |s: &str| {
-        s.len() == 32
-            && s.bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-    };
-    if parts.next().is_some() || !uuid(gateway) || !hex(generation) || !hex(handle) {
+    if parts.next().is_some() || !uuid(gateway) || !id128(generation) || !id128(handle) {
         return None;
     }
     Some((gateway, generation, handle))
@@ -138,9 +139,18 @@ fn decode_page(wire: &str, limit: u16) -> Result<HumanCausalConnectionPage, Erro
                 .and_then(Value::as_object)
                 .ok_or(Error::Corrupt)?;
             if endpoint.len() != ENDPOINT_KEYS.len()
-                || ENDPOINT_KEYS
-                    .iter()
-                    .any(|key| !endpoint.get(*key).and_then(Value::as_str).is_some_and(uuid))
+                || ENDPOINT_KEYS.iter().any(|key| {
+                    !endpoint
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| {
+                            if *key == "event_id" {
+                                id128(value)
+                            } else {
+                                uuid(value)
+                            }
+                        })
+                })
             {
                 return Err(Error::Corrupt);
             }
@@ -220,7 +230,7 @@ mod tests {
     #[test]
     fn page_rejects_unchecked_fields_and_bad_values() {
         let id = "00000000-0000-4000-8000-000000000000";
-        let endpoint = json!({"project_id":id,"service_id":id,"environment_id":id,"deployment_id":id,"instance_id":id,"batch_id":id,"event_id":id,"receipt_id":id});
+        let endpoint = json!({"project_id":id,"service_id":id,"environment_id":id,"deployment_id":id,"instance_id":id,"batch_id":id,"event_id":"31".repeat(16),"receipt_id":id});
         let item = json!({"resolved_at":"2026-01-01T00:00:00.000000Z","expires_at":"2026-01-31T00:00:00.000000Z","producer":endpoint,"receiver":endpoint});
         let page = json!({"items":[item],"next_cursor":null});
         assert!(decode_page(&page.to_string(), 1).is_ok());
@@ -230,6 +240,16 @@ mod tests {
         let mut changed = page.clone();
         changed["items"][0]["receiver"]["event_id"] = json!("not-a-uuid");
         assert!(decode_page(&changed.to_string(), 1).is_err());
+        for invalid in [
+            json!(id),
+            json!("AB".repeat(16)),
+            json!("a".repeat(31)),
+            json!(123),
+        ] {
+            let mut changed = page.clone();
+            changed["items"][0]["receiver"]["event_id"] = invalid;
+            assert!(decode_page(&changed.to_string(), 1).is_err());
+        }
         let mut changed = page.clone();
         changed["items"][0]["expires_at"] = json!("2026-01-32T00:00:00.000000Z");
         assert!(decode_page(&changed.to_string(), 1).is_err());

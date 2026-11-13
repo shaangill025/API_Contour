@@ -175,13 +175,16 @@ test('same-session 401 still invalidates while a newer session probe stalls',asy
 });
 
 const cursor=`${id}.${'a'.repeat(32)}.${'b'.repeat(32)}`;
-const endpoint=()=>({project_id:id,service_id:id,environment_id:id,deployment_id:id,instance_id:id,batch_id:id,event_id:id,receipt_id:id});
+const endpoint=()=>({project_id:id,service_id:id,environment_id:id,deployment_id:id,instance_id:id,batch_id:id,event_id:'31'.repeat(16),receipt_id:id});
 const connection=()=>({resolved_at:'2026-11-11T12:00:00.000000Z',expires_at:'2026-12-11T12:00:00.000000Z',producer:endpoint(),receiver:endpoint()});
 test('connection pages reject malformed and excess evidence',()=>{
   assert.equal(connections({items:[connection()],next_cursor:cursor}).items.length,1);
   for (const page of [
     {items:[{...connection(),extra:1}],next_cursor:null},
     {items:[{...connection(),producer:{...endpoint(),event_id:'bad'}}],next_cursor:null},
+    {items:[{...connection(),receiver:{...endpoint(),event_id:id}}],next_cursor:null},
+    {items:[{...connection(),receiver:{...endpoint(),event_id:'AB'.repeat(16)}}],next_cursor:null},
+    {items:[{...connection(),receiver:{...endpoint(),event_id:123}}],next_cursor:null},
     {items:[{...connection(),receiver:{...endpoint(),raw:'secret'}}],next_cursor:null},
     {items:[{...connection(),resolved_at:'2026-02-30T12:00:00.000000Z'}],next_cursor:null},
     {items:[{...connection(),expires_at:'2026-12-11T12:00:00Z'}],next_cursor:null},

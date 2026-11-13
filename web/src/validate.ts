@@ -74,7 +74,10 @@ export function connections(value: unknown): Page<HistoricalConnection> {
     const item=object(value); exact(item,['resolved_at','expires_at','producer','receiver']);
     const resolved=canonicalTimestamp(item.resolved_at), expires=canonicalTimestamp(item.expires_at);
     if (expires-resolved!==30*24*60*60*1000 || (item.resolved_at as string).slice(23,26)!==(item.expires_at as string).slice(23,26)) throw new Error('Invalid response');
-    for (const side of ['producer','receiver']) { const endpoint=object(item[side]); exact(endpoint,keys); ids(endpoint,keys); }
+    for (const side of ['producer','receiver']) {
+      const endpoint=object(item[side]); exact(endpoint,keys); ids(endpoint,keys.filter(key=>key!=='event_id'));
+      if (typeof endpoint.event_id!=='string' || !/^[0-9a-f]{32}$/.test(endpoint.event_id)) throw new Error('Invalid response');
+    }
   }
   return value as Page<HistoricalConnection>;
 }
