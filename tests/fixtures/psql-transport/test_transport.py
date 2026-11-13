@@ -75,16 +75,28 @@ class ReceiverDiagnostics(unittest.TestCase):
         err=(b'psql:<stdin>:123: ERROR:  23514: secret-canary\n'
              b'CONTEXT:  PL/pgSQL function contour.enroll_causal_receiver(secret-canary) line 44 at secret-canary\n')
         fields=mod._receiver_failure(err)
-        self.assertEqual(fields,('23514','contour.enroll_causal_receiver',44,123))
+        self.assertEqual(fields,('23514','contour.enroll_causal_receiver',44,123,'unavailable'))
         safe=str(mod.ReceiverQueryError(*fields))
         self.assertIn('state=23514',safe); self.assertIn('function=contour.enroll_causal_receiver',safe); self.assertIn('line=44',safe)
         self.assertNotIn('secret-canary',safe)
+    def test_receiver_ordered_case_tags_and_continuation_alias(self):
+        out=base64.b64encode(b'receiver-case=vector\nreceiver-case=setup\nreceiver-case=profile\n')
+        err=(b'ERROR:  23505: secret\nCONTEXT:  SQL statement secret\n'
+             b'PL/pgSQL function register_causal_profile(uuid,uuid,bytea) line 34 at secret\n')
+        fields=mod._receiver_failure(err,out)
+        self.assertEqual(fields,('23505','contour.register_causal_profile',34,None,'profile'))
+        self.assertNotIn('secret',str(mod.ReceiverQueryError(*fields)))
+        for body in (b'receiver-case=profile\n',b'receiver-case=vector\nreceiver-case=secret-canary\n',b'receiver-case=vector\nreceiver-case=vector\n'):
+            self.assertEqual(mod._receiver_failure(err,base64.b64encode(body))[-1],'unavailable')
+        bad=err.replace(b'register_causal_profile',b'evil_secret')
+        self.assertEqual(mod._receiver_failure(bad,out)[1],'unavailable')
+
     def test_untrusted_codes_names_and_multiple_errors_are_closed(self):
         err=b'ERROR:  99999: secret-canary\nCONTEXT:  PL/pgSQL function attacker.secret_canary() line 3 at secret-canary\n'
         fields=mod._receiver_failure(err)
-        self.assertEqual(fields,('unavailable','unavailable',None,None))
+        self.assertEqual(fields,('unavailable','unavailable',None,None,'unavailable'))
         self.assertNotIn('secret',str(mod.ReceiverQueryError(*fields)))
-        self.assertEqual(mod._receiver_failure(err+err),('unavailable','unavailable',None,None))
+        self.assertEqual(mod._receiver_failure(err+err),('unavailable','unavailable',None,None,'unavailable'))
         self.assertNotIn('secret',str(mod.ReceiverQueryError('secret','secret',True,9999999)))
 
 class Transport(unittest.TestCase):
