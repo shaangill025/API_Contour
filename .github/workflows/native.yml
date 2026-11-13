@@ -91,6 +91,8 @@ jobs:
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-enrollment -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-reader -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-issuer -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-receiver-fact -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/receiver-deployment -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/docker-metadata -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/qualification-git -p 'test_*.py'
           node tests/fixtures/causal-receiver-nodered/test_diagnostics.js
@@ -712,6 +714,7 @@ jobs:
           python3 -B -m unittest deploy.local.test_origin21
           python3 -B -m unittest discover -s tests/fixtures/origin21-onboarding -p 'test*.py'
           python3 -B -m unittest discover -s tests/fixtures/origin21-qualification-wrapper -p 'test*.py'
+          python3 -B -m unittest discover -s tests/fixtures/managed-origin-qualification -p 'test*.py'
       - name: Qualify fresh owned onboarding through persisted catalog
         timeout-minutes: 52
         run: |
