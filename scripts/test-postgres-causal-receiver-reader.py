@@ -9,9 +9,9 @@ HEX64=re.compile(r'[0-9a-f]{64}\Z')
 TOKEN=re.compile(r'[0-9a-f]{32}\Z')
 
 PHASE='arguments'
-PHASES=frozenset(('arguments','source','tls','build','image','network','container','start','readiness','schema','seed','probe','closed','revoked','issuer','cleanup'))
+PHASES=frozenset(('arguments','source','tls','build','image','network','container','start','readiness','schema','seed','probe','closed','revoked','issuer','gateway','cleanup'))
 ERROR_TYPES=frozenset(('ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','BaseExceptionGroup','ExceptionGroup'))
-LOCATION_FILES=frozenset(('test-postgres-causal-receiver-reader.py','receiver_issuer_fixture.py','fixture_psql_transport.py','capture-origin25-reference.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'))
+LOCATION_FILES=frozenset(('test-postgres-causal-receiver-reader.py','receiver_issuer_fixture.py','gateway_reader_fixture.py','fixture_psql_transport.py','capture-origin25-reference.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'))
 
 def failure_diagnostic(error,phase):
     kind=type(error).__name__; kind=kind if kind in ERROR_TYPES else 'OtherError'
@@ -91,13 +91,13 @@ class ToolFence:
         return result.stdout.strip()
 
 
-def select_probe(lines, target, source, *, issuer=False):
+def select_probe(lines, target, source, *, issuer=False, gateway=False):
     """Select exactly one executable emitted by this build in its private target."""
     import hashlib, json, os, stat
     from pathlib import Path
-    if type(issuer) is not bool: raise ValueError('artifact')
+    if type(issuer) is not bool or type(gateway) is not bool or (issuer and gateway): raise ValueError('artifact')
     target=Path(target); source=Path(source); found=[]
-    expected='causal_receiver_issuer_probe' if issuer else 'causal_receiver_reader_probe'
+    expected='causal_gateway_reader_probe' if gateway else ('causal_receiver_issuer_probe' if issuer else 'causal_receiver_reader_probe')
     if not target.is_absolute() or target.is_symlink() or not target.is_dir(): raise ValueError('target')
     for line in lines:
         try: item=json.loads(line)
@@ -348,14 +348,14 @@ def main(argv):
         return module
     status=subprocess.run(['git','status','--porcelain','--untracked-files=all'],cwd=root,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15,check=True)
     if status.stdout or status.stderr: raise ValueError('source not clean')
-    capture=tracked('scripts/capture-origin25-reference.py');fixture=tracked('scripts/test-origin21-onboarding.py');bridge=tracked('scripts/test-postgres-causal-bridge.py');transport=tracked('scripts/fixture_psql_transport.py');receiver=tracked('scripts/test-causal-receiver-enrollment.py');issuer_fixture=tracked('scripts/receiver_issuer_fixture.py')
+    capture=tracked('scripts/capture-origin25-reference.py');fixture=tracked('scripts/test-origin21-onboarding.py');bridge=tracked('scripts/test-postgres-causal-bridge.py');transport=tracked('scripts/fixture_psql_transport.py');receiver=tracked('scripts/test-causal-receiver-enrollment.py');issuer_fixture=tracked('scripts/receiver_issuer_fixture.py');gateway_fixture=tracked('scripts/gateway_reader_fixture.py')
     process=bridge['run_process']
     def source_call(args,data=None,timeout=30):
         result=process(args,data=data,cwd=root,timeout=timeout,limit=8*1024*1024)
         if result.returncode or result.stderr: raise RuntimeError('source command')
         return result.stdout.strip()
     head=fixture['clean_head'](source_call);sources=fixture['tracked_snapshot'](source_call)
-    required=('scripts/test-postgres-causal-receiver-reader.py','crates/contour-postgres/examples/causal_receiver_reader_probe.rs','tests/fixtures/causal-receiver-reader/seed.sql','tests/fixtures/causal-receiver-reader/test_qualifier.py','scripts/receiver_issuer_fixture.py','crates/contour-postgres/examples/causal_receiver_issuer_probe.rs','tests/fixtures/causal-receiver-issuer/test_fixture.py','tests/fixtures/causal-receiver-issuer/README.md','db/opt-in-migrations/0029_causal_receiver_inbox.sql')
+    required=('scripts/test-postgres-causal-receiver-reader.py','crates/contour-postgres/examples/causal_receiver_reader_probe.rs','tests/fixtures/causal-receiver-reader/seed.sql','tests/fixtures/causal-receiver-reader/test_qualifier.py','scripts/receiver_issuer_fixture.py','crates/contour-postgres/examples/causal_receiver_issuer_probe.rs','tests/fixtures/causal-receiver-issuer/test_fixture.py','tests/fixtures/causal-receiver-issuer/README.md','db/opt-in-migrations/0029_causal_receiver_inbox.sql','db/opt-in-migrations/0030_causal_gateway_reader.sql','scripts/gateway_reader_fixture.py','crates/contour-postgres/examples/causal_gateway_reader_probe.rs','tests/fixtures/causal-gateway-reader/test_fixture.py')
     if any(x not in sources for x in required): raise ValueError('source missing')
     hooks=ReaderHooks(receiver['Hooks'](receiver['load_existing'](),origin25_schema));hooks.preflight(sources)
     output=capture['PrivateOutput'](argv[0]); token=secrets.token_hex(16);name='contour-origin21-qual-'+token
@@ -406,7 +406,7 @@ def main(argv):
         source=root/'crates/contour-postgres/examples/causal_receiver_reader_probe.rs'
         if tuple(metadata._path(rustc))!=rustc_id: raise RuntimeError('rustc drift')
         try:
-            lines=checked_process(cargo,cargo_id,['build','-p','contour-postgres','--example','causal_receiver_reader_probe','--example','causal_receiver_issuer_probe','--locked','--offline','--message-format=json'],env=build_env,timeout=300,limit=16777216).splitlines()
+            lines=checked_process(cargo,cargo_id,['build','-p','contour-postgres','--example','causal_receiver_reader_probe','--example','causal_receiver_issuer_probe','--example','causal_gateway_reader_probe','--locked','--offline','--message-format=json'],env=build_env,timeout=300,limit=16777216).splitlines()
         finally:
             if tuple(metadata._path(rustc))!=rustc_id: raise RuntimeError('rustc drift')
         probe,probe_hash=select_probe(lines,target,source)
@@ -416,6 +416,10 @@ def main(argv):
         issuer_probe,issuer_hash=select_probe(lines,target,issuer_source,issuer=True)
         issuer_identity=probe_snapshot(issuer_probe,target,metadata)
         if issuer_identity[1]!=issuer_hash or issuer_probe==probe: raise RuntimeError('issuer probe drift')
+        gateway_source=root/'crates/contour-postgres/examples/causal_gateway_reader_probe.rs'
+        gateway_probe,gateway_hash=select_probe(lines,target,gateway_source,gateway=True)
+        gateway_identity=probe_snapshot(gateway_probe,target,metadata)
+        if gateway_identity[1]!=gateway_hash or gateway_probe in (probe,issuer_probe): raise RuntimeError('gateway probe drift')
         config=output.path/'docker-config';config.mkdir(mode=0o700)
         tool=ToolFence(metadata,config,process,clean_env)
         def inspect(args):
@@ -483,14 +487,17 @@ def main(argv):
         def execute(sql): return raw_execute('\\connect contour_local\n'+origin21_transport.GUARD+sql)
         modules={'provision':provision,'schema':origin21_schema,'setup':origin21_setup,'logins':origin21_logins,'profile':origin21_profile}
         bootstrap_schema(execute,root,hooks,capture,modules,{k:secrets.token_hex(32) for k in ('app','ingress','worker')},owner)
+        for version,name in ((29,'0029_causal_receiver_inbox.sql'),(30,'0030_causal_gateway_reader.sql')):
+            execute((root/'db/opt-in-migrations'/name).read_text())
+            if execute('SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;')!='{'+','.join(map(str,range(1,version+1)))+'}': raise RuntimeError('fixture ledger')
         passwords={k:secrets.token_hex(32) for k in ('reader','wrong','mixed')};execute(reader_login_sql(passwords))
         PHASE='seed'
         seed=execute((root/'tests/fixtures/causal-receiver-reader/seed.sql').read_text());selected=json.loads(seed.splitlines()[-1])
         if type(selected) is not dict or set(selected)!={'epoch','generation','credential_id','commitment','expires_at'} or selected['epoch']!='2':raise ValueError('seed')
         base=dict(selected,ca_pem=ca.decode('ascii'),leaf='d2'*32,tenant='f0000000-0000-4000-8000-000000000001',runtime='fc000000-0000-4000-8000-000000000008',port=str(port))
-        def probe_call(payload,*,issuer=False):
-            if type(issuer) is not bool: raise ValueError('probe kind')
-            path,identity,expected=(issuer_probe,issuer_identity,b'PASS receiver-issuer-probe\n') if issuer else (probe,probe_identity,b'PASS receiver_reader_probe\n')
+        def probe_call(payload,*,issuer=False,gateway=False):
+            if type(issuer) is not bool or type(gateway) is not bool or (issuer and gateway): raise ValueError('probe kind')
+            path,identity,expected=(gateway_probe,gateway_identity,b'PASS gateway_reader_probe\n') if gateway else ((issuer_probe,issuer_identity,b'PASS receiver-issuer-probe\n') if issuer else (probe,probe_identity,b'PASS receiver_reader_probe\n'))
             owner()
             if probe_snapshot(path,target,metadata)!=identity: raise RuntimeError('probe drift')
             try: result=process([str(path)],data=payload,cwd=root,env=clean_env,timeout=30,limit=1024)
@@ -526,7 +533,10 @@ def main(argv):
             probe_call=lambda payload:probe_call(payload,issuer=True),ca_pem=ca,port=port,
             passwords={k:secrets.token_hex(32) for k in ('issuer','wrong')},fixture_bytes=(root/'crates/contour-postgres/tests/fixtures/causal_bridge.json').read_bytes())
         if issuer_checks!=issuer_fixture['CHECKS']: raise RuntimeError('issuer fixture incomplete')
-        if bridge['digest_file'](probe)!=probe_hash or bridge['digest_file'](issuer_probe)!=issuer_hash: raise RuntimeError('probe changed')
+        PHASE='gateway'
+        gateway_checks=gateway_fixture['run'](execute=execute,probe_call=lambda payload:probe_call(payload,gateway=True),ca_pem=ca,port=port,passwords={k:secrets.token_hex(32) for k in ('reader','wrong','mixed','transitive')})
+        if gateway_checks!=gateway_fixture['CHECKS']: raise RuntimeError('gateway fixture incomplete')
+        if bridge['digest_file'](probe)!=probe_hash or bridge['digest_file'](issuer_probe)!=issuer_hash or bridge['digest_file'](gateway_probe)!=gateway_hash: raise RuntimeError('probe changed')
         PHASE='cleanup'
         runner.close();runner=None;owner()
         if tool.call(['docker','rm','-f',cid]).decode('ascii')!=cid:raise RuntimeError('cleanup outcome unknown')
@@ -541,7 +551,7 @@ def main(argv):
             if metadata._identity(current)!=identity or not stat.S_ISREG(current.st_mode) or current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o600 or current.st_nlink!=1: raise RuntimeError('private input drift')
             os.unlink(filename,dir_fd=output.fd)
         os.fsync(output.fd);output.verify()
-        success=True;output.write('receipt.json',record({'version':1,'scope':'synthetic-sql28-reader-and-issuer-tls-data','checks':['reader','wrong-role','mixed-role','revoked','closed','table-denied',*issuer_checks],'status':'passed'}))
+        success=True;output.write('receipt.json',record({'version':1,'scope':'synthetic-sql30-reader-and-issuer-tls-data','checks':['reader','wrong-role','mixed-role','revoked','closed','table-denied',*issuer_checks,*gateway_checks],'status':'passed'}))
     except BaseException as error:
         primary=error
     finally:

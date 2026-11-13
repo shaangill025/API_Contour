@@ -157,6 +157,26 @@ class Boundaries(unittest.TestCase):
                 with self.assertRaises(ValueError): q.select_probe(lines,target,source,issuer=True)
             with self.assertRaises(ValueError): q.select_probe([i],target,isrc,issuer=1)
 
+    def test_gateway_is_selected_only_from_the_exact_third_artifact(self):
+        import json,tempfile
+        with tempfile.TemporaryDirectory(dir=Path.home()) as folder:
+            root=Path(folder);target=root/'target';target.mkdir()
+            def artifact(name):
+                path=target/name;path.write_bytes(name.encode());path.chmod(0o700);return path
+            paths=[artifact(name) for name in ('reader','issuer','gateway')]
+            sources=[root/(name+'.rs') for name in ('reader','issuer','gateway')]
+            names=['causal_receiver_reader_probe','causal_receiver_issuer_probe','causal_gateway_reader_probe']
+            def line(name,src,exe,kind=['example']):
+                return json.dumps({'reason':'compiler-artifact','target':{'name':name,'kind':kind,'src_path':str(src)},'profile':{'test':False},'executable':str(exe)})
+            rows=[line(n,s,p) for n,s,p in zip(names,sources,paths)]
+            self.assertEqual(q.select_probe(rows,target,sources[2],gateway=True)[0],paths[2])
+            for bad in (rows+[rows[2]], rows[:2], rows[:2]+[line(names[2],sources[0],paths[2])], rows[:2]+[line(names[2],sources[2],paths[2],kind=['bin'])]):
+                with self.assertRaises(ValueError): q.select_probe(bad,target,sources[2],gateway=True)
+            outside=root/'outside';outside.write_bytes(b'x');outside.chmod(0o700)
+            with self.assertRaises(ValueError): q.select_probe([line(names[2],sources[2],outside)],target,sources[2],gateway=True)
+            for kwargs in ({'gateway':1},{'gateway':True,'issuer':True}):
+                with self.assertRaises(ValueError): q.select_probe(rows,target,sources[2],**kwargs)
+
     def test_issuer_failure_location_is_closed(self):
         try: exec(compile('raise ValueError("private-canary")','/private/receiver_issuer_fixture.py','exec'))
         except ValueError as error: line=q.failure_diagnostic(error,'issuer')

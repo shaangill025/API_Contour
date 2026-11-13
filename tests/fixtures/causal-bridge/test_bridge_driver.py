@@ -430,13 +430,14 @@ class HistoricalSourceInventoryTests(unittest.TestCase):
                 paths.append(root/'db/opt-in-migrations/0027_causal_observer_inbox.sql')
                 paths.append(root/'db/opt-in-migrations/0028_causal_receiver_enrollment.sql')
                 paths.append(root/'db/opt-in-migrations/0029_causal_receiver_inbox.sql')
+                paths.append(root/'db/opt-in-migrations/0030_causal_gateway_reader.sql')
                 for path in paths:
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 bridge={'source_paths':lambda:[], 'digest_file':lambda path:hashlib.sha256(path.read_bytes()).hexdigest()}
                 with mock.patch.dict(g,patches):
                     def snapshot(): return fn(bridge) if name in ('permits','marker-bridge','live-profile') else fn()
                     before=snapshot()
-                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql','0027_causal_observer_inbox.sql','0028_causal_receiver_enrollment.sql','0029_causal_receiver_inbox.sql'):
+                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql','0027_causal_observer_inbox.sql','0028_causal_receiver_enrollment.sql','0029_causal_receiver_inbox.sql','0030_causal_gateway_reader.sql'):
                         target=root/'db/opt-in-migrations'/filename
                         key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
                         self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
@@ -456,6 +457,7 @@ class HistoricalSourceInventoryTests(unittest.TestCase):
                 self.assertNotIn('0027_causal_observer_inbox',applied)
                 self.assertNotIn('0028_causal_receiver_enrollment',applied)
                 self.assertNotIn('0029_causal_receiver_inbox',applied)
+                self.assertNotIn('0030_causal_gateway_reader',applied)
 
 
 if __name__=='__main__': unittest.main()

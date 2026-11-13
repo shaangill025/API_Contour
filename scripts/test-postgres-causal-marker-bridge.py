@@ -17,7 +17,7 @@ import uuid
 
 ROOT=Path(__file__).absolute().parent.parent
 OPT=('0015_origin_lifecycle','0016_v2_unattributed','0017_origin_proofs','0018_causal_runtime_registry','0019_causal_sessions','0020_causal_inbox','0021_origin_admission','0022_causal_generation','0023_causal_marker_bindings')
-EXTRA_SOURCE_MIGRATIONS=('0024_causal_live_profile','0025_historical_origin','0026_causal_evidence_enrollment','0027_causal_observer_inbox','0028_causal_receiver_enrollment','0029_causal_receiver_inbox',)
+EXTRA_SOURCE_MIGRATIONS=('0024_causal_live_profile','0025_historical_origin','0026_causal_evidence_enrollment','0027_causal_observer_inbox','0028_causal_receiver_enrollment','0029_causal_receiver_inbox','0030_causal_gateway_reader',)
 EXAMPLE=ROOT/'crates/contour-postgres/examples/causal_marker_binding_probe.rs'
 
 def safe(path):
