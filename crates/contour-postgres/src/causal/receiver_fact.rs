@@ -52,7 +52,57 @@ pub struct ReceiverEvidenceConnection {
     stream: TlsStream<TcpStream>,
     peer: ReceiverEvidencePeer,
 }
+/// Opaque authenticated transport; only a TLS accept can create it.
+/// ```compile_fail
+/// use contour_postgres::ReceiverEvidenceIo;
+/// let io = ReceiverEvidenceIo { stream: todo!() };
+/// ```
+pub struct ReceiverEvidenceIo {
+    stream: TlsStream<TcpStream>,
+}
+impl AsyncRead for ReceiverEvidenceIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for ReceiverEvidenceIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, bytes)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+impl ReceiverEvidencePeer {
+    pub(super) fn leaf_for_inbox(&self) -> &[u8; 32] {
+        &self.leaf
+    }
+    /// Compare an operator-provided pin with the authenticated peer.
+    pub fn matches_pin(&self, pin: &[u8; 32]) -> bool {
+        self.leaf == *pin
+    }
+}
 impl ReceiverEvidenceConnection {
+    /// Consume the connection, preserving its original authenticated peer token.
+    pub fn into_parts(self) -> (ReceiverEvidenceIo, ReceiverEvidencePeer) {
+        (
+            ReceiverEvidenceIo {
+                stream: self.stream,
+            },
+            self.peer,
+        )
+    }
     pub fn peer(&self) -> &ReceiverEvidencePeer {
         &self.peer
     }

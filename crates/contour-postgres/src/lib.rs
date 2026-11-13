@@ -44,8 +44,9 @@ pub use causal::{
     CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
     CausalMarkerBinding, CausalReceipt, CausalReceiverEventInbox504, CausalReceiverMarkerInputs504,
     CausalReceiverProfile504, CausalReceiverSession504, CausalSession, CausalWireProfile503,
-    ReceiverEvidenceConnection, ReceiverEvidencePeer, ReceiverEvidenceTls, ReceiverFactInbox,
-    ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors, ReceiverTlsError,
+    ReceiverEvidenceConnection, ReceiverEvidenceIo, ReceiverEvidencePeer, ReceiverEvidenceTls,
+    ReceiverFactInbox, ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors,
+    ReceiverTlsError,
 };
 pub use causal_gateway_reader::{
     CausalGatewayObservation, CausalGatewayReadError, CausalGatewayReader, CausalGatewaySelector,

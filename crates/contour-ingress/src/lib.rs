@@ -23,6 +23,8 @@ mod causal_receiver_metadata;
 mod causal_service;
 pub mod gateway;
 mod pool;
+mod receiver_causal_pool504;
+mod receiver_causal_service504;
 pub mod runtime_capture;
 mod service;
 #[cfg(unix)]
@@ -76,6 +78,9 @@ pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_me
 pub use causal_receiver_sources::{ReceiverCandidateSources, ReceiverSourcesError};
 pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
+pub use receiver_causal_service504::{
+    ReceiverBinding504, ReceiverCausalConfig504, ReceiverCausalServer504, ReceiverRegistry504,
+};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},

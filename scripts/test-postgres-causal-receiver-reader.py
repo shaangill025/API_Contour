@@ -9,9 +9,9 @@ HEX64=re.compile(r'[0-9a-f]{64}\Z')
 TOKEN=re.compile(r'[0-9a-f]{32}\Z')
 
 PHASE='arguments'
-PHASES=frozenset(('arguments','source','tls','build','image','network','container','start','readiness','schema','seed','probe','closed','revoked','issuer','facts','gateway','cleanup'))
+PHASES=frozenset(('arguments','source','tls','build','image','network','container','start','readiness','schema','seed','probe','closed','revoked','issuer','facts','http-pool-recovery','gateway','cleanup'))
 ERROR_TYPES=frozenset(('ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','BaseExceptionGroup','ExceptionGroup'))
-LOCATION_FILES=frozenset(('test-postgres-causal-receiver-reader.py','receiver_issuer_fixture.py','gateway_reader_fixture.py','receiver_fact_fixture.py','fixture_psql_transport.py','capture-origin25-reference.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'))
+LOCATION_FILES=frozenset(('test-postgres-causal-receiver-reader.py','receiver_issuer_fixture.py','gateway_reader_fixture.py','receiver_fact_fixture.py','receiver_http_fixture.py','fixture_psql_transport.py','capture-origin25-reference.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'))
 
 def failure_diagnostic(error,phase):
     kind=type(error).__name__; kind=kind if kind in ERROR_TYPES else 'OtherError'
@@ -97,13 +97,13 @@ class ToolFence:
         return result.stdout.strip()
 
 
-def select_probe(lines, target, source, *, issuer=False, gateway=False, fact=False):
+def select_probe(lines, target, source, *, issuer=False, gateway=False, fact=False, http=False):
     """Select exactly one executable emitted by this build in its private target."""
     import hashlib, json, os, stat
     from pathlib import Path
-    if any(type(x) is not bool for x in (issuer,gateway,fact)) or sum((issuer,gateway,fact))>1: raise ValueError('artifact')
+    if any(type(x) is not bool for x in (issuer,gateway,fact,http)) or sum((issuer,gateway,fact,http))>1: raise ValueError('artifact')
     target=Path(target); source=Path(source); found=[]
-    expected='causal_receiver_fact_probe' if fact else ('causal_gateway_reader_probe' if gateway else ('causal_receiver_issuer_probe' if issuer else 'causal_receiver_reader_probe'))
+    expected='receiver_http_probe504' if http else ('causal_receiver_fact_probe' if fact else ('causal_gateway_reader_probe' if gateway else ('causal_receiver_issuer_probe' if issuer else 'causal_receiver_reader_probe')))
     if not target.is_absolute() or target.is_symlink() or not target.is_dir(): raise ValueError('target')
     for line in lines:
         try: item=json.loads(line)
@@ -359,6 +359,8 @@ def main(argv):
     global PHASE
     import hashlib, json, os, runpy, secrets, signal, stat, subprocess, sys, time
     from pathlib import Path
+    http_enabled=bool(argv and argv[0]=='--receiver-http')
+    if http_enabled: argv=['--receiver-facts',*argv[1:]]
     fact_enabled,argv=qualifier_arguments(argv)
     PHASE='source'
     root=Path(__file__).resolve().parents[1];os.umask(0o077);sys.dont_write_bytecode=True
@@ -376,6 +378,7 @@ def main(argv):
     if status.stdout or status.stderr: raise ValueError('source not clean')
     capture=tracked('scripts/capture-origin25-reference.py');fixture=tracked('scripts/test-origin21-onboarding.py');bridge=tracked('scripts/test-postgres-causal-bridge.py');transport=tracked('scripts/fixture_psql_transport.py');receiver=tracked('scripts/test-causal-receiver-enrollment.py');issuer_fixture=tracked('scripts/receiver_issuer_fixture.py');gateway_fixture=tracked('scripts/gateway_reader_fixture.py')
     fact_fixture=tracked('scripts/receiver_fact_fixture.py') if fact_enabled else None
+    http_fixture=tracked('scripts/receiver_http_fixture.py') if http_enabled else None
     process=bridge['run_process']
     def source_call(args,data=None,timeout=30):
         result=process(args,data=data,cwd=root,timeout=timeout,limit=8*1024*1024)
@@ -384,6 +387,7 @@ def main(argv):
     head=fixture['clean_head'](source_call);sources=fixture['tracked_snapshot'](source_call)
     required=('scripts/test-postgres-causal-receiver-reader.py','crates/contour-postgres/examples/causal_receiver_reader_probe.rs','tests/fixtures/causal-receiver-reader/seed.sql','tests/fixtures/causal-receiver-reader/test_qualifier.py','scripts/receiver_issuer_fixture.py','crates/contour-postgres/examples/causal_receiver_issuer_probe.rs','tests/fixtures/causal-receiver-issuer/test_fixture.py','tests/fixtures/causal-receiver-issuer/README.md','db/opt-in-migrations/0029_causal_receiver_inbox.sql','db/opt-in-migrations/0030_causal_gateway_reader.sql','scripts/gateway_reader_fixture.py','crates/contour-postgres/examples/causal_gateway_reader_probe.rs','tests/fixtures/causal-gateway-reader/test_fixture.py')
     if fact_enabled: required+=('scripts/receiver_fact_fixture.py','crates/contour-postgres/examples/causal_receiver_fact_probe.rs','tests/fixtures/causal-receiver-fact/test_fixture.py')
+    if http_enabled: required+=('scripts/receiver_http_fixture.py','crates/contour-ingress/examples/receiver_http_probe504.rs')
     if any(x not in sources for x in required): raise ValueError('source missing')
     hooks=ReaderHooks(receiver['Hooks'](receiver['load_existing'](),origin25_schema));hooks.preflight(sources)
     output=capture['PrivateOutput'](argv[0]); token=secrets.token_hex(16);name='contour-origin21-qual-'+token
@@ -439,6 +443,14 @@ def main(argv):
             lines=checked_process(cargo,cargo_id,build_args+['--locked','--offline','--message-format=json'],env=build_env,timeout=300,limit=16777216).splitlines()
         finally:
             if tuple(metadata._path(rustc))!=rustc_id: raise RuntimeError('rustc drift')
+        if http_enabled:
+            if tuple(metadata._path(rustc))!=rustc_id: raise RuntimeError('rustc drift')
+            try: http_lines=checked_process(cargo,cargo_id,['build','-p','contour-ingress','--example','receiver_http_probe504','--locked','--offline','--message-format=json'],env=build_env,timeout=300,limit=16777216).splitlines()
+            finally:
+                if tuple(metadata._path(rustc))!=rustc_id: raise RuntimeError('rustc drift')
+            http_probe,http_hash=select_probe(http_lines,target,root/'crates/contour-ingress/examples/receiver_http_probe504.rs',http=True)
+            http_identity=probe_snapshot(http_probe,target,metadata)
+            if http_identity[1]!=http_hash: raise RuntimeError('HTTP probe drift')
         probe,probe_hash=select_probe(lines,target,source)
         probe_identity=probe_snapshot(probe,target,metadata)
         if probe_identity[1]!=probe_hash: raise RuntimeError('probe drift')
@@ -569,6 +581,7 @@ def main(argv):
             owner()
             try: return checked_process(openssl,openssl_id,args,env=clean_env,timeout=30,limit=65536)
             finally: owner()
+        http_material=fact_fixture['prepare_material'](openssl=issuer_openssl,write_private=write_private,private_dir=output.path,with_export=True) if http_enabled else None
         positive_issuer=[]
         def issuer_call(payload):
             probe_call(payload,issuer=True)
@@ -577,20 +590,39 @@ def main(argv):
                 if value.get('mode')=='positive': positive_issuer.append(value)
         issuer_checks=issuer_fixture['run'](execute=execute,openssl=issuer_openssl,write_private=write_private,private_dir=output.path,
             probe_call=issuer_call,ca_pem=ca,port=port,
-            passwords={k:secrets.token_hex(32) for k in ('issuer','wrong')},fixture_bytes=(root/'crates/contour-postgres/tests/fixtures/causal_bridge.json').read_bytes())
+            passwords={k:secrets.token_hex(32) for k in ('issuer','wrong')},fixture_bytes=(root/'crates/contour-postgres/tests/fixtures/causal_bridge.json').read_bytes(), **({'export_leaf':hashlib.sha256(http_material['export']).hexdigest()} if http_enabled else {}))
         if issuer_checks!=issuer_fixture['CHECKS']: raise RuntimeError('issuer fixture incomplete')
         fact_checks=()
         if fact_enabled:
             if len(positive_issuer)!=1: raise RuntimeError('fact issuer capture')
             PHASE='facts'
-            fact_checks=fact_fixture['run'](execute=execute,openssl=issuer_openssl,write_private=write_private,private_dir=output.path,probe_call=lambda payload:probe_call(payload,fact=True),issuer_payload=positive_issuer[0],password=secrets.token_hex(32))
+            def http_call(value):
+                global PHASE
+                owner()
+                if probe_snapshot(http_probe,target,metadata)!=http_identity: raise RuntimeError('HTTP probe drift')
+                try: result=process([str(http_probe)],data=json.dumps(value,sort_keys=True,separators=(',',':')).encode(),cwd=root,env=clean_env,timeout=35,limit=1024)
+                finally:
+                    if probe_snapshot(http_probe,target,metadata)!=http_identity: raise RuntimeError('HTTP probe drift')
+                    owner()
+                result_kind,digest,event_digest=http_fixture['parse_result'](result.returncode,result.stdout,result.stderr)
+                http_fixture['verify_event_receipt'](execute,value,event_digest)
+                if result_kind=='pool-recovery-red':
+                    fact=json.loads(value['fact'])
+                    count=execute("SELECT count(*)::text FROM contour.causal_receiver_inbox WHERE tenant_id='%s' AND gateway_id='%s' AND gateway_generation='%s' AND delivery_handle='%s';"%(fact['tenant_id'],fact['gateway_id'],fact['gateway_generation'],fact['delivery_handle']))
+                    if count!='0': raise RuntimeError('HTTP first attempt wrote fact')
+                    PHASE='http-pool-recovery'
+                    raise RuntimeError('HTTP pool recovery red')
+                return digest
+            fact_checks=fact_fixture['run'](execute=execute,openssl=issuer_openssl,write_private=write_private,private_dir=output.path,probe_call=lambda payload:probe_call(payload,fact=True),issuer_payload=positive_issuer[0],password=secrets.token_hex(32), **({'material':http_material,'http_call':http_call} if http_enabled else {}))
             if fact_checks!=fact_fixture['CHECKS']: raise RuntimeError('fact fixture incomplete')
+            if http_enabled: fact_checks=http_fixture['CHECKS']
             positive_issuer.clear()
         PHASE='gateway'
         gateway_checks=gateway_fixture['run'](execute=execute,probe_call=lambda payload:probe_call(payload,gateway=True),ca_pem=ca,port=port,passwords={k:secrets.token_hex(32) for k in ('reader','wrong','mixed','transitive')})
         if gateway_checks!=gateway_fixture['CHECKS']: raise RuntimeError('gateway fixture incomplete')
         if bridge['digest_file'](probe)!=probe_hash or bridge['digest_file'](issuer_probe)!=issuer_hash or bridge['digest_file'](gateway_probe)!=gateway_hash: raise RuntimeError('probe changed')
         if fact_enabled and bridge['digest_file'](fact_probe)!=fact_hash: raise RuntimeError('fact probe changed')
+        if http_enabled and bridge['digest_file'](http_probe)!=http_hash: raise RuntimeError('HTTP probe changed')
         PHASE='cleanup'
         runner.close();runner=None;owner()
         if tool.call(['docker','rm','-f',cid]).decode('ascii')!=cid:raise RuntimeError('cleanup outcome unknown')
@@ -605,7 +637,7 @@ def main(argv):
             if metadata._identity(current)!=identity or not stat.S_ISREG(current.st_mode) or current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o600 or current.st_nlink!=1: raise RuntimeError('private input drift')
             os.unlink(filename,dir_fd=output.fd)
         os.fsync(output.fd);output.verify()
-        success=True;output.write('receipt.json',record({'version':1,'scope':'synthetic-sql29-fact-and-sql30-reader' if fact_enabled else 'synthetic-sql30-reader-and-issuer-tls-data','checks':['reader','wrong-role','mixed-role','revoked','closed','table-denied',*issuer_checks,*fact_checks,*gateway_checks],'status':'passed'}))
+        success=True;output.write('receipt.json',record({'version':1,'scope':'synthetic-receiver-http-sql20-sql29' if http_enabled else ('synthetic-sql29-fact-and-sql30-reader' if fact_enabled else 'synthetic-sql30-reader-and-issuer-tls-data'),'checks':['reader','wrong-role','mixed-role','revoked','closed','table-denied',*issuer_checks,*fact_checks,*gateway_checks],'status':'passed'}))
     except BaseException as error:
         primary=error
     finally:
@@ -626,4 +658,4 @@ if __name__=='__main__':
     except BaseException as error:
         print(failure_diagnostic(error,PHASE),file=sys.stderr)
         raise SystemExit(1) from None
-    print('PASS receiver_reader_fixture synthetic SQL29 mTLS first admission' if len(sys.argv)>1 and sys.argv[1]=='--receiver-facts' else 'PASS receiver_reader_fixture synthetic TLS data only')
+    print('PASS receiver_reader_fixture synthetic HTTP mTLS SQL20 SQL29' if len(sys.argv)>1 and sys.argv[1]=='--receiver-http' else ('PASS receiver_reader_fixture synthetic SQL29 mTLS first admission' if len(sys.argv)>1 and sys.argv[1]=='--receiver-facts' else 'PASS receiver_reader_fixture synthetic TLS data only'))

@@ -45,7 +45,7 @@ def require_matching_receipt_digest(returned, stored):
         or returned != stored): raise ValueError('fact receipt mismatch')
 
 
-def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payload, password):
+def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payload, password, material=None, http_call=None):
     """Fixed synthetic TLS and SQL29 exercise. Callbacks are private qualifier internals."""
     import datetime
     import hashlib
@@ -55,30 +55,13 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
     if type(issuer_payload) is not dict or issuer_payload.get('mode') != 'positive': raise ValueError('fact issuer')
     i = issuer_payload.get('ids')
     if i != ['f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000010','f6000000-0000-4000-8000-000000000003','f7000000-0000-4000-8000-000000000010','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000010','f9000000-0000-4000-8000-000000000010'] or issuer_payload.get('epoch') != '1' or issuer_payload.get('user') != 'causal_issuer_login': raise ValueError('fact issuer')
-    directory = Path(private_dir)
-    def path(name): return str(directory / ('fact-' + name))
-    def put(name, data):
-        if not isinstance(data, bytes) or not data or len(data) > 65536: raise ValueError('fact material')
-        write_private('fact-' + name, data)
-    def command(args):
-        result = openssl(args)
-        if not isinstance(result, bytes) or not result or len(result) > 65536: raise ValueError('fact material')
-        return result
-    for name in ('ca', 'server', 'client', 'other'):
-        put(name + '.key', command(['genpkey', '-algorithm', 'ED25519']))
-    put('ca.pem', command(['req', '-new', '-x509', '-key', path('ca.key'), '-subj', '/CN=fixture-ca', '-days', '1', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign']))
-    put('server.ext', b'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n')
-    put('client.ext', b'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n')
-    for serial, name in enumerate(('server', 'client', 'other'), 1):
-        put(name + '.csr', command(['req', '-new', '-key', path(name + '.key'), '-subj', '/CN=fixture-' + name]))
-        put(name + '.pem', command(['x509', '-req', '-in', path(name + '.csr'), '-CA', path('ca.pem'), '-CAkey', path('ca.key'), '-set_serial', str(serial), '-days', '1', '-extfile', path('server.ext' if name == 'server' else 'client.ext')]))
-    def der(name): return command(['x509', '-in', path(name + '.pem'), '-outform', 'DER'])
-    def key_der(name): return command(['pkey', '-in', path(name + '.key'), '-outform', 'DER'])
-    ca, server, client, other = (der(x) for x in ('ca', 'server', 'client', 'other'))
-    server_key, client_key, other_key = (key_der(x) for x in ('server', 'client', 'other'))
+    if material is None:
+        material = prepare_material(openssl=openssl, write_private=write_private, private_dir=private_dir)
+    ca, server, client, other = (material[x] for x in ('ca', 'server', 'client', 'other'))
+    server_key, client_key, other_key = (material[x] for x in ('server_key', 'client_key', 'other_key'))
     leaf = hashlib.sha256(client).hexdigest()
     backend = hashlib.sha256(server).hexdigest()
-    if len({leaf, backend, hashlib.sha256(other).hexdigest(), 'ed' * 32, 'e9' * 32}) != 5: raise ValueError('fact leaf collision')
+    if len({leaf, backend, hashlib.sha256(other).hexdigest(), issuer_payload['peer'], 'e9' * 32}) != 5: raise ValueError('fact leaf collision')
     # Distinct purpose selectors are synthetic enrollment data, not TLS proof.
     observer_selector=hashlib.sha256(b'fixture/receiver-fact/gateway-observer/1\n'+ca).hexdigest()
     backend_selector=hashlib.sha256(b'fixture/receiver-fact/gateway-backend/1\n'+ca).hexdigest()
@@ -96,9 +79,9 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
     if not _HEX32.fullmatch(gateway): raise ValueError('fact gateway')
     sql=("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_causal_evidence_provisioner; "
          "SELECT * FROM contour.enroll_causal_receiver(ROW('%s'::uuid,'%s'::uuid,1,'%s'::uuid,'%s'::uuid,"
-         "'fa000000-0000-4000-8000-000000000010'::uuid,decode(repeat('e9',32),'hex'),decode(repeat('ed',32),'hex'),"
+         "'fa000000-0000-4000-8000-000000000010'::uuid,decode(repeat('e9',32),'hex'),decode('%s','hex'),"
          "decode('%s','hex'),decode('%s','hex'),decode(repeat('d8',32),'hex'),'%s'::timestamptz,'%s'::timestamptz,"
-         "'%s'::timestamptz,'%s'::timestamptz,60000000)::contour.receiver_enrollment_claim); RESET ROLE;"%(t,t,i[1],i[8],i[9],backend,leaf,start,end,start,end))
+         "'%s'::timestamptz,'%s'::timestamptz,60000000)::contour.receiver_enrollment_claim); RESET ROLE;"%(t,t,i[1],i[8],i[9],issuer_payload['peer'],backend,leaf,start,end,start,end))
     execute(sql)
     selected=json.loads(execute("SELECT json_build_object('generation',enrollment_generation,'credential',evidence_credential_id::text)::text FROM contour.causal_receiver_enrollments WHERE tenant_id='%s' AND runtime_id='%s' AND session_epoch=1;"%(t,i[1])).splitlines()[-1])
     if type(selected) is not dict or set(selected)!={'generation','credential'} or not _HEX32.fullmatch(selected['generation']): raise ValueError('fact enrollment')
@@ -116,18 +99,25 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
         if not value.isdigit(): raise ValueError('fact usage')
         return int(value)
     baseline=usage()
-    call('wrong-generation',generation=('e' if selected['generation']=='f'*32 else 'f')*32)
-    call('wrong-credential',credential='fa000000-0000-4000-8000-000000000099')
-    call('wrong-leaf',client_cert_der=other.hex(),client_key_der=other_key.hex())
-    bad=json.loads(fact);bad['receiver_runtime_id']='fc000000-0000-4000-8000-000000000099'
-    call('wrong-scope',fact=json.dumps(bad,sort_keys=True,separators=(',',':')))
-    call('wrong-role',writer_user='causal_issuer_login',writer_password=issuer_payload['password'])
-    call('deadline')
-    if usage()!=baseline: raise RuntimeError('fact negative quota')
-    returned_receipt_digest=call('positive')
-    after=usage()
-    call('retry-denied')
-    if usage()!=after: raise RuntimeError('fact retry quota')
+    if http_call is not None:
+        http_input = dict(base, batch=issuer_payload['batch'], event_password=issuer_payload['writer_password'],
+                          export_cert_der=material['export'].hex(), export_key_der=material['export_key'].hex(),
+                          other_cert_der=other.hex(), other_key_der=other_key.hex(), untrusted_cert_der=material['untrusted'].hex(), untrusted_key_der=material['untrusted_key'].hex())
+        returned_receipt_digest = http_call(http_input)
+        after=usage()
+    else:
+        call('wrong-generation',generation=('e' if selected['generation']=='f'*32 else 'f')*32)
+        call('wrong-credential',credential='fa000000-0000-4000-8000-000000000099')
+        call('wrong-leaf',client_cert_der=other.hex(),client_key_der=other_key.hex())
+        bad=json.loads(fact);bad['receiver_runtime_id']='fc000000-0000-4000-8000-000000000099'
+        call('wrong-scope',fact=json.dumps(bad,sort_keys=True,separators=(',',':')))
+        call('wrong-role',writer_user='causal_issuer_login',writer_password=issuer_payload['password'])
+        call('deadline')
+        if usage()!=baseline: raise RuntimeError('fact negative quota')
+        returned_receipt_digest=call('positive')
+        after=usage()
+        call('retry-denied')
+        if usage()!=after: raise RuntimeError('fact retry quota')
     digest=hashlib.sha256(b'apicontour/causal-evidence/receiver/1\n'+fact).hexdigest()
     query=("SELECT (count(*)=1 AND bool_and(i.canonical_fact=decode('%s','hex') AND i.fact_digest=decode('%s','hex') "
       "AND i.receipt=convert_to(contour.causal_json_canonical(jsonb_build_object('wire_version',1,'kind','receiver','fact_digest','%s','receipt_id',i.receipt_id,'status','stored')),'UTF8') "
@@ -140,6 +130,42 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
     stored_receipt_digest=execute("SELECT encode(sha256(receipt),'hex') FROM contour.causal_receiver_inbox WHERE tenant_id='%s' AND gateway_id='%s' AND gateway_generation='%s' AND delivery_handle='%s';"%(t,gid,gateway,'a1'*16))
     require_matching_receipt_digest(returned_receipt_digest,stored_receipt_digest)
     execute("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_causal_evidence_provisioner; SELECT contour.close_causal_receiver('%s','%s',1,'%s','operator_revoked'); RESET ROLE;"%(t,t,i[1],selected['generation']))
-    call('revoked')
+    if http_call is None: call('revoked')
     if usage()!=after: raise RuntimeError('fact revoked quota')
     return CHECKS
+
+
+def prepare_material(*, openssl, write_private, private_dir, with_export=False):
+    from pathlib import Path
+    directory = Path(private_dir)
+    def path(name): return str(directory / ('fact-' + name))
+    def put(name, data):
+        if not isinstance(data, bytes) or not data or len(data) > 65536: raise ValueError('fact material')
+        write_private('fact-' + name, data)
+    def command(args):
+        result = openssl(args)
+        if not isinstance(result, bytes) or not result or len(result) > 65536: raise ValueError('fact material')
+        return result
+    names = ('server', 'client', 'other') + (('export',) if with_export else ())
+    for name in ('ca', *names):
+        put(name + '.key', command(['genpkey', '-algorithm', 'ED25519']))
+    put('ca.pem', command(['req', '-new', '-x509', '-key', path('ca.key'), '-subj', '/CN=fixture-ca', '-days', '1', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign']))
+    put('server.ext', b'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n')
+    put('client.ext', b'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n')
+    for serial, name in enumerate(names, 1):
+        put(name + '.csr', command(['req', '-new', '-key', path(name + '.key'), '-subj', '/CN=fixture-' + name]))
+        put(name + '.pem', command(['x509', '-req', '-in', path(name + '.csr'), '-CA', path('ca.pem'), '-CAkey', path('ca.key'), '-set_serial', str(serial), '-days', '1', '-extfile', path('server.ext' if name == 'server' else 'client.ext')]))
+    def der(name): return command(['x509', '-in', path(name + '.pem'), '-outform', 'DER'])
+    def key_der(name): return command(['pkey', '-in', path(name + '.key'), '-outform', 'DER'])
+    ca, server, client, other = (der(x) for x in ('ca', 'server', 'client', 'other'))
+    server_key, client_key, other_key = (key_der(x) for x in ('server', 'client', 'other'))
+    result = dict(ca=ca, server=server, client=client, other=other, server_key=server_key, client_key=client_key, other_key=other_key)
+    if with_export:
+        result.update(export=der('export'), export_key=key_der('export'))
+        put('untrusted-ca.key', command(['genpkey','-algorithm','ED25519']))
+        put('untrusted.key', command(['genpkey','-algorithm','ED25519']))
+        put('untrusted-ca.pem', command(['req','-new','-x509','-key',path('untrusted-ca.key'),'-subj','/CN=fixture-untrusted-ca','-days','1','-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign']))
+        put('untrusted.csr', command(['req','-new','-key',path('untrusted.key'),'-subj','/CN=fixture-untrusted']))
+        put('untrusted.pem', command(['x509','-req','-in',path('untrusted.csr'),'-CA',path('untrusted-ca.pem'),'-CAkey',path('untrusted-ca.key'),'-set_serial','1','-days','1','-extfile',path('client.ext')]))
+        result.update(untrusted=der('untrusted'), untrusted_key=key_der('untrusted'))
+    return result

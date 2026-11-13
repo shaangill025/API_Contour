@@ -24,10 +24,12 @@ def _payload(item):
 def _encoded(raw): return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
 
-def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passwords,fixture_bytes):
+def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passwords,fixture_bytes,export_leaf=None):
     """Execute fixed public-role calls and inspect exact SQL scope, no raw output."""
     if set(passwords)!={'issuer','wrong'} or any(type(v) is not str or not re.fullmatch('[0-9a-f]{64}',v) for v in passwords.values()): raise ValueError('issuer fixture password')
     if not isinstance(ca_pem,bytes) or not re.fullmatch('[0-9]{1,5}',str(port)): raise ValueError('issuer fixture TLS')
+    if export_leaf is None: export_leaf='ed'*32
+    if type(export_leaf) is not str or not re.fullmatch('[0-9a-f]{64}',export_leaf): raise ValueError('issuer fixture export leaf')
     template=json.loads(fixture_bytes); now=datetime.datetime.now(datetime.timezone.utc)
     stamp=lambda t:t.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     issued=stamp(now-datetime.timedelta(minutes=1)); expires=stamp(now+datetime.timedelta(minutes=8))
@@ -66,12 +68,12 @@ def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passw
     prefix="BEGIN; SELECT set_config('apicontour.tenant_id','%s',true); SET LOCAL ROLE " % i[0]
     execute(prefix+"contour_admin; SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('e8',32),'hex')); COMMIT;"%(i[0],i[9],i[4],i[5],i[6],i[7],i[8]))
     execute(prefix+"contour_admin; SELECT contour.enroll_origin_credential('%s','fa000000-0000-4000-8000-000000000010','%s',decode(repeat('e9',32),'hex')); COMMIT;"%(i[0],i[9]))
-    execute(prefix+"contour_causal_provisioner; SELECT contour.enroll_causal_runtime('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','00000000-0000-4000-8000-000000000504',decode('%s','hex'),decode(repeat('ed',32),'hex')); COMMIT;"%(*i,MANIFEST))
+    execute(prefix+"contour_causal_provisioner; SELECT contour.enroll_causal_runtime('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','00000000-0000-4000-8000-000000000504',decode('%s','hex'),decode('%s','hex')); COMMIT;"%(*i,MANIFEST,export_leaf))
     def case(mode,grant_name='valid',*,damaged=False,wrong_role=False):
         nonce=str(uuid.uuid4());g=dict(grants[grant_name])
         if damaged:
             signature=g['signature_base64url'];g['signature_base64url']=('B' if signature[0]=='A' else 'A')+signature[1:]
-        payload={'batch':raw_batch.decode(),'wrong_batch':wrong_batch.decode(),'writer_password':writer_password,'ca_pem':ca_pem.decode('ascii'),'epoch':'1','grant':g,'grant_public':public['grant'],'ids':list(i),'mode':mode,'nonce':nonce,'password':passwords['wrong' if wrong_role else 'issuer'],'peer':'ed'*32,'policy':p,'policy_public':public['policy'],'port':str(port),'user':'causal_provisioner_login' if wrong_role else 'causal_issuer_login'}
+        payload={'batch':raw_batch.decode(),'wrong_batch':wrong_batch.decode(),'writer_password':writer_password,'ca_pem':ca_pem.decode('ascii'),'epoch':'1','grant':g,'grant_public':public['grant'],'ids':list(i),'mode':mode,'nonce':nonce,'password':passwords['wrong' if wrong_role else 'issuer'],'peer':export_leaf,'policy':p,'policy_public':public['policy'],'port':str(port),'user':'causal_provisioner_login' if wrong_role else 'causal_issuer_login'}
         probe_call(_canonical(payload))
         row=execute("SELECT count(*)::text FROM contour.causal_sessions WHERE tenant_id='%s' AND runtime_id='%s' AND nonce='%s';"%(i[0],i[1],nonce))
         if row!=('1' if mode=='positive' else '0'): raise RuntimeError('issuer fixture nonce evidence')
@@ -89,6 +91,6 @@ def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passw
     used=execute("SELECT coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='%s'),'0');"%i[0])
     if events!='1' or not used.isdigit() or int(used)!=int(baseline)+len(raw_batch): raise RuntimeError('receiver event quota evidence')
     grant_digest=hashlib.sha256(_canonical(grant)).hexdigest()
-    query=("SELECT (count(*)=1 AND bool_and(epoch=1 AND (claim).profile_name='nodered_5_0_9_receiver_v1' AND (claim).profile_hash=decode('%s','hex') AND (claim).collector_id='%s'::uuid AND (claim).source_id='%s'::uuid AND (claim).project_id='%s'::uuid AND (claim).service_id='%s'::uuid AND (claim).environment_id='%s'::uuid AND (claim).deployment_id='%s'::uuid AND (claim).instance_id='%s'::uuid AND (claim).lifecycle_id='%s'::uuid AND (claim).export_leaf=decode(repeat('ed',32),'hex') AND (claim).grant_digest=decode('%s','hex') AND (claim).policy_revision=2 AND (claim).policy_envelope=decode('%s','hex')))::text FROM contour.causal_sessions WHERE tenant_id='%s' AND runtime_id='%s' AND nonce='%s';"%(MANIFEST,*i[2:10],grant_digest,_canonical(p).hex(),i[0],i[1],nonce))
+    query=("SELECT (count(*)=1 AND bool_and(epoch=1 AND (claim).profile_name='nodered_5_0_9_receiver_v1' AND (claim).profile_hash=decode('%s','hex') AND (claim).collector_id='%s'::uuid AND (claim).source_id='%s'::uuid AND (claim).project_id='%s'::uuid AND (claim).service_id='%s'::uuid AND (claim).environment_id='%s'::uuid AND (claim).deployment_id='%s'::uuid AND (claim).instance_id='%s'::uuid AND (claim).lifecycle_id='%s'::uuid AND (claim).export_leaf=decode('%s','hex') AND (claim).grant_digest=decode('%s','hex') AND (claim).policy_revision=2 AND (claim).policy_envelope=decode('%s','hex')))::text FROM contour.causal_sessions WHERE tenant_id='%s' AND runtime_id='%s' AND nonce='%s';"%(MANIFEST,*i[2:10],export_leaf,grant_digest,_canonical(p).hex(),i[0],i[1],nonce))
     if execute(query)!='true': raise RuntimeError('issuer fixture committed scope')
     return CHECKS

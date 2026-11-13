@@ -35,6 +35,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual([v['mode'] for v in payloads],['generic','wrong-profile','wrong-profile','wrong-peer','wrong-scope','expired','wrong-role','deadline','wrong-signature','positive'])
         self.assertEqual(len({v['nonce'] for v in payloads}),len(payloads))
         self.assertEqual(payloads[-1]['epoch'],'1');self.assertEqual(payloads[-1]['ids'],list(m.IDS))
+        self.assertEqual(payloads[-1]['peer'],'ed'*32)
         self.assertTrue(any('INSERT INTO contour.policy_revisions' in s and 'active_revision=2' in s for s in calls))
         self.assertTrue(any('contour.enroll_causal_runtime' in s and m.MANIFEST in s for s in calls))
         self.assertTrue(any('bool_and(epoch=1' in s and m.MANIFEST in s for s in calls))
@@ -45,6 +46,9 @@ class FixtureTests(unittest.TestCase):
         self.assertNotEqual(json.loads(payloads[-1]['wrong_batch'])['tenant_id'],batch['tenant_id'])
         self.assertTrue(any('causal_receipt_digest' in sql and payloads[-1]['batch'].encode().hex() in sql for sql in calls))
         self.assertEqual(sum('SELECT coalesce((SELECT used_bytes' in sql for sql in calls),2)
+    def test_export_leaf_override_rejects_invalid_data(self):
+        with self.assertRaises(ValueError):
+            m.run(execute=None,openssl=None,write_private=None,private_dir='/private',probe_call=None,ca_pem=b'CA',port='1',passwords={'issuer':'a'*64,'wrong':'b'*64},fixture_bytes=b'{}',export_leaf='ED'*32)
     def test_refuses_unverified_result(self):
         with self.assertRaises(ValueError):
             m.run(execute=None,openssl=None,write_private=None,private_dir='/private',probe_call=None,ca_pem=b'CA',port='1',passwords={'issuer':'secret','wrong':'b'*64},fixture_bytes=b'{}')

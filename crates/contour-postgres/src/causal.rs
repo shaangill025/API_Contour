@@ -19,8 +19,9 @@ use contour_core::{
     CausalMarkerVerifier, PolicyKeys, SourceAssignment, VerifiedCausalGrant, VerifiedPolicy,
 };
 pub use receiver_fact::{
-    ReceiverEvidenceConnection, ReceiverEvidencePeer, ReceiverEvidenceTls, ReceiverFactInbox,
-    ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors, ReceiverTlsError,
+    ReceiverEvidenceConnection, ReceiverEvidenceIo, ReceiverEvidencePeer, ReceiverEvidenceTls,
+    ReceiverFactInbox, ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors,
+    ReceiverTlsError,
 };
 use std::{fmt, time::Duration};
 use time::{OffsetDateTime, UtcOffset};
@@ -404,6 +405,10 @@ pub struct CausalReceiverProfile504<'a> {
     session: &'a CausalSession,
 }
 impl CausalReceiverSession504 {
+    /// Compare registry data against the export binding of this issued session.
+    pub fn matches_export_pin(&self, pin: &[u8; 32]) -> bool {
+        self.session.matches_peer(pin)
+    }
     pub fn receiver_profile_504(&self) -> Option<CausalReceiverProfile504<'_>> {
         (self.session.profile == SessionProfile::Candidate504
             && !self.session.verified_remaining().is_zero())
@@ -1692,6 +1697,26 @@ impl CausalReceiverEventInbox504 {
     /// Return the owned connection with its cancellation state intact.
     pub fn into_database(self) -> ConnectedDatabase {
         self.inbox.into_database()
+    }
+    /// Submit using the leaf authenticated by the receiver TLS acceptor.
+    pub async fn accept_peer_until(
+        &mut self,
+        session: &CausalReceiverSession504,
+        peer: &ReceiverEvidencePeer,
+        bytes: &[u8],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<CausalReceipt, CausalError> {
+        self.accept_until(
+            session,
+            peer.leaf_for_inbox(),
+            bytes,
+            grant_keys,
+            policy_keys,
+            deadline,
+        )
+        .await
     }
     /// Submit through the existing checked inbox and the original session ceiling.
     pub async fn accept_until(

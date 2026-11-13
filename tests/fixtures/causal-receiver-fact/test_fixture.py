@@ -86,5 +86,29 @@ class ReceiptProof(unittest.TestCase):
                 fixture.require_matching_receipt_digest(returned,stored)
 
 
+class HttpResultProof(unittest.TestCase):
+    def test_closed_pool_recovery_result(self):
+        spec=importlib.util.spec_from_file_location('receiver_http',ROOT/'scripts/receiver_http_fixture.py')
+        module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        digest='ab'*32
+        self.assertEqual(module.parse_result(0,b'PASS receiver-http-probe '+digest.encode()+b' '+digest.encode()+b'\n',b''),('passed',digest,digest))
+        self.assertEqual(module.parse_result(1,b'',b'RED receiver-http-pool-recovery '+digest.encode()+b'\nFAIL receiver-http-probe\n'),('pool-recovery-red',None,digest))
+        for code,out,err in [(0,b'',b''),(0,b'PASS receiver-http-probe '+digest.upper().encode()+b'\n',b''),(1,b'',b'FAIL receiver-http-probe\n'),(1,b'x',b'RED receiver-http-pool-recovery\nFAIL receiver-http-probe\n')]:
+            with self.assertRaises(RuntimeError): module.parse_result(code,out,err)
+
+    def test_event_receipt_requires_owner_confirmation_and_substitution_rejection(self):
+        import json
+        spec=importlib.util.spec_from_file_location('receiver_http_event',ROOT/'scripts/receiver_http_fixture.py')
+        module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        tenant='f0000000-0000-4000-8000-000000000001'; runtime='fc000000-0000-4000-8000-000000000010'
+        batch={'batch_id':'00000000-0000-4000-8000-000000000001','tenant_id':tenant,'runtime_id':runtime,'session_epoch':1}
+        payload={'ids':[tenant,runtime],'batch':json.dumps(batch,sort_keys=True,separators=(',',':'))}
+        statements=[]
+        module.verify_event_receipt(lambda query: (statements.append(query) or 'true'),payload,'ab'*32)
+        self.assertIn("receipt_id::text",statements[0])
+        self.assertIn("CASE WHEN receipt_id=",statements[0])
+        with self.assertRaises(RuntimeError): module.verify_event_receipt(lambda _: 'false',payload,'ab'*32)
+        with self.assertRaises(ValueError): module.verify_event_receipt(lambda _: 'true',payload,'AB'*32)
+
 if __name__ == '__main__':
     unittest.main()
