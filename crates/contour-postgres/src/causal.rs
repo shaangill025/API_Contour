@@ -27,7 +27,7 @@ const ARTIFACT: &str = "b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c
 const WIRE_PROFILE: &str = "nodered_5_0_9_wire_v1";
 const WIRE_ARTIFACT: &str = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
 const RECEIVER_PROFILE: &str = "nodered_5_0_9_receiver_v1";
-const RECEIVER_MANIFEST: &str = "c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0";
+const RECEIVER_MANIFEST: &str = "d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344";
 
 fn authorized_profile(name: &str, hash: &str) -> bool {
     matches!(
