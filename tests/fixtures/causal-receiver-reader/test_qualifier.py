@@ -11,8 +11,8 @@ T='a'*32; C='b'*64; N='c'*64; I='sha256:'+'d'*64; START='2026-11-12T01:02:03.123
 
 def sample():
     return {'Id':C,'Name':'/'+NAME+'-postgres','Image':I,'Mounts':[],
-      'Config':{'Image':q.IMAGE,'Labels':{q.LABEL:T},'Cmd':['postgres'],'Env':['ONE=1']},
-      'HostConfig':{'Init':True,'Privileged':False,'PublishAllPorts':False,'NetworkMode':N,'PortBindings':{'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':''}]},'Binds':None,'CapAdd':None,'Memory':536870912,'NanoCpus':1000000000,'PidsLimit':128,'Tmpfs':{'/var/lib/postgresql/data':'rw,nosuid,noexec,size=256m'}},
+      'Config':{'Nested':{'flag':True,'number':1},'Image':q.IMAGE,'Labels':{q.LABEL:T},'Cmd':['postgres'],'Env':['ONE=1']},
+      'HostConfig':{'OomKillDisable':False,'Init':True,'Privileged':False,'PublishAllPorts':False,'NetworkMode':N,'PortBindings':{'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':''}]},'Binds':None,'CapAdd':None,'Memory':536870912,'NanoCpus':1000000000,'PidsLimit':128,'Tmpfs':{'/var/lib/postgresql/data':'rw,nosuid,noexec,size=256m'}},
       'State':{'Status':'running','Running':True,'Pid':123,'StartedAt':START},
       'NetworkSettings':{'Networks':{NAME:{'NetworkID':N,'Aliases':['postgres']}},'Ports':{'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':'32768'}]}}}
 
@@ -31,17 +31,42 @@ class Boundaries(unittest.TestCase):
             if change=='network': x['NetworkSettings']['Networks'][NAME]['NetworkID']='f'*64
             if change=='privileged': x['HostConfig']['Privileged']=True
             with self.subTest(change=change),self.assertRaises(ValueError): q.validate_container(x,T,C,I,N,['postgres'],['ONE=1'],START)
+    def test_start_transition_only_env_reordering_and_known_oom_form(self):
+        before=q.configuration_snapshot(sample());before['Config']['Env']=['ONE=1','TWO=2']
+        running=copy.deepcopy(before);running['Config']['Env'].reverse();running['HostConfig']['OomKillDisable']=None
+        q.validate_start_transition(before,running)
+        same=copy.deepcopy(before);q.validate_start_transition(before,same)
+        missing=sample();del missing['Mounts']
+        with self.assertRaises(ValueError):q.configuration_snapshot(missing)
+        self.assertFalse(q.exact_json_equal({'v':float('nan')},{'v':float('nan')}))
+        for kind in ('true-oom','changed','missing','duplicate','security','mount','cid','bool-int','int-float','missing-null','nan'):
+            bad=copy.deepcopy(running)
+            if kind=='true-oom':bad['HostConfig']['OomKillDisable']=True
+            if kind=='changed':bad['Config']['Env'][0]='TWO=other'
+            if kind=='missing':bad['Config']['Env'].pop()
+            if kind=='duplicate':bad['Config']['Env'].append('ONE=1')
+            if kind=='security':bad['HostConfig']['Privileged']=True
+            if kind=='mount':bad['Mounts'].append({'Type':'bind'})
+            if kind=='cid':bad['Id']='e'*64
+            if kind=='bool-int':bad['Config']['Nested']['flag']=1
+            if kind=='int-float':bad['Config']['Nested']['number']=1.0
+            if kind=='missing-null':bad['Config']['Nested']['absent']=None
+            if kind=='nan':bad['Config']['Nested']['number']=float('nan')
+            with self.subTest(kind=kind),self.assertRaises(ValueError):q.validate_start_transition(before,bad)
     def test_ownership_requires_matching_source_generation_and_network(self):
         import json
         class Output:
             def verify(self): pass
         class Tool:
-            changed=False;config_drift=False
+            changed=False;config_drift=False;env_drift=False;oom_drift=False;type_drift=False
             def call(self,args):
                 if args[:2]==['docker','inspect']:
                     x=sample()
                     if self.changed: x['State']['StartedAt']='2026-11-12T01:02:04Z'
                     if self.config_drift: x['HostConfig']['Unexpected']='drift'
+                    if self.env_drift: x['Config']['Env'].reverse()
+                    if self.oom_drift: x['HostConfig']['OomKillDisable']=None
+                    if self.type_drift: x['Config']['Nested']['flag']=1
                     return json.dumps([x]).encode()
                 return json.dumps([{'Id':N,'Name':NAME,'Internal':True,'Labels':{q.LABEL:T},'Containers':{C:{}}}]).encode()
             def check(self): pass
@@ -51,7 +76,11 @@ class Boundaries(unittest.TestCase):
         with self.assertRaises(ValueError): fence()
         tool.changed=False;tool.config_drift=True
         with self.assertRaises(RuntimeError): fence()
-        tool.config_drift=False;fence.head='other'
+        tool.config_drift=False;tool.oom_drift=True
+        with self.assertRaises(RuntimeError): fence()
+        tool.oom_drift=False;tool.type_drift=True
+        with self.assertRaises(RuntimeError): fence()
+        tool.type_drift=False;fence.head='other'
         with self.assertRaises(RuntimeError): fence()
     def test_tool_fence_checks_before_and_after_each_command(self):
         from types import SimpleNamespace

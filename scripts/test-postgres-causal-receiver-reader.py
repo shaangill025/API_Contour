@@ -118,6 +118,43 @@ def select_probe(lines, target, source):
     return found[0]
 
 
+def configuration_snapshot(item):
+    import copy
+    keys=('Id','Name','Image','Config','HostConfig','Mounts')
+    if type(item) is not dict or any(k not in item for k in keys): raise ValueError('container')
+    return {k:copy.deepcopy(item[k]) for k in keys}
+
+
+def exact_json_equal(left,right):
+    import json
+    try:
+        return json.dumps(left,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')==json.dumps(right,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
+    except (ValueError,TypeError,UnicodeError):
+        return False
+
+
+def validate_start_transition(created,running):
+    """Permit only Docker's observed env ordering and false-to-null OOM form."""
+    import copy
+    before=copy.deepcopy(created);after=copy.deepcopy(running)
+    if type(before) is not dict or type(after) is not dict: raise ValueError('transition')
+    a=before.get('Config');b=after.get('Config');h1=before.get('HostConfig');h2=after.get('HostConfig')
+    if any(type(x) is not dict for x in (a,b,h1,h2)): raise ValueError('transition')
+    def entries(value):
+        if type(value) is not list: raise ValueError('transition')
+        result={}
+        for item in value:
+            if type(item) is not str or '=' not in item: raise ValueError('transition')
+            key=item.split('=',1)[0]
+            if not key or key in result: raise ValueError('transition')
+            result[key]=item
+        return result
+    if entries(a.get('Env'))!=entries(b.get('Env')): raise ValueError('transition')
+    if h1.get('OomKillDisable') is not False or 'OomKillDisable' not in h2 or not (h2['OomKillDisable'] is False or h2['OomKillDisable'] is None): raise ValueError('transition')
+    a['Env']=b['Env'];h1['OomKillDisable']=h2['OomKillDisable']
+    if not exact_json_equal(before,after): raise ValueError('transition')
+
+
 def probe_snapshot(path, target, metadata):
     """Fence a no-follow private regular executable and its complete bytes."""
     import hashlib, os, stat
@@ -184,7 +221,7 @@ class OwnershipFence:
         self.output.verify()
         if self.fixture['clean_head'](self.source_call)!=self.head or self.fixture['tracked_snapshot'](self.source_call)!=self.sources: raise RuntimeError('fixture source changed')
         item=self.inspect(['docker','inspect',self.cid])
-        if {k:item.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')}!=self.frozen: raise RuntimeError('fixture configuration changed')
+        if not exact_json_equal(configuration_snapshot(item),self.frozen): raise RuntimeError('fixture configuration changed')
         validate_container(item,self.token,self.cid,self.image_id,self.network_id,self.command,self.env,self.started,allow_stopped=allow_stopped)
         validate_network(self.inspect(['docker','network','inspect',self.network_id]),self.token,self.network_id,[self.cid])
         self.tool.check();self.output.verify()
@@ -387,12 +424,13 @@ def main(argv):
         for entry in ('POSTGRES_DB=contour_fixture','POSTGRES_PASSWORD_FILE=/tmp/initial-secret','POSTGRES_HOST_AUTH_METHOD=scram-sha-256'):expected_env[entry.split('=',1)[0]]=entry
         expected_env=list(expected_env.values())
         created=inspect(['docker','inspect',cid]);validate_container(created,token,cid,image_id,network_id,cmd,expected_env)
-        frozen={k:created.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')}
+        frozen=configuration_snapshot(created)
+        write_private('container-created.json',record({'version':1,'configuration':frozen}))
         def created_fence():
             output.verify();tool.check()
             if fixture['clean_head'](source_call)!=head or fixture['tracked_snapshot'](source_call)!=sources: raise RuntimeError('source changed')
             current=inspect(['docker','inspect',cid])
-            if {k:current.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')}!=frozen: raise RuntimeError('fixture configuration changed')
+            if not exact_json_equal(configuration_snapshot(current),frozen): raise RuntimeError('fixture configuration changed')
             validate_container(current,token,cid,image_id,network_id,cmd,expected_env)
             validate_network(inspect(['docker','network','inspect',network_id]),token,network_id,[])
         for local,remote in (('initial-secret','initial-secret'),('server.key','server.key'),('server.pem','server.crt')):
@@ -402,8 +440,10 @@ def main(argv):
         PHASE='start'
         if tool.call(['docker','start',cid]).decode('ascii')!=cid: raise RuntimeError('start outcome unknown')
         item=inspect(['docker','inspect',cid])
-        if {k:item.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')}!=frozen: raise RuntimeError('fixture configuration changed')
+        write_private('container-started.json',record({'version':1,'observation':item}))
+        running=configuration_snapshot(item);validate_start_transition(frozen,running)
         started=(item.get('State') or {}).get('StartedAt');port=validate_container(item,token,cid,image_id,network_id,cmd,expected_env,started)
+        frozen=running
         validate_network(inspect(['docker','network','inspect',network_id]),token,network_id,[cid]);output.write('generation.json',record({'version':1,'started_at':started}))
         owner=OwnershipFence(tool,fixture,source_call,output,head,sources,token,cid,image_id,network_id,cmd,expected_env,started,frozen);owner()
         def readiness_process(args,**kwargs):
