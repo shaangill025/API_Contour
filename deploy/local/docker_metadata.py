@@ -110,9 +110,11 @@ def _parse(data):
 
 
 def _route(args):
-    if type(args) not in (list,tuple) or len(args) not in (3,4) or any(type(x) is not str for x in args): return None
+    if type(args) not in (list,tuple) or len(args) not in (3,4,5) or any(type(x) is not str for x in args): return None
     args = list(args)
-    if len(args) == 3 and args[:2] == ['docker','inspect']:
+    if len(args) == 5 and args[:4] == ['docker','inspect','--type','exec']:
+        family, ident = 'exec', args[4]
+    elif len(args) == 3 and args[:2] == ['docker','inspect']:
         family, ident = 'containers', args[2]
     elif len(args) == 4 and args[0] == 'docker' and args[2] == 'inspect' and args[1] in ('container','network','image'):
         family, ident = {'container':'containers','network':'networks','image':'images'}[args[1]], args[3]
@@ -164,7 +166,8 @@ def _send(fd, payload, deadline):
 
 def _request(process, path, deadline):
     valid = (r'/version|/v1\.56/containers/[0-9a-f]{64}/json|'
-             r'/v1\.56/networks/[0-9a-f]{64}|/v1\.56/images/(?:sha256:)?[0-9a-f]{64}/json')
+             r'/v1\.56/networks/[0-9a-f]{64}|/v1\.56/images/(?:sha256:)?[0-9a-f]{64}/json|'
+             r'/v1\.56/exec/[0-9a-f]{64}/json')
     if not re.fullmatch(valid,path): _fail()
     payload = ('GET '+path+' HTTP/1.1\r\nHost: docker\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n').encode('ascii')
     _send(process.stdin.fileno(),payload,deadline)
