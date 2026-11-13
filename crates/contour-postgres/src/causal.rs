@@ -6,6 +6,7 @@
 //! Database current-time observations have microsecond resolution. Canceling
 //! an in-flight operation can leave an unknown commit outcome; retry only the
 //! original issue or batch identity and exact content.
+mod receiver_fact;
 use crate::{
     AuthorityError, ConnectedDatabase,
     transaction::{
@@ -16,6 +17,10 @@ use crate::{
 use contour_core::{
     AdmissionInputs, CaptureScope, CausalEventBatch, CausalGrantKeys, CausalMarkerScope,
     CausalMarkerVerifier, PolicyKeys, SourceAssignment, VerifiedCausalGrant, VerifiedPolicy,
+};
+pub use receiver_fact::{
+    ReceiverEvidenceConnection, ReceiverEvidencePeer, ReceiverEvidenceTls, ReceiverFactInbox,
+    ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors, ReceiverTlsError,
 };
 use std::{fmt, time::Duration};
 use time::{OffsetDateTime, UtcOffset};

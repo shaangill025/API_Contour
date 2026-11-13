@@ -43,7 +43,9 @@ pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
     CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
     CausalMarkerBinding, CausalReceipt, CausalReceiverEventInbox504, CausalReceiverProfile504,
-    CausalReceiverSession504, CausalSession, CausalWireProfile503,
+    CausalReceiverSession504, CausalSession, CausalWireProfile503, ReceiverEvidenceConnection,
+    ReceiverEvidencePeer, ReceiverEvidenceTls, ReceiverFactInbox, ReceiverFactReceipt,
+    ReceiverFactRequest, ReceiverFactSelectors, ReceiverTlsError,
 };
 pub use causal_gateway_reader::{
     CausalGatewayObservation, CausalGatewayReadError, CausalGatewayReader, CausalGatewaySelector,

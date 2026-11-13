@@ -10,7 +10,9 @@ contour-auth = { path = "../contour-auth" }
 contour-core = { path = "../contour-core" }
 time = { version = "=0.3.47", default-features = false, features = ["std"] }
 tokio-postgres = "=0.7.18"
-tokio = { version = "=1.53.2", features = ["rt", "time", "net"] }
+tokio = { version = "=1.53.2", features = ["rt", "time", "net", "io-util"] }
 native-tls = "=0.2.18"
 postgres-native-tls = { version = "=0.5.3", features = ["runtime"] }
 serde_json = "=1.0.145"
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }

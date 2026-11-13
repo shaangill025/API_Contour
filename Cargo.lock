@@ -257,10 +257,12 @@ dependencies = [
  "contour-core",
  "native-tls",
  "postgres-native-tls",
+ "rustls",
  "serde_json",
  "time",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
 ]
 
 [[package]]
