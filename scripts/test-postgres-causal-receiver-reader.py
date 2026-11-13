@@ -229,6 +229,13 @@ class OwnershipFence:
         self.tool.check();self.output.verify()
 
 
+def dedicated_sensitive_executor(execute):
+    """FreshPsqlTransport starts a new psql per execute after role logging setup."""
+    if not callable(execute): raise ValueError('fixture executor')
+    def sensitive(text): return execute(text)
+    return sensitive
+
+
 def bootstrap_schema(execute, root, hooks, capture, modules, passwords, fence):
     """Apply the established SQL14..28 fixture on the already fenced owner."""
     from pathlib import Path
@@ -254,7 +261,7 @@ def bootstrap_schema(execute, root, hooks, capture, modules, passwords, fence):
         def _password(self,name):
             if name not in ('ingress','worker'): raise ValueError('synthetic role')
             return passwords[name]
-    fixture_logins=SyntheticLogins(profile.PROFILE,execute,execute,lambda *_:False)
+    fixture_logins=SyntheticLogins(profile.PROFILE,execute,dedicated_sensitive_executor(execute),lambda *_:False)
     fixture_logins._synthetic={key:passwords[key] for key in ('ingress','worker')}
     fixture_logins.apply()
     capture['capture_forward'](execute,lambda version:(root/'db/opt-in-migrations'/(capture['MIGRATIONS'][version]+'.sql')).read_bytes(),

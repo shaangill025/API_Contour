@@ -177,6 +177,18 @@ class Boundaries(unittest.TestCase):
         self.assertIn('GRANT contour_causal_receiver_reader,contour_causal_issuer TO receiver_mixed_login;',sql)
         for changed in ({**p,'wrong':p['reader']},{**p,'reader':'x'*64},{**p,'extra':'4'*64}):
             with self.assertRaises(ValueError): q.reader_login_sql(changed)
+    def test_sensitive_executor_is_distinct_and_uses_one_fresh_request_per_call(self):
+        from deploy.local import origin21_logins,origin21_profile
+        requests=[]
+        def execute(text): requests.append(text);return 'done'
+        sensitive=q.dedicated_sensitive_executor(execute)
+        self.assertIsNot(sensitive,execute)
+        login=origin21_logins.Logins(origin21_profile.PROFILE,execute,sensitive,lambda *_:False)
+        self.assertEqual(login.sensitive_execute('one'),'done');self.assertEqual(login.sensitive_execute('two'),'done')
+        self.assertEqual(requests,['one','two'])
+        with self.assertRaises(ValueError):origin21_logins.Logins(origin21_profile.PROFILE,execute,execute,lambda *_:False)
+        transport=(ROOT/'scripts/fixture_psql_transport.py').read_text()
+        self.assertIn('timeout -k 1 "$seconds" psql -XAtq',transport)
     def test_reader_hooks_apply_fixture_without_independent_races(self):
         from types import SimpleNamespace
         calls=[]
