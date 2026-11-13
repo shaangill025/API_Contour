@@ -7,6 +7,22 @@ import unittest
 Q=runpy.run_path(str(Path(__file__).resolve().parents[3]/'scripts/qualify-receiver-deployment.py'))
 
 class QualifierTests(unittest.TestCase):
+    def test_cli_reports_one_json_and_preserves_failure_cleanup(self):
+        import contextlib, io
+        report=Q['report']
+        cases=[({'status':'fail','phase':'image','cleanup':'complete'},1),({'status':'pass','phase':None,'cleanup':'complete'},0)]
+        for value,code in cases:
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output): actual=report(lambda: value)
+            self.assertEqual(actual,code)
+            lines=output.getvalue().splitlines();self.assertEqual(len(lines),1)
+            self.assertEqual(json.loads(lines[0]),value)
+        def fail(): raise RuntimeError('private diagnostic')
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output): actual=report(fail)
+        self.assertEqual(actual,1)
+        lines=output.getvalue().splitlines();self.assertEqual(len(lines),1)
+        self.assertEqual(json.loads(lines[0]),{'status':'fail','phase':'input','cleanup':'unknown'})
     def test_duplicate_and_oversize_json_rejected(self):
         with self.assertRaises(ValueError): Q['parse'](b'{"x":1,"x":2}')
         with self.assertRaises(ValueError): Q['parse'](b' '*32769)

@@ -294,15 +294,17 @@ def entry():
     if len(sys.argv)!=3 or sys.argv[1]!='--run-owned': raise ValueError('arguments')
     return main(sys.argv[2])
 
-if __name__=='__main__':
+def report(run=entry):
     try:
-        value=entry(); print(json.dumps(value,sort_keys=True,separators=(',',':')))
-        if value['status']!='pass': sys.exit(1)
+        value=run()
     except BaseException:
         value={'status':'fail','phase':CURRENT_PHASE,'cleanup':'unknown'}
         if CURRENT_OWNER is not None:
             value['output']=str(CURRENT_OWNER.path)
             try: record(CURRENT_OWNER,'receipt.json',{'version':1,**value})
             except BaseException: pass
-        print(json.dumps(value,sort_keys=True,separators=(',',':')))
-        sys.exit(1)
+    print(json.dumps(value,sort_keys=True,separators=(',',':')))
+    return 0 if value['status']=='pass' else 1
+
+if __name__=='__main__':
+    sys.exit(report())
