@@ -31,6 +31,14 @@ class Boundaries(unittest.TestCase):
             if change=='network': x['NetworkSettings']['Networks'][NAME]['NetworkID']='f'*64
             if change=='privileged': x['HostConfig']['Privileged']=True
             with self.subTest(change=change),self.assertRaises(ValueError): q.validate_container(x,T,C,I,N,['postgres'],['ONE=1'],START)
+    def test_network_requires_exact_no_masquerade_bridge(self):
+        network={'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':{'com.docker.network.bridge.enable_ip_masquerade':'false'},'Labels':{q.LABEL:T},'Containers':{}}
+        q.validate_network(network,T,N,[])
+        for field,value in [('Internal',True),('Driver','host'),('Options',{}),('Options',{'com.docker.network.bridge.enable_ip_masquerade':'true'})]:
+            bad=copy.deepcopy(network);bad[field]=value
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):q.validate_network(bad,T,N,[])
+        wildcard=sample();wildcard['HostConfig']['PortBindings']['5432/tcp'][0]['HostIp']='0.0.0.0'
+        with self.assertRaises(ValueError):q.validate_container(wildcard,T,C,I,N,['postgres'],['ONE=1'],START)
     def test_start_transition_only_env_reordering_and_known_oom_form(self):
         before=q.configuration_snapshot(sample());before['Config']['Env']=['ONE=1','TWO=2']
         running=copy.deepcopy(before);running['Config']['Env'].reverse();running['HostConfig']['OomKillDisable']=None
@@ -68,7 +76,7 @@ class Boundaries(unittest.TestCase):
                     if self.oom_drift: x['HostConfig']['OomKillDisable']=None
                     if self.type_drift: x['Config']['Nested']['flag']=1
                     return json.dumps([x]).encode()
-                return json.dumps([{'Id':N,'Name':NAME,'Internal':True,'Labels':{q.LABEL:T},'Containers':{C:{}}}]).encode()
+                return json.dumps([{'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':{'com.docker.network.bridge.enable_ip_masquerade':'false'},'Labels':{q.LABEL:T},'Containers':{C:{}}}]).encode()
             def check(self): pass
         source=object();tool=Tool();fixture={'clean_head':lambda _: 'head','tracked_snapshot':lambda _: {'source':'hash'}}
         fence=q.OwnershipFence(tool,fixture,source,Output(),'head',{'source':'hash'},T,C,I,N,['postgres'],['ONE=1'],START,{k:sample().get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')})

@@ -29,7 +29,8 @@ START=re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-
 def validate_network(item, token, network_id, members):
     if not TOKEN.fullmatch(token) or not HEX64.fullmatch(network_id): raise ValueError('identity')
     if (type(item) is not dict or item.get('Id')!=network_id or item.get('Name')!='contour-origin21-qual-'+token
-        or item.get('Internal') is not True or (item.get('Labels') or {}).get(LABEL)!=token
+        or item.get('Internal') is not False or item.get('Driver')!='bridge'
+        or item.get('Options')!={'com.docker.network.bridge.enable_ip_masquerade':'false'} or (item.get('Labels') or {}).get(LABEL)!=token
         or type(item.get('Containers')) is not dict or set(item['Containers'])!=set(members)):
         raise ValueError('network')
 
@@ -411,9 +412,9 @@ def main(argv):
         image=inspect(['docker','image','inspect',IMAGE]);image_id=image.get('Id','')
         if not re.fullmatch('sha256:[0-9a-f]{64}',image_id) or not any(x in ('postgres@'+IMAGE.split('@',1)[1],'docker.io/library/postgres@'+IMAGE.split('@',1)[1]) for x in image.get('RepoDigests',[])): raise ValueError('image')
         PHASE='network'
-        network_id=tool.call(['docker','network','create','--internal','--label',LABEL+'='+token,name]).decode('ascii')
+        network_id=tool.call(['docker','network','create','--driver','bridge','--opt','com.docker.network.bridge.enable_ip_masquerade=false','--label',LABEL+'='+token,name]).decode('ascii')
         if not HEX64.fullmatch(network_id): raise RuntimeError('network outcome unknown')
-        fixture['durable_id'](output.path,'network',network_id);validate_network(inspect(['docker','network','inspect',network_id]),token,network_id,[])
+        fixture['durable_id'](output.path,'network',network_id);network_created=inspect(['docker','network','inspect',network_id]);validate_network(network_created,token,network_id,[]);write_private('network-created.json',record({'version':1,'observation':network_created}))
         initial=secrets.token_hex(32).encode();output.write('initial-secret',initial);private_files['initial-secret']=metadata._identity(os.stat('initial-secret',dir_fd=output.fd,follow_symlinks=False))
         cmd=['sh','-c','chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c listen_addresses=* -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key']
         PHASE='container'
