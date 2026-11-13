@@ -12,6 +12,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY collectors/nodered/live-integration/manifest.json collectors/nodered/live-integration/manifest.json
+COPY collectors/nodered/receiver-integration/manifest-504.json collectors/nodered/receiver-integration/manifest-504.json
+COPY collectors/nodered/receiver-integration/artifact-504.json collectors/nodered/receiver-integration/artifact-504.json
 RUN cargo build --release --locked -p contour-platform
 RUN cargo build --release --locked -p contour-ingress --bin local_capture
 RUN cargo build --release --locked -p contour-ingress --bin local_gateway

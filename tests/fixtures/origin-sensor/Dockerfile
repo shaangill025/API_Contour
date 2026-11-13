@@ -3,6 +3,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY collectors/nodered/live-integration/manifest.json collectors/nodered/live-integration/manifest.json
+COPY collectors/nodered/receiver-integration/manifest-504.json collectors/nodered/receiver-integration/manifest-504.json
+COPY collectors/nodered/receiver-integration/artifact-504.json collectors/nodered/receiver-integration/artifact-504.json
 RUN cargo build --release --locked -p contour-ingress --example origin_https_probe --example origin_sensor_probe
 RUN cargo build --release --locked -p contour-postgres --example catalog_probe
 RUN mkdir /runtime-libs && cp /usr/lib/*-linux-gnu/libssl.so.3 /usr/lib/*-linux-gnu/libcrypto.so.3 /runtime-libs/
