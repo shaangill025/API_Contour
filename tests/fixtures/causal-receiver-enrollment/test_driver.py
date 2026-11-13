@@ -44,6 +44,14 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             hook.after_forward(25, execute)
 
+    def test_fixture_case_tags_match_closed_parser_order(self):
+        import re
+        transport_spec=importlib.util.spec_from_file_location('receiver_transport',ROOT/'scripts/fixture_psql_transport.py')
+        transport=importlib.util.module_from_spec(transport_spec); transport_spec.loader.exec_module(transport)
+        fixture=(ROOT/'db/tests/causal_receiver_enrollment.sql').read_text()
+        tags=re.findall(r'^\\echo receiver-case=([a-z-]+)$',fixture,re.MULTILINE)
+        self.assertEqual(tags,list(transport._RECEIVER_CASES))
+
     def test_receipt_does_not_claim_races_or_peer(self):
         hook = object.__new__(driver.Hooks)
         hook.complete = True
