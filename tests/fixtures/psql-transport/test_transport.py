@@ -70,6 +70,23 @@ class ExpiryOverlap(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError,'committed retry'): run()
         self.assertEqual(len([e for e in events if e[0]=='wait']),1)
 
+class ReceiverDiagnostics(unittest.TestCase):
+    def test_closed_state_and_function_with_untrusted_messages(self):
+        err=(b'psql:<stdin>:123: ERROR:  23514: secret-canary\n'
+             b'CONTEXT:  PL/pgSQL function contour.enroll_causal_receiver(secret-canary) line 44 at secret-canary\n')
+        fields=mod._receiver_failure(err)
+        self.assertEqual(fields,('23514','contour.enroll_causal_receiver',44,123))
+        safe=str(mod.ReceiverQueryError(*fields))
+        self.assertIn('state=23514',safe); self.assertIn('function=contour.enroll_causal_receiver',safe); self.assertIn('line=44',safe)
+        self.assertNotIn('secret-canary',safe)
+    def test_untrusted_codes_names_and_multiple_errors_are_closed(self):
+        err=b'ERROR:  99999: secret-canary\nCONTEXT:  PL/pgSQL function attacker.secret_canary() line 3 at secret-canary\n'
+        fields=mod._receiver_failure(err)
+        self.assertEqual(fields,('unavailable','unavailable',None,None))
+        self.assertNotIn('secret',str(mod.ReceiverQueryError(*fields)))
+        self.assertEqual(mod._receiver_failure(err+err),('unavailable','unavailable',None,None))
+        self.assertNotIn('secret',str(mod.ReceiverQueryError('secret','secret',True,9999999)))
+
 class Transport(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); folder = Path(self.temp.name)
@@ -145,6 +162,17 @@ print(str(os.getpid()) + ':' + s, end='')
         with self.assertRaises(mod.ObserverQueryError) as caught:self.transport.execute(mod._OBSERVER_PREFIX.decode()+'SELECT fixture;')
         self.assertEqual((caught.exception.phase,caught.exception.sqlstate),('runtime-source','23514'))
         self.assertNotIn('secret-sentinel',str(caught.exception));self.assertFalse(self.calls)
+
+    def test_receiver_diagnostics_opt_in_and_default_failure_unchanged(self):
+        def exchange(worker,request,nonce,deadline):
+            return b'',b'psql:<stdin>:42: ERROR:  23505: secret-canary\nCONTEXT:  PL/pgSQL function contour.enroll_causal_receiver(secret-canary) line 12 at secret-canary\n'+nonce.encode()+b' STATUS 3\n'
+        self.transport._exchange=exchange
+        with self.assertRaises(RuntimeError) as caught: self.transport.execute('SELECT fixture;')
+        self.assertEqual(str(caught.exception),'authority fixture command failed')
+        self.transport.diagnostic_context='receiver-v1'
+        with self.assertRaises(mod.ReceiverQueryError) as caught: self.transport.execute('SELECT fixture;')
+        self.assertIn('state=23505',str(caught.exception)); self.assertIn('input_line=42',str(caught.exception))
+        self.assertNotIn('secret-canary',str(caught.exception)); self.assertFalse(self.calls)
 
     def test_timeout_contains_and_never_replays(self):
         with self.assertRaises(mod.TransportError): self.transport.execute('SLOW',timeout=.1)
