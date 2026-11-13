@@ -1,5 +1,8 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
+mod gateway_enrollment;
+pub use gateway_enrollment::{GatewayEnrollment, GatewayEnrollmentError};
+
 use std::fmt;
 mod authority_reply;
 pub use authority_reply::{

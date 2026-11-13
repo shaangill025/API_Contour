@@ -8,6 +8,7 @@ mod catalog;
 mod catalog_reader;
 mod causal;
 mod causal_receiver_reader;
+mod causal_gateway_reader;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
@@ -42,6 +43,7 @@ pub use causal::{
     CausalMarkerBinding, CausalReceipt, CausalReceiverProfile504, CausalReceiverSession504,
     CausalSession, CausalWireProfile503,
 };
+pub use causal_gateway_reader::{CausalGatewayObservation, CausalGatewayReadError, CausalGatewayReader, CausalGatewaySelector};
 pub use causal_receiver_reader::{
     CausalReceiverObservation, CausalReceiverReadError, CausalReceiverReader,
     CausalReceiverSelector,
