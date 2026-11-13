@@ -33,6 +33,20 @@ class JournalDriverTests(unittest.TestCase):
         self.assertEqual(stages,['killed_after_prepared','refuse_nonce','refuse_envelope','refuse_source','refuse_config','locked_after_error','locked_after_success','killed_after_confirmed_issue','exact_reopen','current_key_rejection','separate_later_intent','old_epoch_rejected'])
         self.assertTrue(all(m.stopped for m in active))
 
+    def test_installed_scenario_runs_only_journal_protocol_and_propagates_failures(self):
+        bridge,https,inbox,hashes=M['load_helpers'](); bg=bridge['main'].__globals__
+        base=['journal-probe']; work=Path('/synthetic'); env={}; counts=object(); state={'stages':[]}; execute=object(); calls=[]
+        def cases(*args): calls.append(args)
+        with mock.patch.dict(G,{'run_cases':cases}), mock.patch.dict(bg,{'inbox_context_unknown':mock.Mock(side_effect=AssertionError('foreign protocol'))}):
+            M['install_helpers'](bridge,https,inbox,hashes)
+            bg['run_scenario'](base,work,env,counts,state,execute)
+            self.assertEqual(calls,[(base,work,env,counts,state)])
+            self.assertIn('journal recovery',state['boundary'])
+            self.assertFalse(bg['inbox_context_unknown'].called)
+            with mock.patch.dict(G,{'run_cases':mock.Mock(side_effect=RuntimeError('journal scenario failure'))}):
+                with self.assertRaisesRegex(RuntimeError,'journal scenario failure'):
+                    bg['run_scenario'](base,work,env,counts,state,execute)
+
     def test_refusal_must_be_exact_and_no_output(self):
         class Monitor:
             def __init__(self,*a): pass

@@ -150,10 +150,10 @@ def install_helpers(bridge,https,inbox,hashes):
             if path.is_absolute(): path=path.relative_to(ROOT)
             result['journal:'+str(path)]=bridge['digest_file'](safe_source(path))
         return result
-    def cases(base,work,env,counts,state):
+    def scenario(base,work,env,counts,state,execute):
         state['boundary']='PostgreSQL TLS journal recovery; synthetic inputs; no ambiguous COMMIT or production activation'
         run_cases(base,work,env,counts,state)
-    bg.update({'snapshot':snapshot,'build_probe':lambda target:original_build(target,'contour-ingress','causal_journal_probe'),'run_probe_cases':cases})
+    bg.update({'snapshot':snapshot,'build_probe':lambda target:original_build(target,'contour-ingress','causal_journal_probe'),'run_scenario':scenario})
 
 
 def main():

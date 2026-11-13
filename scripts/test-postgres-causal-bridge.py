@@ -447,6 +447,14 @@ def run_probe_cases(base,work,env,counts,state):
     state['status']='passed'
 
 
+def run_scenario(base,work,env,counts,state,execute):
+    """Run the bridge protocol and its mandatory post-commit context control."""
+    run_probe_cases(base,work,env,counts,state)
+    state['status']='failed';state['current_case']='inbox_context_unknown'
+    inbox_context_unknown(base,work,env,execute)
+    state['stages'].append('inbox_context_unknown');state.pop('current_case',None);state['status']='passed'
+
+
 def main():
     if len(sys.argv)!=1: raise ValueError('qualification accepts no arguments')
     migration20=ROOT/'db/opt-in-migrations/0020_causal_inbox.sql'
@@ -595,10 +603,7 @@ def main():
             nonce=str(uuid.uuid4()); base=[str(probe),'localhost',port,'contour_fixture',str(ca),'causal_issuer_login','causal_inbox_login',str(work/'grant.pub'),str(work/'policy.pub'),str(work/'grant.json'),str(work/'policy.json'),str(work/'batch.json'),'33'*32,*IDS,nonce]
             def counts():
                 return execute("SELECT (SELECT count(*) FROM contour.causal_sessions)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_batches)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_events)::text||'|'||coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='"+IDS[0]+"'),'0')||'|'||coalesce((SELECT sum(octet_length(canonical_batch))::text FROM contour.causal_inbox_batches),'0')||'|'||(SELECT count(DISTINCT receipt_id) FROM contour.causal_inbox_batches)::text;")
-            run_probe_cases(base,work,env,counts,state)
-            state['status']='failed';state['current_case']='inbox_context_unknown'
-            inbox_context_unknown(base,work,env,execute)
-            state['stages'].append('inbox_context_unknown');state.pop('current_case',None);state['status']='passed'
+            run_scenario(base,work,env,counts,state,execute)
     except Exception as error:
         state['failure_type']=type(error).__name__
         state['failure_category']=failure_category(error)

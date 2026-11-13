@@ -36,6 +36,28 @@ class DriverTests(unittest.TestCase):
             self.assertNotIn('private-canary',captured.getvalue())
             self.assertIn('inbox-context committed=1 outcome=',captured.getvalue())
 
+    def test_default_scenario_requires_context_and_propagates_failure(self):
+        base=['probe']; work=Path('/synthetic'); env={}; counts=object(); execute=object()
+        for fail in (False,True):
+            calls=[]; state={'stages':[]}
+            def cases(*args):
+                calls.append(('cases',args)); state['status']='passed'
+            def context(*args):
+                calls.append(('context',args)); self.assertEqual(state['status'],'failed')
+                self.assertEqual(state['current_case'],'inbox_context_unknown')
+                if fail: raise RuntimeError('context control failed')
+            with mock.patch.dict(G,{'run_probe_cases':cases,'inbox_context_unknown':context}):
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError,'context control failed'):
+                        G['run_scenario'](base,work,env,counts,state,execute)
+                else: G['run_scenario'](base,work,env,counts,state,execute)
+            self.assertEqual(calls,[('cases',(base,work,env,counts,state)),('context',(base,work,env,execute))])
+            if fail:
+                self.assertEqual(state['status'],'failed'); self.assertNotIn('inbox_context_unknown',state['stages'])
+            else:
+                self.assertEqual(state['status'],'passed'); self.assertEqual(state['stages'],['inbox_context_unknown'])
+                self.assertNotIn('current_case',state)
+
     def test_all_probe_cases_and_persisted_effects(self):
         calls=[]; state={'stages':[]}; work=Path('/synthetic'); base=['probe']+['original']*23
         expected=[('untrusted_tls_ca',4,'/synthetic/untrusted.crt','fixture issuer TLS failed'),
