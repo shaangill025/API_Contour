@@ -191,7 +191,7 @@ ADAPTER_FILES = (
     'causal-codec.js','causal-evidence-codec.js',
     *('error-integration/'+x for x in ('causal-marker.js','flow-source-transform.js','lexical-bridge.js','node-source-transform.js','private-causal-exporter.js','private-causal-receipt.js','private-handoff.js','private-wire-dispatch.js','private-wire-transform.js','wire-v2-loader.js')),
     *('live-integration/'+x for x in ('credential-check.js','lifecycle.js','live-profile.js')),
-    *('receiver-integration/'+x for x in ('live-main-504.js','private-bootstrap-504.js','private-incoming.js','private-launch-proxy-504.js','private-owner-permit-504.js','private-producer-runtime.js','private-profile-504.js','private-root-handoff.js','artifact-504.json','manifest-504.json')),
+    *('receiver-integration/'+x for x in ('live-main-504.js','private-bootstrap-504.js','private-incoming.js','private-launch-proxy-504.js','private-owner-permit-504.js','private-producer-runtime.js','private-profile-504.js','private-receiver-exporter.js','private-root-handoff.js','artifact-504.json','manifest-504.json')),
 )
 
 def no_nested_bind_targets(targets):

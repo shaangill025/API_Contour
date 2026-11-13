@@ -67,11 +67,16 @@ async function preflightFailure(mode){
   child.emit('close',null,'SIGKILL');const value=await result;assert.equal(value.state,'timeout');assert(!JSON.stringify(value).includes('A'));assert(!JSON.stringify(value).includes('PASS'));assert.equal(continued,true);
  }
 }
+function roles(){
+ const code=source.slice(source.indexOf('function ingressRole('),source.indexOf('(async()=>{\n let privateInput'));const check=vm.runInNewContext(code+'\ningressRole',{}),d={export_leaf:'export',receiver_evidence_leaf:'evidence'};
+ assert(check('POST','/v1/causal-events','export',d));assert(check('POST','/v1/causal-evidence/receiver','evidence',d));
+ for(const [method,path,peer] of [['POST','/v1/causal-events','evidence'],['POST','/v1/causal-evidence/receiver','export'],['GET','/v1/causal-events','export'],['POST','/other','evidence']])assert.equal(check(method,path,peer,d),false);
+}
 async function tail(failure){
  const start=source.lastIndexOf(' }catch(error){diag.failure=diag.stage;throw error;}finally{\n  clearTimeout(timeout)');assert(start>0);const tail=source.slice(start);
  const labels=[];const context={Buffer,Error,Promise,setTimeout,clearTimeout,process:{exit(){throw Error('exit');},exitCode:0},console:{log:x=>labels.push(x),error:x=>labels.push(x)},stopChild:async()=>{if(failure)throw Error('failed');},shutdown:async()=>{},setImmediate,diag:{stage:'complete'},diagnostic:()=> 'FAIL phase=cleanup'};
- const program='(async()=>{let done=true,timeout,cleanupTimer,pending=Buffer.alloc(0),held,privateInput,child,proxy,backend,ingress;try{'+tail;
+ const program='(async()=>{let done=true,timeout,cleanupTimer,pending=Buffer.alloc(0),receiverBytes,producerBytes,exportKey,evidenceKey,held,privateInput,child,proxy,backend,ingress;try{'+tail;
  vm.runInNewContext(program,context);await new Promise(resolve=>setImmediate(resolve));
  assert.equal(labels.filter(x=>x.startsWith('PASS')).length,failure?0:1);if(failure)assert.equal(context.process.exitCode,1);
 }
-(async()=>{diagnostic();probeMask();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await preflight('ok');await preflight('bad');await preflight('inconsistent');for(const mode of ['stdout','stderr','timeout','missing-close'])await preflightFailure(mode);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
+(async()=>{roles();diagnostic();probeMask();await input();await input('error');await input('error-after');await input('early-close');await stalled(true);await stalled(false);await preflight('ok');await preflight('bad');await preflight('inconsistent');for(const mode of ['stdout','stderr','timeout','missing-close'])await preflightFailure(mode);await tail(false);await tail(true);console.log('receiver 504 parent input and cleanup VM tests passed');})().catch(()=>{console.error('receiver 504 parent VM test failed');process.exitCode=1;});
