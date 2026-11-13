@@ -64,7 +64,8 @@ def source_paths():
            ROOT/'db/opt-in-migrations/0024_causal_live_profile.sql',
            ROOT/'db/opt-in-migrations/0025_historical_origin.sql',
            ROOT/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql',
-           ROOT/'db/opt-in-migrations/0027_causal_observer_inbox.sql']
+           ROOT/'db/opt-in-migrations/0027_causal_observer_inbox.sql',
+           ROOT/'db/opt-in-migrations/0028_causal_receiver_enrollment.sql']
     fixed += [ROOT/('db/provision_'+name+'.sql') for name in PROVISIONS]
     fixed += [ROOT/('db/migrations/'+name+'.sql') for name in MIGRATIONS]
     fixed += [ROOT/('db/opt-in-migrations/'+name+'.sql') for name in OPT]
@@ -98,7 +99,7 @@ def digest_file(path):
 
 
 def snapshot():
-    expected = {ROOT / ('db/opt-in-migrations/' + name + '.sql') for name in (*OPT, '0020_causal_inbox', '0021_origin_admission', '0022_causal_generation', '0023_causal_marker_bindings', '0024_causal_live_profile', '0025_historical_origin', '0026_causal_evidence_enrollment', '0027_causal_observer_inbox')}
+    expected = {ROOT / ('db/opt-in-migrations/' + name + '.sql') for name in (*OPT, '0020_causal_inbox', '0021_origin_admission', '0022_causal_generation', '0023_causal_marker_bindings', '0024_causal_live_profile', '0025_historical_origin', '0026_causal_evidence_enrollment', '0027_causal_observer_inbox', '0028_causal_receiver_enrollment')}
     if set((ROOT / 'db/opt-in-migrations').glob('*.sql')) != expected:
         raise ValueError('qualification source list changed')
     return {str(p):digest_file(p) for p in source_paths()}
