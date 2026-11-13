@@ -39,7 +39,7 @@ class DriverTests(unittest.TestCase):
             if sql.startswith('SELECT array_agg'):
                 return '{' + ','.join(map(str, range(1, 29))) + '}'
         hook.after_forward(25, execute)
-        self.assertEqual(seen[:3], ['original26', 'original27', 'original28\nfixture'])
+        self.assertEqual(seen[:4], ['original26', 'original27', 'original28', 'fixture'])
         self.assertTrue(hook.complete)
         with self.assertRaises(ValueError):
             hook.after_forward(25, execute)

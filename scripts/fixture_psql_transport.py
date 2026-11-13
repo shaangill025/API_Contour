@@ -33,7 +33,7 @@ class FreshPsqlTransport:
             sql[4:] != ['psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'contour_fixture']):
             raise ValueError('invalid fixture command')
         if not re.fullmatch('[0-9a-f]{32}', owner): raise ValueError('invalid fixture owner')
-        if diagnostic_context not in (None,'observer-v1'): raise ValueError('invalid fixture diagnostic context')
+        if diagnostic_context not in (None,'observer-v1','receiver-v1'): raise ValueError('invalid fixture diagnostic context')
         self.diagnostic_context = diagnostic_context
         self.container, self.owner, self.environment = sql[3], owner, environment
         self.popen, self.run = popen, run
@@ -153,6 +153,9 @@ class FreshPsqlTransport:
                 if self.diagnostic_context == 'observer-v1':
                     phase, state, column, function, line = _observer_failure(text, out, err)
                     raise _ObserverQueryFailed(phase,state,column,function,line)
+                if self.diagnostic_context == 'receiver-v1':
+                    state, function, line, source_line = _receiver_failure(err)
+                    raise _ReceiverQueryFailed(state,function,line,source_line)
                 raise _QueryFailed()
             decoded = base64.b64decode(b''.join(out.split()), validate=True)
             return decoded.decode(locale.getpreferredencoding(False)).replace('\r\n', '\n').replace('\r', '\n').strip()
@@ -160,6 +163,8 @@ class FreshPsqlTransport:
             raise TimeoutError('fixture query deadline') from None
         except _ObserverQueryFailed as failure:
             raise ObserverQueryError(failure.phase,failure.sqlstate,failure.column,failure.function,failure.line) from None
+        except _ReceiverQueryFailed as failure:
+            raise ReceiverQueryError(failure.sqlstate,failure.function,failure.line,failure.source_line) from None
         except _QueryFailed:
             raise RuntimeError('authority fixture command failed') from None
         except BaseException as exc:
@@ -273,3 +278,31 @@ def _observer_failure(text, out, err):
             if candidate in _OBSERVER_FUNCTIONS: function=candidate; line=int(contexts[0][1])
         return decoded[-1],state,column,function,line
     except (ValueError,UnicodeError): return unavailable
+
+
+_RECEIVER_STATES=frozenset(('23502','23503','23505','23514','40001','42501','42601','42702','42703','42804','42883','42P01','42P07','42710','55000','54000','P0001','XX000'))
+_RECEIVER_FUNCTIONS=frozenset(('inline_code_block','contour.enroll_causal_receiver','contour.current_causal_receiver','contour.close_causal_receiver','contour.receiver_claim_current','contour.receiver_enrollment_metadata','contour.receiver_enrollment_commitment','contour.receiver_terminal_body','contour.enroll_causal_gateway','contour.gateway_claim_current','contour.causal_session_locked','contour.causal_runtime_authority_locked','contour.causal_marker_product_current','contour.causal_json_canonical','contour.begin_origin_operation','contour.lock_origin_credential','contour.lock_origin_collector','contour.ensure_origin_tenant_state','contour.immutable_row'))
+
+class ReceiverQueryError(RuntimeError):
+    def __init__(self,sqlstate,function,line,source_line):
+        state=sqlstate if sqlstate in _RECEIVER_STATES else 'unavailable'
+        function=function if function in _RECEIVER_FUNCTIONS else 'unavailable'
+        line=line if type(line) is int and 1<=line<=9999 and function!='unavailable' else None
+        source_line=source_line if type(source_line) is int and 1<=source_line<=999999 else None
+        super().__init__('receiver-sql state='+state+' function='+function+' line='+(str(line) if line else 'unavailable')+' input_line='+(str(source_line) if source_line else 'unavailable'))
+
+class _ReceiverQueryFailed(Exception):
+    def __init__(self,sqlstate,function,line,source_line): self.sqlstate,self.function,self.line,self.source_line=sqlstate,function,line,source_line
+
+def _receiver_failure(err):
+    unavailable=('unavailable','unavailable',None,None)
+    if not isinstance(err,bytes): return unavailable
+    errors=re.findall(rb'(?m)^(?:psql:<stdin>:([1-9][0-9]{0,5}): )?ERROR:[ \t]+([0-9A-Z]{5}):[^\r\n]*\r?$',err)
+    if len(errors)!=1: return unavailable
+    source,state=errors[0]; state=state.decode('ascii')
+    if state not in _RECEIVER_STATES: state='unavailable'
+    contexts=re.findall(rb'(?m)^CONTEXT:[ \t]+PL/pgSQL function ([a-z_][a-z_0-9.]*)(?:\([^\r\n]*\))? line ([1-9][0-9]{0,3}) at [^\r\n]*\r?$',err)
+    function='unavailable'; line=None
+    if contexts and contexts[0][0].decode('ascii') in _RECEIVER_FUNCTIONS:
+        function=contexts[0][0].decode('ascii'); line=int(contexts[0][1])
+    return state,function,line,int(source) if source else None

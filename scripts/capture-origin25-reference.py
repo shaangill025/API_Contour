@@ -22,11 +22,12 @@ def ledger(version):
     return '{'+','.join(map(str,range(1,version+1)))+'}'
 
 
-def capture_forward(execute,source,write,fence,*,verify21,ledger_sql,inventory_sql,_after_stage=None):
+def capture_forward(execute,source,write,fence,*,verify21,ledger_sql,inventory_sql,_after_stage=None,_before_stage=None):
     if execute(ledger_sql)!=ledger(21): raise ValueError('stage 21 ledger mismatch')
     verify21(execute)
     fence()
     for version in (22,23,24,25):
+        if _before_stage is not None: _before_stage(version)
         execute(source(version).decode('utf-8'))
         if execute(ledger_sql)!=ledger(version): raise ValueError('forward ledger mismatch')
         value=json.loads(execute(inventory_sql))
@@ -166,7 +167,9 @@ def main(argv,*,_hooks=None):
     if any(name not in sources for name in required): raise ValueError('capture source not tracked')
     if _hooks is not None: _hooks.preflight(sources)
     from deploy.local import origin21_logins,origin21_profile,origin21_schema,origin21_setup,origin21_transport,provision
-    fresh=load_tracked('scripts/fixture_psql_transport.py')['FreshPsqlTransport']
+    transport=load_tracked('scripts/fixture_psql_transport.py'); fresh=transport['FreshPsqlTransport']
+    diagnostic_context=getattr(_hooks,'diagnostic_context',None) if _hooks is not None else None
+    if diagnostic_context not in (None,'receiver-v1'): raise ValueError('unsupported diagnostic context')
     source_bytes={version:(ROOT/'db/opt-in-migrations'/(name+'.sql')).read_bytes() for version,name in MIGRATIONS.items()}
     def source(version): return source_bytes[version]
     output=PrivateOutput(argv[0]);token=secrets.token_hex(16);name='contour-origin21-qual-'+token
@@ -209,8 +212,10 @@ def main(argv,*,_hooks=None):
             time.sleep(.2)
         started=record_generation(output,fixture,inspect,token,network_id,cid,image_id)
         phase='bootstrap';sql=['docker','exec','-i',cid,'psql','-XAtq','-v','ON_ERROR_STOP=1','-U','postgres','-d','contour_fixture']
-        runner=fresh(sql,os.environ.copy(),token)
-        def raw_execute(text): return runner.execute(text,timeout=120)
+        runner=fresh(sql,os.environ.copy(),token,**({'diagnostic_context':diagnostic_context} if diagnostic_context is not None else {}))
+        def raw_execute(text):
+            prefix='\\set VERBOSITY verbose\n' if diagnostic_context=='receiver-v1' else ''
+            return runner.execute(prefix+text,timeout=120)
         bootstrap_step('create_database',lambda:raw_execute('CREATE DATABASE contour_local;'))
         # Establish safe logging at connection startup before synthetic verifier
         # SQL is parsed. These role settings belong only to this disposable PG.
@@ -267,7 +272,8 @@ def main(argv,*,_hooks=None):
         capture_forward(execute,source,write,fence,
             verify21=lambda cb:origin21_schema.require_ready(list(range(1,22)),cb,stage=21,phase='enrolled'),
             ledger_sql=LEDGER_SQL,inventory_sql=origin21_schema.inventory_sql(),
-            **({'_after_stage':_hooks.after_forward} if _hooks is not None else {}))
+            **({'_after_stage':_hooks.after_forward} if _hooks is not None else {}),
+            **({'_before_stage':_hooks.before_forward} if diagnostic_context=='receiver-v1' else {}))
         if _hooks is not None and not _hooks.complete: raise RuntimeError('qualification hook incomplete')
         fence()
         receipt_value={'version':1,'kind':'unreviewed-metadata-capture','source_head':head,
@@ -279,6 +285,17 @@ def main(argv,*,_hooks=None):
         primary=error
         kind=type(error).__name__ if type(error) in (ValueError,RuntimeError,TimeoutError,OSError) else 'OtherError'
         print('reference-capture phase='+phase+' type='+kind,file=sys.stderr,flush=True)
+        if diagnostic_context=='receiver-v1':
+            if type(error) is transport['ReceiverQueryError']:
+                print(str(error),file=sys.stderr,flush=True)
+            else:
+                frames=[]; trace=error.__traceback__
+                allowed={'capture-origin25-reference.py','fixture_psql_transport.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'}
+                while trace is not None:
+                    name=Path(trace.tb_frame.f_code.co_filename).name
+                    if name in allowed and 1<=trace.tb_lineno<=99999: frames.append(name+':'+str(trace.tb_lineno))
+                    trace=trace.tb_next
+                print('receiver-location='+(','.join(frames[-6:]) or 'unavailable'),file=sys.stderr,flush=True)
     finally:
         if runner is not None:
             try: runner.close()

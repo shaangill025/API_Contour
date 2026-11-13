@@ -47,6 +47,7 @@ def load_existing():
 
 
 class Hooks:
+    diagnostic_context = 'receiver-v1'
     def __init__(self, existing, schema):
         self.base = existing.QualificationHooks('schema25', schema)
         self.files = None
@@ -73,16 +74,22 @@ class Hooks:
         self.base.after_stage17(execute)
         execute(self.files['seed'].decode('utf-8', 'strict'))
 
+    def before_forward(self, stage):
+        if stage == 25: print('receiver-stage=base25',file=sys.stderr,flush=True)
+
     def after_forward(self, stage, execute):
         self.base.after_forward(stage, execute)
         if stage == 25:
             if self.complete or self.files is None:
                 raise ValueError('receiver stage order')
             for name in ('m26', 'm27'):
+                print('receiver-stage='+name,file=sys.stderr,flush=True)
                 execute(self.files[name].decode('utf-8', 'strict'))
             # Migration and fixture use unaltered reviewed source bytes.
-            execute(self.files['m28'].decode('utf-8', 'strict') + '\n' +
-                    self.files['fixture'].decode('utf-8', 'strict'))
+            print('receiver-stage=m28',file=sys.stderr,flush=True)
+            execute(self.files['m28'].decode('utf-8', 'strict'))
+            print('receiver-stage=fixture',file=sys.stderr,flush=True)
+            execute(self.files['fixture'].decode('utf-8', 'strict'))
             expected = '{' + ','.join(str(x) for x in range(1, 29)) + '}'
             if execute('SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;') != expected:
                 raise RuntimeError('receiver ledger mismatch')
