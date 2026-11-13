@@ -47,7 +47,9 @@ def scenario_sql(original_observer_fixture):
     if original_observer_fixture.count(old)!=1 or new in original_observer_fixture: raise ValueError('observer ledger boundary')
     adapted=original_observer_fixture.replace(old,new,1)
     if adapted.replace(new,old,1)!=original_observer_fixture: raise ValueError('observer fixture changed')
-    return ('\n'.join(values[:2]),adapted,'\n'.join(values[3:5]))
+    prefix='\\echo receiver29-step=migration28\n'+values[0]+'\n\\echo receiver29-step=migration29\n'+values[1]+'\n\\echo receiver29-step=observer-regression\n'
+    suffix='\\echo receiver29-step=seed\n'+values[3]+'\n\\echo receiver29-step=cases\n\\echo receiver-case=parser\n'+values[4]
+    return (prefix,adapted,suffix)
 
 
 def after_scenario(execute):
@@ -81,7 +83,7 @@ def after_scenario(execute):
     if checked.strip()!='true': raise RuntimeError('receiver race failed')
     control=execute("SELECT set_config('apicontour.tenant_id',(SELECT convert_from(raw,'UTF8')::jsonb->>'tenant_id' FROM public.receiver29_race_seed WHERE name='control'),false); SET ROLE contour_causal_receiver_writer; SELECT (contour.accept_causal_receiver(raw,proof) IS NOT NULL)::text FROM public.receiver29_race_seed WHERE name='control'; RESET ROLE;")
     if not control.splitlines() or control.splitlines()[-1]!='true': raise RuntimeError('receiver race authority unavailable')
-    execute(source(FILES[5]))
+    execute("\\set VERBOSITY verbose\n"+source(FILES[5]))
     execute('DROP TABLE public.receiver29_race_seed;')
 
 
@@ -95,6 +97,38 @@ def require_receipt(directory):
     finally: os.close(fd)
 
 
+_ERROR_TYPES=frozenset(('ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','ReceiverInboxQueryError','ObserverQueryError','TransportError'))
+_ERROR_FILES=frozenset(('test-causal-receiver-inbox.py','test-causal-observer-inbox.py','test-human-origin.py','test-postgres-origin-submit.py','test-postgres-v2-submit.py','test-postgres-submit.py','test-postgres-authority.py','test-postgres-tls.py','fixture_psql_transport.py'))
+_ERROR_STEPS=frozenset(('migration28','migration29','observer-regression','seed','cases'))
+_ERROR_CASES=frozenset(('parser','observer-first','receiver-first','receiver-first-mismatch','quota','revoked-product'))
+_ERROR_STATES=frozenset(('23502','23503','23505','23514','40001','42501','42601','42702','42703','42804','42883','42P01','42P07','42710','55000','54000','P0001','XX000'))
+_ERROR_FUNCTIONS=frozenset(('inline_code_block','contour.accept_causal_observer','contour.observer_wire','contour.human_observation_origin','contour.catalog_origin_mapping','contour.receiver_inbox_wire','contour.receiver_enrollment_current','contour.receiver_assignment_current','contour.receiver_assignment_metadata','contour.receiver_tombstone_metadata','contour.receiver_observer_current','contour.accept_causal_receiver','contour.enroll_causal_receiver','contour.current_causal_receiver','contour.receiver_claim_current','contour.causal_session_locked','contour.gateway_claim_current','contour.begin_origin_operation','contour.lock_origin_credential','contour.lock_origin_collector','contour.causal_json_canonical'))
+
+def failure_lines(error):
+    """Bounded labels only; never emit exception text, SQL or private values."""
+    lines=[];seen=set()
+    def visit(exc,role,depth):
+        if len(lines)>=12 or depth>=8 or id(exc) in seen:return
+        seen.add(id(exc))
+        if isinstance(exc,BaseExceptionGroup):
+            for index,child in enumerate(exc.exceptions[:8]):visit(child,role if index==0 else 'cleanup',depth+1)
+            return
+        kind=type(exc).__name__;kind=kind if kind in _ERROR_TYPES else 'OtherError'
+        frames=[];tb=exc.__traceback__;count=0
+        while tb is not None and count<128:
+            path=Path(tb.tb_frame.f_code.co_filename)
+            if path.parent==ROOT/'scripts' and path.name in _ERROR_FILES and 1<=tb.tb_lineno<=999999:frames.append(path.name+':'+str(tb.tb_lineno))
+            tb=tb.tb_next;count+=1
+        label=lambda name,allowed: getattr(exc,name,None) if type(getattr(exc,name,None)) is str and getattr(exc,name,None) in allowed else 'unavailable'
+        step=label('step',_ERROR_STEPS);case=label('case',_ERROR_CASES);state=label('sqlstate',_ERROR_STATES);function=label('function',_ERROR_FUNCTIONS)
+        number=lambda name,maximum: str(getattr(exc,name,None)) if type(getattr(exc,name,None)) is int and 1<=getattr(exc,name,None)<=maximum else 'unavailable'
+        line=number('line',9999) if function!='unavailable' else 'unavailable';source_line=number('source_line',999999)
+        lines.append('receiver-failure role='+role+' type='+kind+' location='+(','.join(frames[-6:]) or 'unavailable')+' step='+step+' case='+case+' sqlstate='+state+' function='+function+' line='+line+' input_line='+source_line)
+        if exc.__cause__ is not None:visit(exc.__cause__,'cause',depth+1)
+    visit(error,'primary',0)
+    return lines
+
+
 def main():
     if len(sys.argv)!=1: raise ValueError('no arguments')
     require_applicable(source(FILES[1]))
@@ -104,6 +138,7 @@ def main():
 
 if __name__=='__main__':
     try: main()
-    except Exception:
+    except BaseException as error:
+        for line in failure_lines(error): print(line,file=sys.stderr)
         print('FAIL: receiver inbox synthetic fixture',file=sys.stderr)
         raise SystemExit(1) from None

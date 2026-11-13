@@ -21,6 +21,23 @@ SQL = ['docker','exec','-i',CID,'psql','-XAtq','-v','ON_ERROR_STOP=1','-U','post
 submit_spec = importlib.util.spec_from_file_location('submit_fixture', ROOT/'scripts/test-postgres-submit.py')
 submit = importlib.util.module_from_spec(submit_spec); submit_spec.loader.exec_module(submit)
 
+class ReceiverInboxDiagnosticTests(unittest.TestCase):
+    def test_closed_stage_and_redaction(self):
+        text=mod._OBSERVER_PREFIX.decode()+'fixed'
+        output=base64.b64encode(b'receiver29-step=migration28\nreceiver29-step=migration29\nreceiver29-step=observer-regression\nreceiver29-step=seed\nreceiver29-step=cases\nreceiver-case=parser\nreceiver-case=observer-first\n')
+        error=b'psql:<stdin>:321: ERROR:  42702: SECRET_SENTINEL\nCONTEXT:  PL/pgSQL function contour.accept_causal_receiver(secret) line 9 at SECRET_SENTINEL\n'
+        values=mod._receiver_inbox_failure(text,output,error)
+        self.assertEqual(values,('cases','observer-first','42702','contour.accept_causal_receiver',9,321))
+        self.assertNotIn('SECRET_SENTINEL',str(mod.ReceiverInboxQueryError(*values)))
+        malformed=base64.b64encode(b'receiver29-step=SECRET_SENTINEL\nreceiver-case=SECRET_SENTINEL\n')
+        self.assertEqual(mod._receiver_inbox_failure(text,malformed,error)[:2],('unavailable','unavailable'))
+        self.assertEqual(mod._receiver_inbox_failure('untrusted',output,error),('unavailable',)*4+(None,None))
+        self.assertEqual(mod._receiver_inbox_failure(text,output,error+error)[2],'unavailable')
+        post='\\set VERBOSITY verbose\n\\echo receiver-case=revoked-product\nfixed'
+        postout=base64.b64encode(b'receiver-case=revoked-product\n')
+        self.assertEqual(mod._receiver_inbox_failure(post,postout,error),('unavailable','revoked-product','42702','contour.accept_causal_receiver',9,321))
+        self.assertNotIn('SECRET_SENTINEL',str(mod._receiver_inbox_failure(post,postout,error)))
+
 class ExpiryOverlap(unittest.TestCase):
     def run_cases(self, fail_initial=None, wrong_receipt=False):
         events=[]; clock=[100]; expiries=[]
