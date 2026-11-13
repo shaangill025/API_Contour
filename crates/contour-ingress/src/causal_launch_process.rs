@@ -806,6 +806,34 @@ impl LocalCleanup {
         }
     }
 }
+// Probe only within the original stop window; EPERM or a live group is not
+// absence. A signal-zero observation never sends a signal to a reused group.
+fn group_absent_until(
+    stop: Instant,
+    mut probe: impl FnMut() -> Option<i32>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> (bool, Option<i32>) {
+    let mut last = None;
+    loop {
+        if now() >= stop {
+            return (false, last);
+        }
+        last = probe();
+        let checked = now();
+        if checked >= stop {
+            return (false, last);
+        }
+        match last {
+            Some(libc::ESRCH) => return (true, last),
+            None | Some(libc::EPERM) => {
+                sleep(Duration::from_millis(5).min(stop.duration_since(checked)));
+            }
+            _ => return (false, last),
+        }
+    }
+}
+
 /// Dropping this handle cancels only the owned local CLI process group.
 pub struct LocalProcess {
     cancel: Arc<AtomicBool>,
@@ -1071,14 +1099,19 @@ fn drive(
         });
         return (Err(ProcessError::CleanupUnknown), false);
     }
-    // SAFETY: signal zero only probes the already-owned group; it sends no signal.
-    let probe_result = unsafe { libc::kill(-pid, 0) };
-    let probe_errno = if probe_result != 0 {
-        std::io::Error::last_os_error().raw_os_error()
-    } else {
-        None
-    };
-    let absent = probe_result != 0 && probe_errno == Some(libc::ESRCH);
+    let (absent, probe_errno) = group_absent_until(
+        stop,
+        || {
+            // SAFETY: signal zero only observes the group; it sends no signal.
+            if unsafe { libc::kill(-pid, 0) } == 0 {
+                None
+            } else {
+                std::io::Error::last_os_error().raw_os_error()
+            }
+        },
+        Instant::now,
+        std::thread::sleep,
+    );
     #[cfg(test)]
     if !absent || !(signaled || exited) {
         // Restrict diagnostic output to predicates and allowlisted errno values.
@@ -1379,6 +1412,58 @@ fn drive_attached(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    #[test]
+    fn group_absence_requires_fresh_esrch_inside_original_window() {
+        use std::cell::Cell;
+        fn run(sequence: &[Option<i32>], budget: Duration) -> ((bool, Option<i32>), usize) {
+            let start = Instant::now();
+            let elapsed = Cell::new(Duration::ZERO);
+            let calls = Cell::new(0usize);
+            let outcome = group_absent_until(
+                start + budget,
+                || {
+                    let index = calls.get();
+                    calls.set(index + 1);
+                    sequence[index.min(sequence.len() - 1)]
+                },
+                || start + elapsed.get(),
+                |duration| elapsed.set(elapsed.get() + duration),
+            );
+            (outcome, calls.get())
+        }
+        let (eventual, calls) = run(
+            &[Some(libc::EPERM), Some(libc::ESRCH)],
+            Duration::from_millis(10),
+        );
+        assert_eq!(eventual, (true, Some(libc::ESRCH)));
+        assert_eq!(calls, 2);
+        assert_eq!(
+            run(&[Some(libc::ESRCH)], Duration::from_millis(10)).0,
+            (true, Some(libc::ESRCH))
+        );
+        assert_eq!(
+            run(&[Some(libc::EPERM)], Duration::from_millis(10)).0,
+            (false, Some(libc::EPERM))
+        );
+        assert_eq!(run(&[None], Duration::from_millis(10)).0, (false, None));
+        assert_eq!(
+            run(&[Some(libc::ESRCH)], Duration::ZERO),
+            ((false, None), 0)
+        );
+        assert_eq!(
+            run(&[Some(libc::EINVAL)], Duration::from_millis(10)),
+            ((false, Some(libc::EINVAL)), 1)
+        );
+        assert_eq!(
+            run(
+                &[Some(libc::EPERM), Some(libc::ESRCH)],
+                Duration::from_millis(5)
+            )
+            .0,
+            (false, Some(libc::EPERM))
+        );
+    }
+
     fn dir() -> std::path::PathBuf {
         let mut random = [0u8; 16];
         SystemRandom::new().fill(&mut random).unwrap();
