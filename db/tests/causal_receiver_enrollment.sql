@@ -15,10 +15,10 @@ BEGIN
  OR has_table_privilege('contour_causal_evidence_provisioner','contour.causal_receiver_enrollments','SELECT')
  OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname='contour_causal_receiver_reader' AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb))
  THEN RAISE EXCEPTION 'receiver privileges incorrect'; END IF;
- body:=convert_to($vector${"artifact_sha256":"707e7b359fb757c668d8a22c999e067556b5f2a785f9c3333c12fca7debfa660","backend_leaf_sha256":"1111111111111111111111111111111111111111111111111111111111111111","enrollment_generation":"123456789abcdef0123456789abcdef0","evidence_credential_id":"00000000-0000-4000-8000-000000000006","evidence_leaf_sha256":"2222222222222222222222222222222222222222222222222222222222222222","expires_at":"2026-11-12T23:59:00.123456Z","export_leaf_sha256":"3333333333333333333333333333333333333333333333333333333333333333","grant_digest":"4444444444444444444444444444444444444444444444444444444444444444","instance_id":"00000000-0000-4000-8000-000000000003","issued_at":"2026-11-12T23:54:00.123456Z","lifecycle_id":"00000000-0000-4000-8000-000000000004","policy_envelope_sha256":"823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812","policy_revision":"1","product_credential_id":"00000000-0000-4000-8000-000000000005","product_leaf_sha256":"5555555555555555555555555555555555555555555555555555555555555555","profile_id":"00000000-0000-4000-8000-000000000504","profile_manifest_sha256":"d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344","runtime_id":"00000000-0000-4000-8000-000000000002","session_epoch":"1","session_nonce":"00000000-0000-4000-8000-000000000007","tenant_id":"00000000-0000-4000-8000-000000000001","version":1}$vector$,'UTF8');
+ body:=convert_to($vector${"artifact_sha256":"707e7b359fb757c668d8a22c999e067556b5f2a785f9c3333c12fca7debfa660","backend_leaf_sha256":"1111111111111111111111111111111111111111111111111111111111111111","enrollment_generation":"123456789abcdef0123456789abcdef0","evidence_credential_id":"00000000-0000-4000-8000-000000000006","evidence_leaf_sha256":"2222222222222222222222222222222222222222222222222222222222222222","expires_at":"2026-11-12T23:59:00.123456Z","export_leaf_sha256":"3333333333333333333333333333333333333333333333333333333333333333","grant_digest":"4444444444444444444444444444444444444444444444444444444444444444","instance_id":"00000000-0000-4000-8000-000000000003","issued_at":"2026-11-12T23:54:00.123456Z","lifecycle_id":"00000000-0000-4000-8000-000000000004","policy_envelope_sha256":"823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812","policy_revision":"1","product_credential_id":"00000000-0000-4000-8000-000000000005","product_leaf_sha256":"5555555555555555555555555555555555555555555555555555555555555555","profile_id":"00000000-0000-4000-8000-000000000504","profile_manifest_sha256":"af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d","runtime_id":"00000000-0000-4000-8000-000000000002","session_epoch":"1","session_nonce":"00000000-0000-4000-8000-000000000007","tenant_id":"00000000-0000-4000-8000-000000000001","version":1}$vector$,'UTF8');
  IF octet_length(body)<>1351 THEN RAISE EXCEPTION 'receiver vector length mismatch'; END IF;
  EXECUTE 'SELECT contour.receiver_enrollment_commitment($1)' INTO result USING body;
- IF encode(result,'hex')<>'2a6b2c2883000599fdb5b4009230a0e602ffd562cfbb4f0d29cb92bb2e70978a' THEN RAISE EXCEPTION 'receiver vector mismatch'; END IF;
+ IF encode(result,'hex')<>'61cc5e6a149693dbdfe4642211d07a3cd6e926e17954fe95d8d944a8d8a2e230' THEN RAISE EXCEPTION 'receiver vector mismatch'; END IF;
  rejected:=false;
  BEGIN EXECUTE 'SELECT contour.receiver_enrollment_commitment($1)' USING decode('','hex');
  EXCEPTION WHEN check_violation THEN rejected:=true; END;
@@ -38,9 +38,9 @@ SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000001',
 SELECT set_config('test.receiver_now',clock_timestamp()::text,false);
 SET ROLE contour_causal_provisioner;
 \echo receiver-case=profile
-SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'));
+SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'));
 \echo receiver-case=runtime
-SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000009','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'),decode(repeat('b9',32),'hex'));
+SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000009','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),decode(repeat('b9',32),'hex'));
 RESET ROLE;
 CREATE FUNCTION pg_temp.receiver_session() RETURNS contour.causal_session_claim LANGUAGE sql AS $$ SELECT ROW(
  'f0000000-0000-4000-8000-000000000001'::uuid,'fc000000-0000-4000-8000-000000000009'::uuid,
@@ -48,7 +48,7 @@ CREATE FUNCTION pg_temp.receiver_session() RETURNS contour.causal_session_claim 
  'f1000000-0000-4000-8000-000000000001'::uuid,'f2000000-0000-4000-8000-000000000001'::uuid,
  'f3000000-0000-4000-8000-000000000001'::uuid,'f4000000-0000-4000-8000-000000000001'::uuid,
  'f5000000-0000-4000-8000-000000000001'::uuid,'f9000000-0000-4000-8000-000000000001'::uuid,
- decode(repeat('b9',32),'hex'),'nodered_5_0_9_receiver_v1',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'),
+ decode(repeat('b9',32),'hex'),'nodered_5_0_9_receiver_v1',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),
  'fe000000-0000-4000-8000-000000000009'::uuid,1,decode(repeat('ab',32),'hex'),
  current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',
  1,decode('01','hex'),current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',900000000,10,1024,1024,60)::contour.causal_session_claim $$;
@@ -125,9 +125,9 @@ SELECT contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000001','
 RESET ROLE;
 SET ROLE contour_causal_provisioner;
 \echo receiver-case=profile-second
-SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'));
+SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'));
 \echo receiver-case=runtime-second
-SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008','f6000000-0000-4000-8000-000000000003','f7000000-0000-4000-8000-000000000003','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000003','f9000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000504',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'),decode(repeat('b8',32),'hex'));
+SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008','f6000000-0000-4000-8000-000000000003','f7000000-0000-4000-8000-000000000003','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000003','f9000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000504',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),decode(repeat('b8',32),'hex'));
 RESET ROLE;
 CREATE FUNCTION pg_temp.receiver_session_rev() RETURNS contour.causal_session_claim LANGUAGE sql AS $$ SELECT ROW(
  'f0000000-0000-4000-8000-000000000001'::uuid,'fc000000-0000-4000-8000-000000000008'::uuid,
@@ -135,7 +135,7 @@ CREATE FUNCTION pg_temp.receiver_session_rev() RETURNS contour.causal_session_cl
  'f1000000-0000-4000-8000-000000000001'::uuid,'f2000000-0000-4000-8000-000000000001'::uuid,
  'f3000000-0000-4000-8000-000000000001'::uuid,'f4000000-0000-4000-8000-000000000001'::uuid,
  'f5000000-0000-4000-8000-000000000003'::uuid,'f9000000-0000-4000-8000-000000000003'::uuid,
- decode(repeat('b8',32),'hex'),'nodered_5_0_9_receiver_v1',decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'),
+ decode(repeat('b8',32),'hex'),'nodered_5_0_9_receiver_v1',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),
  'fe000000-0000-4000-8000-000000000008'::uuid,1,decode(repeat('ab',32),'hex'),
  current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',
  1,decode('01','hex'),current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',900000000,10,1024,1024,60)::contour.causal_session_claim $$;
