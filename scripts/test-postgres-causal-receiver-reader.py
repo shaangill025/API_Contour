@@ -6,6 +6,23 @@ LABEL='org.apicontour.fixture-owner'
 IMAGE='postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4'
 HEX64=re.compile(r'[0-9a-f]{64}\Z')
 TOKEN=re.compile(r'[0-9a-f]{32}\Z')
+
+PHASE='arguments'
+PHASES=frozenset(('arguments','source','tls','build','image','network','container','start','readiness','schema','seed','probe','closed','revoked','cleanup'))
+ERROR_TYPES=frozenset(('ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','BaseExceptionGroup','ExceptionGroup'))
+LOCATION_FILES=frozenset(('test-postgres-causal-receiver-reader.py','fixture_psql_transport.py','capture-origin25-reference.py','test-causal-receiver-enrollment.py','test-causal-evidence-enrollment.py','origin25_schema.py'))
+
+def failure_diagnostic(error,phase):
+    kind=type(error).__name__; kind=kind if kind in ERROR_TYPES else 'OtherError'
+    phase=phase if phase in PHASES else 'other'
+    frames=[];tb=error.__traceback__
+    while tb is not None:
+        from pathlib import Path
+        name=Path(tb.tb_frame.f_code.co_filename).name
+        if name in LOCATION_FILES and 1<=tb.tb_lineno<=99999: frames.append(name+':'+str(tb.tb_lineno))
+        tb=tb.tb_next
+    return 'FAIL receiver_reader_fixture phase='+phase+' type='+kind+' location='+(','.join(frames[-6:]) or 'unavailable')
+
 START=re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z\Z')
 
 
@@ -265,9 +282,11 @@ def reader_login_sql(passwords):
 
 
 def main(argv):
+    global PHASE
     import hashlib, json, os, runpy, secrets, signal, stat, subprocess, sys, time
     from pathlib import Path
     if len(argv)!=2: raise ValueError('private output and TLS input required')
+    PHASE='source'
     root=Path(__file__).resolve().parents[1];os.umask(0o077);sys.dont_write_bytecode=True
     if str(root) not in sys.path: sys.path.insert(0,str(root))
     from deploy.local import capture_renew, docker_metadata as metadata, origin21_schema, origin21_setup, origin21_logins, origin21_profile, provision, origin21_transport, origin25_schema
@@ -321,6 +340,7 @@ def main(argv):
     previous=signal.signal(signal.SIGALRM,lambda *_:(_ for _ in ()).throw(TimeoutError('fixture deadline')));signal.setitimer(signal.ITIMER_REAL,900)
     try:
         output.write('intent.json',record({'version':1,'owner':token,'source_head':head,'kind':'receiver-reader-synthetic'}))
+        PHASE='tls'
         for name_ in ('ca.pem','server.pem','server.key'): metadata._path(tls/name_)
         ca=capture_renew.read_file(tls/'ca.pem',65536);cert=capture_renew.read_file(tls/'server.pem',65536);key=capture_renew.read_file(tls/'server.key',65536)
         for name_,body in (('ca.pem',ca),('server.pem',cert),('server.key',key)): write_private(name_,body)
@@ -332,6 +352,7 @@ def main(argv):
         private_key=checked_process(openssl,openssl_id,['pkey','-in',str(output.path/'server.key'),'-pubout'],env=clean_env)
         ca_ext=checked_process(openssl,openssl_id,['x509','-in',str(output.path/'ca.pem'),'-noout','-ext','basicConstraints'],env=clean_env)
         if not cert_key or cert_key!=private_key or b'CA:TRUE' not in ca_ext: raise ValueError('TLS material')
+        PHASE='build'
         target=output.path/'target';target.mkdir(mode=0o700)
         build_env=build_environment(clean_env,target,rustc,os.environ)
         source=root/'crates/contour-postgres/examples/causal_receiver_reader_probe.rs'
@@ -349,13 +370,16 @@ def main(argv):
             value=json.loads(tool.call(args))
             if type(value) is not list or len(value)!=1 or type(value[0]) is not dict: raise RuntimeError('inspect')
             return value[0]
+        PHASE='image'
         image=inspect(['docker','image','inspect',IMAGE]);image_id=image.get('Id','')
         if not re.fullmatch('sha256:[0-9a-f]{64}',image_id) or not any(x in ('postgres@'+IMAGE.split('@',1)[1],'docker.io/library/postgres@'+IMAGE.split('@',1)[1]) for x in image.get('RepoDigests',[])): raise ValueError('image')
+        PHASE='network'
         network_id=tool.call(['docker','network','create','--internal','--label',LABEL+'='+token,name]).decode('ascii')
         if not HEX64.fullmatch(network_id): raise RuntimeError('network outcome unknown')
         fixture['durable_id'](output.path,'network',network_id);validate_network(inspect(['docker','network','inspect',network_id]),token,network_id,[])
         initial=secrets.token_hex(32).encode();output.write('initial-secret',initial);private_files['initial-secret']=metadata._identity(os.stat('initial-secret',dir_fd=output.fd,follow_symlinks=False))
         cmd=['sh','-c','chown postgres:postgres /tmp/server.key /tmp/server.crt && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c listen_addresses=* -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key']
+        PHASE='container'
         cid=tool.call(['docker','create','--init','--pull=never','--name',name+'-postgres','--label',LABEL+'='+token,'--network',network_id,'--network-alias','postgres','--publish','127.0.0.1::5432','--memory','512m','--cpus','1','--pids-limit','128','--tmpfs','/var/lib/postgresql/data:rw,nosuid,noexec,size=256m','-e','POSTGRES_DB=contour_fixture','-e','POSTGRES_PASSWORD_FILE=/tmp/initial-secret','-e','POSTGRES_HOST_AUTH_METHOD=scram-sha-256',IMAGE,*cmd]).decode('ascii')
         if not HEX64.fullmatch(cid): raise RuntimeError('container outcome unknown')
         fixture['durable_id'](output.path,'postgres',cid)
@@ -375,6 +399,7 @@ def main(argv):
             created_fence();tool.call(['docker','cp',str(output.path/local),cid+':/tmp/'+remote]);created_fence()
         write_private('sql-exec.intent',record({'version':1,'operation':'owned-psql-and-readiness'}))
         created_fence()
+        PHASE='start'
         if tool.call(['docker','start',cid]).decode('ascii')!=cid: raise RuntimeError('start outcome unknown')
         item=inspect(['docker','inspect',cid])
         if {k:item.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')}!=frozen: raise RuntimeError('fixture configuration changed')
@@ -384,6 +409,7 @@ def main(argv):
         def readiness_process(args,**kwargs):
             if args[:3]!=['docker','exec',cid]: raise ValueError('readiness')
             owner();result=process([metadata.DOCKER,'--config',str(config),'--host','unix://'+metadata.SOCKET,*args[1:]],env=clean_env,**kwargs);owner();return result
+        PHASE='readiness'
         until=time.monotonic()+60
         while not capture['postgres_ready'](readiness_process,cid):
             tool.check()
@@ -395,6 +421,7 @@ def main(argv):
         runner=qualified_transport(transport['FreshPsqlTransport'],transport['SHELL'],cid,token,clean_env,tool,owner,record_exec)
         def raw_execute(sql):
             owner();value=runner.execute(sql,timeout=120);owner();return value
+        PHASE='schema'
         raw_execute('CREATE DATABASE contour_local;')
         settings=('log_statement=none','log_min_duration_statement=-1','log_min_duration_sample=-1','log_min_error_statement=panic','log_min_messages=panic','log_duration=off','log_statement_sample_rate=0','log_transaction_sample_rate=0')
         raw_execute(''.join('ALTER ROLE postgres SET '+x+';' for x in settings))
@@ -402,6 +429,7 @@ def main(argv):
         modules={'provision':provision,'schema':origin21_schema,'setup':origin21_setup,'logins':origin21_logins,'profile':origin21_profile}
         bootstrap_schema(execute,root,hooks,capture,modules,{k:secrets.token_hex(32) for k in ('app','ingress','worker')},owner)
         passwords={k:secrets.token_hex(32) for k in ('reader','wrong','mixed')};execute(reader_login_sql(passwords))
+        PHASE='seed'
         seed=execute((root/'tests/fixtures/causal-receiver-reader/seed.sql').read_text());selected=json.loads(seed.splitlines()[-1])
         if type(selected) is not dict or set(selected)!={'epoch','generation','credential_id','commitment','expires_at'} or selected['epoch']!='2':raise ValueError('seed')
         base=dict(selected,ca_pem=ca.decode('ascii'),leaf='d2'*32,tenant='f0000000-0000-4000-8000-000000000001',runtime='fc000000-0000-4000-8000-000000000008',port=str(port))
@@ -413,13 +441,16 @@ def main(argv):
                 if probe_snapshot(probe,target,metadata)!=probe_identity: raise RuntimeError('probe drift')
                 owner()
             if result.returncode or result.stdout!=b'PASS receiver_reader_probe\n' or result.stderr: raise RuntimeError('probe failed')
+        PHASE='probe'
         for mode,user,password in (('positive','receiver_reader_login',passwords['reader']),('denied','receiver_wrong_login',passwords['wrong']),('denied','receiver_mixed_login',passwords['mixed'])):
             payload=json.dumps(dict(base,mode=mode,user=user,password=password),sort_keys=True,separators=(',',':')).encode();probe_call(payload)
+        PHASE='closed'
         execute("SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000001',false); SET ROLE contour_causal_evidence_provisioner; SELECT contour.close_causal_receiver('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008',2,'"+selected['generation']+"','operator_revoked'); RESET ROLE;")
         closed=dict(base,mode='unavailable',user='receiver_reader_login',password=passwords['reader'])
         probe_call(json.dumps(closed,sort_keys=True,separators=(',',':')).encode())
         # Create a distinct active credential on the same lifecycle before
         # revoking product03, then issue a new still-latest receiver epoch.
+        PHASE='revoked'
         execute("SELECT set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000001',false); SET ROLE contour_admin; SELECT contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000001','fa000000-0000-4000-8000-000000000018','f9000000-0000-4000-8000-000000000003',decode(repeat('e1',32),'hex')); RESET ROLE;")
         later=json.loads(execute(revocation_seed((root/'tests/fixtures/causal-receiver-reader/seed.sql').read_text())).splitlines()[-1])
         if type(later) is not dict or set(later)!={'epoch','generation','credential_id','commitment','expires_at'} or later['epoch']!='3': raise ValueError('seed')
@@ -430,6 +461,7 @@ def main(argv):
         latest['mode']='unavailable';probe_call(json.dumps(latest,sort_keys=True,separators=(',',':')).encode())
         execute("SET ROLE receiver_reader_login; DO $$ BEGIN BEGIN PERFORM count(*) FROM contour.causal_receiver_enrollments; RAISE EXCEPTION 'raw read accepted'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$; RESET ROLE;")
         if bridge['digest_file'](probe)!=probe_hash: raise RuntimeError('probe changed')
+        PHASE='cleanup'
         runner.close();runner=None;owner()
         if tool.call(['docker','rm','-f',cid]).decode('ascii')!=cid:raise RuntimeError('cleanup outcome unknown')
         if tool.call(['docker','ps','-aq','--no-trunc','--filter','label='+LABEL+'='+token]):raise RuntimeError('container cleanup')
@@ -461,7 +493,7 @@ def main(argv):
 if __name__=='__main__':
     import sys
     try: main(sys.argv[1:])
-    except BaseException:
-        print('FAIL receiver_reader_fixture; owned state retained',file=sys.stderr)
+    except BaseException as error:
+        print(failure_diagnostic(error,PHASE),file=sys.stderr)
         raise SystemExit(1) from None
     print('PASS receiver_reader_fixture synthetic TLS data only')

@@ -109,6 +109,14 @@ class Boundaries(unittest.TestCase):
             probe.write_bytes(b'two');self.assertNotEqual(q.probe_snapshot(probe,target,metadata),original)
             probe.unlink();probe.symlink_to(target/'missing')
             with self.assertRaises((ValueError,OSError)): q.probe_snapshot(probe,target,metadata)
+    def test_diagnostic_is_closed_and_redacts_exception_text(self):
+        try: raise ValueError('SENTINEL-PRIVATE-KEY /secret/path SQL')
+        except ValueError as error: line=q.failure_diagnostic(error,'schema')
+        self.assertEqual(line,'FAIL receiver_reader_fixture phase=schema type=ValueError location=unavailable')
+        self.assertNotIn('SENTINEL',line);self.assertNotIn('/secret',line);self.assertNotIn('SQL',line)
+        class Unexpected(Exception): pass
+        line=q.failure_diagnostic(Unexpected('SENTINEL'),'untrusted-phase')
+        self.assertEqual(line,'FAIL receiver_reader_fixture phase=other type=OtherError location=unavailable')
     def test_primary_and_cleanup_failure_are_both_retained(self):
         primary=ValueError('first');cleanup=RuntimeError('second')
         with self.assertRaises(BaseExceptionGroup) as seen:q.raise_failures(primary,[cleanup])
