@@ -112,7 +112,7 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     run_business_cases(execute,port,directory,environment,normal,unknown,target_scope,records,expected_operations,target_dir)
     if environment.get('CONTOUR_CAUSAL_OBSERVER_FIXTURE') == '1':
         observer=runpy.run_path(str(ROOT/'scripts/test-causal-observer-inbox.py'))['run_cases']
-        if sys.argv[1:]==['--causal-receiver']:
+        if sys.argv[1:] in (['--causal-receiver'], ['--causal-edge-reconciliation']):
             receiver=runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['checked_receiver_loader']()
             observer(execute,submit,body,port,directory,environment,target_dir,receiver_scenario=receiver['scenario_sql'],receiver_after=receiver['after_scenario'])
         else:

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
 U = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -94,8 +96,12 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir, *
         prefix,observer_fixture,suffix=parts
         observer_fixture=prefix+'\n'+observer_fixture+'\n'+suffix
     combined=_diagnostic_sql(seed,observer_fixture)
-    execute(combined, timeout=300)
-    if receiver_after is not None: receiver_after(execute)
+    edge = None
+    if sys.argv[1:] == ['--causal-edge-reconciliation']:
+        if receiver_after is None: raise ValueError('edge requires receiver scenario')
+        edge = runpy.run_path(str(ROOT / 'scripts/test-postgres-tls.py'))['checked_edge_loader']()
+        combined += '\n' + edge['continuation_sql']()
+    _run_combined(execute,combined,receiver_after,edge,directory)
     if receiver_scenario is not None:
         path=directory/'causal-receiver.done';fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'wb') as out:
@@ -103,6 +109,12 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir, *
     path=directory/'causal-observer.done'; fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as out:
         out.write(b'causal-observer-complete\n'); out.flush(); os.fsync(out.fileno())
+
+def _run_combined(execute, combined, receiver_after, edge, directory):
+    execute(combined, timeout=300)
+    if receiver_after is not None: receiver_after(execute)
+    if edge is not None: edge['write_receipt'](directory)
+
 
 def _diagnostic_sql(seed, fixture):
     """Mark audited seed boundaries; preserve the fixture's exact bytes."""
