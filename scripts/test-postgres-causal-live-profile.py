@@ -353,13 +353,21 @@ def marker_unknown(base,env,execute,bridge):
 
 
 def issue_context_unknown(base,env,execute,bridge):
-    """Prove the real issued nonce committed before context cleanup failed."""
+    """Prove a deferred fixture trigger caused a real post-commit context leak."""
     args=list(base); args[-1]=str(uuid.uuid4())
     tenant,runtime=bridge['IDS'][:2]
+    if any(not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',x) for x in (tenant,runtime,args[-1])): raise ValueError('context fixture identity invalid')
     query=f"SELECT count(*) FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND nonce='{args[-1]}';"
     if execute(query)!='0': raise AssertionError('context fixture nonce exists')
+    # The security-definer issue call sets a transaction-local tenant. The deferred
+    # trigger replaces it with a session setting at COMMIT, after all precommit checks.
+    setup=("BEGIN; CREATE FUNCTION contour.fixture_issue_context_leak() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+           "PERFORM set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000002',false); RETURN NEW; END $$; "
+           "CREATE CONSTRAINT TRIGGER fixture_issue_context_leak AFTER INSERT ON contour.causal_sessions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+           f"WHEN (NEW.tenant_id='{tenant}'::uuid AND NEW.runtime_id='{runtime}'::uuid AND NEW.nonce='{args[-1]}'::uuid) "
+           "EXECUTE FUNCTION contour.fixture_issue_context_leak(); COMMIT;")
+    execute(setup)
     try:
-        execute("ALTER ROLE causal_issuer_login SET apicontour.tenant_id TO 'f0000000-0000-4000-8000-000000000002';")
         result=None; probe_error=None
         try: result=bridge['run_process'](args+['issue_context_unknown'],timeout=20,env=env,limit=4096)
         except Exception as error: probe_error=error
@@ -371,7 +379,7 @@ def issue_context_unknown(base,env,execute,bridge):
         if probe_error is not None: raise probe_error
         if outcome!='unknown': raise AssertionError('context failure protocol mismatch')
     finally:
-        execute('ALTER ROLE causal_issuer_login RESET apicontour.tenant_id;')
+        execute('DROP TRIGGER fixture_issue_context_leak ON contour.causal_sessions; DROP FUNCTION contour.fixture_issue_context_leak();')
 
 
 def exercise(base,env,execute,bridge,https,stages):

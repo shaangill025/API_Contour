@@ -91,7 +91,7 @@ class Driver(unittest.TestCase):
             target=root/'target'; target.write_text('x'); link=root/'link'; link.symlink_to(target)
             with self.assertRaises(ValueError): d.safe(link)
 
-    def test_postcommit_context_requires_exact_committed_nonce_and_resets_role(self):
+    def test_postcommit_context_requires_exact_committed_nonce_and_drops_trigger(self):
         from types import SimpleNamespace
         for mode in ('pass','not_committed','unexpected_success','probe_failure'):
             with self.subTest(mode=mode):
@@ -104,7 +104,7 @@ class Driver(unittest.TestCase):
                     self.assertEqual(args[-1],'issue_context_unknown')
                     if mode=='probe_failure': raise RuntimeError('failure')
                     return SimpleNamespace(returncode=0,stderr=b'',stdout=b'CONTEXT_UNEXPECTED_SUCCESS\n' if mode=='unexpected_success' else b'CONTEXT_OUTCOME_UNKNOWN\n')
-                bridge={'IDS':['tenant','runtime'],'run_process':run}
+                bridge={'IDS':['f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000001'],'run_process':run}
                 import contextlib,io
                 sink=io.StringIO()
                 with contextlib.redirect_stdout(sink):
@@ -114,8 +114,12 @@ class Driver(unittest.TestCase):
                 wanted={'pass':'unknown','unexpected_success':'unexpected-success','probe_failure':'wrong'}
                 self.assertEqual(sink.getvalue(),'' if mode=='not_committed' else 'issue-context committed=1 outcome='+wanted[mode]+'\n')
                 self.assertNotIn('tenant',sink.getvalue()); self.assertNotIn('runtime',sink.getvalue())
-                self.assertEqual(calls[-1],'ALTER ROLE causal_issuer_login RESET apicontour.tenant_id;')
-                self.assertTrue(any('ALTER ROLE causal_issuer_login SET apicontour.tenant_id' in sql for sql in calls))
+                self.assertEqual(calls[-1],'DROP TRIGGER fixture_issue_context_leak ON contour.causal_sessions; DROP FUNCTION contour.fixture_issue_context_leak();')
+                setup=next(sql for sql in calls if 'CREATE CONSTRAINT TRIGGER fixture_issue_context_leak' in sql)
+                self.assertIn('DEFERRABLE INITIALLY DEFERRED',setup); self.assertIn('AFTER INSERT ON contour.causal_sessions',setup)
+                self.assertIn("set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000002',false)",setup)
+                self.assertIn('NEW.tenant_id=',setup); self.assertIn('NEW.runtime_id=',setup); self.assertIn('NEW.nonce=',setup)
+                self.assertFalse(any('ALTER ROLE' in sql for sql in calls))
                 if mode in ('pass','not_committed','unexpected_success','probe_failure'):
                     queries=[sql for sql in calls if sql.startswith('SELECT count(*)')]
                     self.assertEqual(len(queries),2); self.assertEqual(queries[0],queries[1])
