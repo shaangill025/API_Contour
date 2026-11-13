@@ -213,6 +213,26 @@ class Lifecycle(unittest.TestCase):
                 self.assertFalse(session.active)
         self.assertEqual(proc.waits,1)
 
+    def test_expired_idle_cleanup_checks_identity_and_reaps(self):
+        session,proc=self.setup_session(lambda *_:{'ApiVersion':'1.56'})
+        session.__enter__(); session.deadline=time.monotonic()-1
+        session.__exit__(None,None,None)
+        self.assertFalse(session.active); self.assertEqual(proc.waits,1)
+
+    def test_expired_read_cannot_return_or_request(self):
+        paths=[]
+        session,proc=self.setup_session(lambda _p,path,_d:(paths.append(path) or {'ApiVersion':'1.56'}))
+        session.__enter__(); session.deadline=time.monotonic()-1
+        with self.assertRaises(m.MetadataError): session.read(['docker','inspect',IDENT])
+        self.assertEqual(paths,['/version']); self.assertEqual(proc.waits,1)
+
+    def test_expired_cleanup_still_rejects_identity_drift_and_reaps(self):
+        session,proc=self.setup_session(lambda *_:{'ApiVersion':'1.56'})
+        session.__enter__(); session.deadline=time.monotonic()-1
+        with patch.object(m,'_tool',return_value=('replaced',)):
+            with self.assertRaises(m.MetadataError): session.__exit__(None,None,None)
+        self.assertEqual(proc.waits,1); self.assertFalse(session.active)
+
     def test_timeout_cleanup_kills_only_owned_process(self):
         class Slow(Process):
             def wait(self,timeout):
