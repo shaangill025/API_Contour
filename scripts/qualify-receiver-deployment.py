@@ -296,21 +296,31 @@ def entry():
 
 def failure_diagnostic(error):
     allowed={'ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','TypeError','KeyError','IndexError','AttributeError','ExceptionGroup','BaseExceptionGroup'}
+    codes={'invalid owner record':'owner_record','owner identity changed':'owner_identity',
+           'clean reviewed source required':'source_not_clean','source/input drift':'source_input_drift',
+           'process output bound':'process_output_bound','process deadline':'process_deadline'}
+    filenames={__file__:'qualify-receiver-deployment.py',
+        str(ROOT/'scripts/qualify-origin21-onboarding.py'):'qualify-origin21-onboarding.py',
+        str(ROOT/'scripts/test-origin21-onboarding.py'):'test-origin21-onboarding.py',
+        str(ROOT/'deploy/local/docker_metadata.py'):'docker_metadata.py'}
     kind=type(error).__name__
     if kind not in allowed: kind='OtherError'
-    lines=[]; trace=error.__traceback__
+    frames=[]; trace=error.__traceback__
     while trace is not None:
-        if trace.tb_frame.f_code.co_filename == __file__ and 1 <= trace.tb_lineno <= 999999:
-            lines.append(trace.tb_lineno)
+        name=filenames.get(trace.tb_frame.f_code.co_filename)
+        if name is not None and 1 <= trace.tb_lineno <= 999999:
+            frames.append({'file':name,'line':trace.tb_lineno})
         trace=trace.tb_next
-    return kind,lines[-3:]
+    return kind,frames[-4:],codes.get(str(error))
+
 
 def report(run=entry):
     try:
         value=run()
     except BaseException as error:
-        kind,lines=failure_diagnostic(error)
-        value={'status':'fail','phase':CURRENT_PHASE,'cleanup':'unknown','failure_type':kind,'source_lines':lines}
+        kind,frames,code=failure_diagnostic(error)
+        value={'status':'fail','phase':CURRENT_PHASE,'cleanup':'unknown','failure_type':kind,'source_frames':frames}
+        if code is not None: value['failure_code']=code
         if CURRENT_OWNER is not None:
             value['output']=str(CURRENT_OWNER.path)
             try: record(CURRENT_OWNER,'receipt.json',{'version':1,**value})
