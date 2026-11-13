@@ -10,6 +10,34 @@ spec=importlib.util.spec_from_file_location('managed_origin_qualification',ROOT/
 driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 
 class QualificationDriverTests(unittest.TestCase):
+    def test_phase_timing_is_closed_bounded_and_failure_safe(self):
+        import io
+        output=io.StringIO()
+        with mock.patch.object(driver,'_TIMING_ENABLED',True), mock.patch.object(driver,'_TIMING_COUNT',0), mock.patch.object(driver,'_TIMING_START',0.5), mock.patch.object(driver.sys,'stderr',output), mock.patch.object(driver.time,'monotonic',side_effect=[1.0,1.125]):
+            with self.assertRaisesRegex(ValueError,'primary'):
+                with driver._timed_phase('source'): raise ValueError('primary secret')
+            with driver._timed_phase('secret'): pass
+        self.assertEqual(output.getvalue().splitlines(),['managed-phase phase=source event=start elapsed_ms=0 run_ms=500','managed-phase phase=source event=end elapsed_ms=125 run_ms=625'])
+        with mock.patch.object(driver,'_TIMING_ENABLED',True), mock.patch.object(driver,'_TIMING_COUNT',64), mock.patch.object(driver.time,'monotonic',return_value=1), mock.patch.object(driver.sys,'stderr',io.StringIO()) as stream:
+            with driver._timed_phase('close'): pass
+            self.assertEqual(stream.getvalue(),'')
+        with mock.patch.object(driver,'_TIMING_ENABLED',True), mock.patch.object(driver.time,'monotonic',side_effect=RuntimeError('clock')):
+            with self.assertRaisesRegex(ValueError,'primary'):
+                with driver._timed_phase('source'): raise ValueError('primary')
+
+    def test_phase_start_survives_interruption_and_has_run_offset(self):
+        import io
+        output=io.StringIO()
+        with mock.patch.object(driver,'_TIMING_ENABLED',True), mock.patch.object(driver,'_TIMING_COUNT',0), mock.patch.object(driver,'_TIMING_START',10.0), mock.patch.object(driver.sys,'stderr',output), mock.patch.object(driver.time,'monotonic',side_effect=[12.0,RuntimeError('end clock')]):
+            with self.assertRaises(KeyboardInterrupt):
+                with driver._timed_phase('stream-3'): raise KeyboardInterrupt()
+        self.assertEqual(output.getvalue().splitlines(),['managed-phase phase=stream-3 event=start elapsed_ms=0 run_ms=2000'])
+
+    def test_timing_does_not_swallow_operator_interrupt(self):
+        with mock.patch.object(driver,'_TIMING_ENABLED',True), mock.patch.object(driver.time,'monotonic',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                with driver._timed_phase('source'): pass
+
     def test_readiness_timing_is_bounded_redacted_and_best_effort(self):
         from deploy.local.origin21_managed_qualification import OwnedManagedQualification
         ready=driver.origin21_ready; proof=object.__new__(OwnedManagedQualification); lines=[]

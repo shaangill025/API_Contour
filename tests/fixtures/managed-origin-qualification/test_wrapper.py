@@ -168,6 +168,14 @@ class DiagnosticTests(unittest.TestCase):
             lines=wrapper.child_failure_lines(owner)
             self.assertEqual(lines,[valid.decode()]*160)
 
+    def test_phase_timings_are_closed_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner=mock.Mock(); owner.path=Path(directory)
+            valid=b'managed-phase phase=readiness-2 event=end elapsed_ms=12 run_ms=22'
+            bad=[b'managed-phase phase=secret event=end elapsed_ms=12 run_ms=22',b'managed-phase phase=source event=start elapsed_ms=0 run_ms=1000000000',b'managed-phase phase=source event=end elapsed_ms=1000000000 run_ms=1',b'managed-phase phase=source event=end elapsed_ms=1 run_ms=2 secret']
+            (owner.path/'qualification.log').write_bytes(b'\n'.join([valid]*70+bad))
+            self.assertEqual(wrapper.child_failure_lines(owner),[valid.decode()]*64)
+
     def test_stream_timings_are_closed_and_bounded(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

@@ -80,7 +80,9 @@ def child_failure_lines(owner):
     profiles=[line.decode('ascii') for line in raw.splitlines() if profiler.fullmatch(line)][:len(_PROFILE_LABELS)]
     lost_ack=re.compile(rb'managed-lost-ack phase=(?:arm|intent|marker|exec|join|cleanup-start|cleanup-end) ms=(?:0|[1-9][0-9]{0,8}) ok=[01]')
     lost=[line.decode('ascii') for line in raw.splitlines() if lost_ack.fullmatch(line)][:16]
-    return failures+timings+streams+profiles+lost
+    phase=re.compile(rb'managed-phase phase=(?:source|begin|initialize|up|transport|readiness-initial|readiness-[1-4]|stream-[1-4]|capture-[1-4]|policy-cycle|positive|negative|lost-ack|disposal|close) event=(?:start|end) elapsed_ms=(?:0|[1-9][0-9]{0,8}) run_ms=(?:0|[1-9][0-9]{0,8})')
+    phases=[line.decode('ascii') for line in raw.splitlines() if phase.fullmatch(line)][:64]
+    return failures+timings+streams+profiles+lost+phases
 
 
 def helper():
@@ -200,6 +202,10 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,pro
     profile_output=profile_lines(inner_output) if profile_readiness else ()
     if profile_lost_ack and inner_output.strip()!=b'managed-component scope=single-lost-ack-diagnostic result=pass': raise ValueError('lost ack diagnostic output')
     lost_output=tuple(line for line in child_failure_lines(owner) if line.startswith('managed-lost-ack ')) if profile_lost_ack else ()
+    phase_output=()
+    if not (profile_readiness or profile_lost_ack):
+        try: phase_output=tuple(line for line in child_failure_lines(owner) if line.startswith(('managed-phase ','managed-lost-ack ')))
+        except Exception: pass  # Timing diagnostics do not decide qualification.
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
     if h['image_identity'](run,child,tag,token,head)!=image: raise ValueError('build image changed')
     h['require_registration'](run,ROOT,child,head)
@@ -215,7 +221,7 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,pro
     h['require_registration'](run,ROOT,child,head,expected=False)
     if os.path.lexists(child) or h['snapshot'](run,ROOT)!=(head,source): raise RuntimeError('worktree cleanup uncertain')
     for line in profile_output: print(line)
-    for line in lost_output: print(line,file=sys.stderr,flush=True)
+    for line in lost_output+phase_output: print(line,file=sys.stderr,flush=True)
 
 
 def main():

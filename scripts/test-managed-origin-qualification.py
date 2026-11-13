@@ -51,6 +51,38 @@ def _set_phase(phase):
     _PHASE=phase
     print('managed-progress phase='+phase,file=sys.stderr,flush=True)
 
+_TIMING_PHASES=('source','begin','initialize','up','transport','readiness-initial','readiness-1','readiness-2','readiness-3','readiness-4','stream-1','stream-2','stream-3','stream-4','capture-1','capture-2','capture-3','capture-4','policy-cycle','positive','negative','lost-ack','disposal','close')
+_TIMING_ENABLED=False
+_TIMING_COUNT=0
+_TIMING_START=None
+
+@contextlib.contextmanager
+def _timed_phase(name):
+    global _TIMING_COUNT, _TIMING_START
+    enabled=_TIMING_ENABLED and name in _TIMING_PHASES
+    start=None
+    if enabled:
+        try:
+            start=time.monotonic()
+            if _TIMING_START is None: _TIMING_START=start
+            run_ms=min(999999999,max(0,int((start-_TIMING_START)*1000)))
+            if _TIMING_COUNT<64:
+                _TIMING_COUNT+=1
+                print(f'managed-phase phase={name} event=start elapsed_ms=0 run_ms={run_ms}',file=sys.stderr,flush=True)
+        except Exception: pass
+    try:
+        yield
+    finally:
+        if start is not None:
+            try:
+                now=time.monotonic()
+                elapsed=min(999999999,max(0,int((now-start)*1000)))
+                run_ms=min(999999999,max(0,int((now-_TIMING_START)*1000)))
+                if _TIMING_COUNT<64:
+                    _TIMING_COUNT+=1
+                    print(f'managed-phase phase={name} event=end elapsed_ms={elapsed} run_ms={run_ms}',file=sys.stderr,flush=True)
+            except Exception: pass
+
 class _OwnerGuard:
     def __init__(self,owner): self.owner=owner
     def __enter__(self): return self.owner
@@ -330,7 +362,8 @@ def _policy_cycle(transport,proof,expected,original,diagnostics=None):
         before_ids={row[0] for row in before}
         if len(before_ids)!=len(before): raise ValueError('duplicate adoption baseline')
         # This is the existing post-case readiness check, not an extra or reused check.
-        origin21_ready.check(expected,selected=selected,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
+        with _timed_phase('readiness-2'):
+            origin21_ready.check(expected,selected=selected,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
         after=origin21_ready.snapshot(transport.admin,selected=selected)
         after_by_id={row[0]:row for row in after}
         if len(after_by_id)!=len(after) or any(after_by_id.get(key)!=value for key,value in prior_by_id.items()) or _immutable_capture(transport,set(prior_by_id))!=prior_immutable: raise ValueError('prior capture evidence changed')
@@ -362,19 +395,25 @@ def qualify_positive_streams(transport,proof):
                  if os.environ.get('CONTOUR_MANAGED_READY_DIAGNOSTICS')=='1' else None)
     global _PHASE
     _set_phase('initial-readiness')
-    origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
+    with _timed_phase('readiness-initial'):
+        origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
     transitions=[]
     for case,(mode,index,transition) in enumerate((('request',1,'renew'),('response',2,'rollback'),('response',1,'renew'),('request',2,'rollback')),1):
         _set_phase('stream-capture-baseline')
         before={row[0] for row in origin21_ready.snapshot(transport.admin,selected=profiles.MANAGED)}
         revision=products.require_current_policy(transport.admin,transport.sensitive,selected=profiles.MANAGED)
-        transitions.append(_stream(mode,index,transition,destination,original[index-1],helper,proof))
+        with _timed_phase('stream-'+str(case)):
+            transitions.append(_stream(mode,index,transition,destination,original[index-1],helper,proof))
         _set_phase('stream-capture-wait')
-        _wait_capture(transport,before,original[index-1],expected[index-1],revision,index)
+        with _timed_phase('capture-'+str(case)):
+            _wait_capture(transport,before,original[index-1],expected[index-1],revision,index)
         if _products(proof)!=original: raise ValueError('qualification product generation changed')
         _set_phase('stream-readiness')
-        if case==2: _policy_cycle(transport,proof,expected,original,diagnostics)
-        else: origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
+        if case==2:
+            with _timed_phase('policy-cycle'): _policy_cycle(transport,proof,expected,original,diagnostics)
+        else:
+            with _timed_phase('readiness-'+str(case)):
+                origin21_ready.check(expected,selected=profiles.MANAGED,transport=transport,**({'_diagnostics':diagnostics} if diagnostics is not None else {}))
         if _source_guard()!=source: raise ValueError('qualification source changed')
     for first,second in ((transitions[0],transitions[1]),(transitions[2],transitions[3])):
         if first[0]!=second[1] or first[1]!=second[0]: raise ValueError('qualification rollback fingerprint mismatch')
@@ -593,27 +632,30 @@ def qualify_wrong_name_and_pending(proof):
 def main(argv):
     """Run using an exact clean worktree and its already verified build receipt."""
     from deploy.local import origin21_managed_qualification as qualification,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
-    global _PHASE
+    global _PHASE, _TIMING_ENABLED, _TIMING_COUNT, _TIMING_START
     if len(argv)<4: raise ValueError('build evidence required')
     flags=argv[4:]
     if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--profile-lost-ack','--fresh-source') for flag in flags): raise ValueError('invalid qualification flags')
     fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags; profile_lost_ack='--profile-lost-ack' in flags
     if profile_readiness and profile_lost_ack: raise ValueError('diagnostic modes conflict')
+    _TIMING_ENABLED=not (profile_readiness or profile_lost_ack)
+    _TIMING_COUNT=0
+    _TIMING_START=None
     image,head,receipt,digest=argv[:4]
     _set_phase('source-check')
-    source=_source_guard()
+    with _timed_phase('source'): source=_source_guard()
     _set_phase('qualification-begin')
-    proof=qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest)
+    with _timed_phase('begin'): proof=qualification.begin(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest)
     try:
         with contextlib.ExitStack() as stack:
             if fresh_source: stack.enter_context(qualification_git.qualification_scope(proof))
             if fresh_metadata: stack.enter_context(docker_metadata.qualification_scope(proof))
             _set_phase('initialize')
-            path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
+            with _timed_phase('initialize'): path,runtime_digest=init.initialize(image_id=image,head=head,build_receipt=receipt,build_receipt_sha256=digest,qualification=proof)
             _set_phase('topology-up')
-            cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
+            with _timed_phase('up'): cli.main(['up',image,head,str(path),runtime_digest],qualification=proof)
             _set_phase('transport')
-            transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
+            with _timed_phase('transport'): transport=origin21_transport.managed_transport(image_id=image,head=head,receipt=str(path),digest=runtime_digest,qualification=proof)
             if profile_readiness:
                 from deploy.local import origin21_readiness_profile,origin21_managed_cleanup
                 _set_phase('initial-readiness')
@@ -623,7 +665,7 @@ def main(argv):
                 for line in profile.lines(): print(line,flush=True)
                 _set_phase('volume-disposal')
                 origin21_managed_cleanup.teardown(qualification=proof)
-                disposal.dispose_synthetic_volume(proof)
+                with _timed_phase('disposal'): disposal.dispose_synthetic_volume(proof)
                 if _source_guard()!=source: raise ValueError('qualification source changed')
                 return {'scope':'single-full-readiness-diagnostic','component':True}
             if profile_lost_ack:
@@ -631,24 +673,27 @@ def main(argv):
                 result=qualify_lost_publication_ack(proof,_diagnostics=_LostAckDiagnostics())
                 if result!={'remote_commit_before_lost_ack':True,'publisher_stopped':True,'publication_intent_retained':True,'owned_topology_removed':True}: raise ValueError('lost ack diagnostic result')
                 _set_phase('volume-disposal')
-                disposal.dispose_synthetic_volume(proof)
+                with _timed_phase('disposal'): disposal.dispose_synthetic_volume(proof)
                 if _source_guard()!=source: raise ValueError('qualification source changed')
                 return {'scope':'single-lost-ack-diagnostic','component':True}
             _set_phase('positive-streams')
-            positive=qualify_positive_streams(transport,proof)
+            with _timed_phase('positive'): positive=qualify_positive_streams(transport,proof)
             _set_phase('negative-cases')
-            negative=qualify_wrong_name_and_pending(proof)
+            with _timed_phase('negative'): negative=qualify_wrong_name_and_pending(proof)
             _set_phase('lost-ack')
-            unknown=qualify_lost_publication_ack(proof)
+            try: lost_diagnostics=_LostAckDiagnostics()
+            except Exception: lost_diagnostics=None
+            with _timed_phase('lost-ack'): unknown=qualify_lost_publication_ack(proof,_diagnostics=lost_diagnostics)
             _set_phase('volume-disposal')
-            disposal.dispose_synthetic_volume(proof)
+            with _timed_phase('disposal'): disposal.dispose_synthetic_volume(proof)
             if _source_guard()!=source: raise ValueError('qualification source changed')
             return {'positive':positive,'negative':negative,'unknown':unknown,'cleanup':True}
     finally:
         primary=sys.exc_info()[1]
         if _RETAINED: _RETAINED.append((proof,None))
         else:
-            try: proof.close()
+            try:
+                with _timed_phase('close'): proof.close()
             except BaseException as error:
                 if primary is not None: raise BaseExceptionGroup('qualification and proof close failures',[primary,error]) from None
                 raise
