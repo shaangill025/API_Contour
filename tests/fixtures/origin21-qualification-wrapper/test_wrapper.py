@@ -165,6 +165,19 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(w.Runner(time.monotonic()+5,self.owned)([sys.executable,'-c',"print('ok')"],cwd=self.root,timeout=2),b'ok\n')
         self.assertEqual(calls.count(signal.SIGKILL),1);self.assertTrue(denied)
 
+    def test_process_group_parses_documented_bsd_memory_status(self):
+        real_popen=subprocess.Popen
+        def inspect(raw):
+            def fake_ps(args,**kwargs):
+                self.assertEqual(args,['/bin/ps','-axo','pid=,pgid=,stat='])
+                return real_popen([sys.executable,'-c','import sys;sys.stdout.buffer.write('+repr(raw)+')'],**kwargs)
+            with mock.patch.object(w.subprocess,'Popen',side_effect=fake_ps):
+                return w.group_members(100,time.monotonic()+3)
+        self.assertEqual(inspect(b'100 100 S>\n101 100 R>+\n200 200 S<\n'),{100,101})
+        for raw in (b'100 100 S!\n',b'100 100 S\x01\n',b'100 100 S\n100 100 R\n',b'101 100 S\n'):
+            with self.subTest(raw=raw),self.assertRaises((ValueError,RuntimeError)):
+                inspect(raw)
+
     def test_observed_extra_member_is_failure_even_when_output_and_exit_are_valid(self):
         with mock.patch.object(w,'group_members',side_effect=lambda group,deadline:{group,group+1}):
             with self.assertRaisesRegex(RuntimeError,'descendant survived'):
