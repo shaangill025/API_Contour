@@ -296,6 +296,45 @@ impl SelectedImage {
 mod selection_tests {
     use super::*;
     #[test]
+    fn engine_index_is_distinct_from_archive_selected_child() {
+        let engine_reference = [0x11; 32];
+        let child = format!("sha256:{}", "22".repeat(32));
+        let candidate = format!("sha256:{}", "33".repeat(32));
+        let inspect = serde_json::json!([{ "Id": child, "Os":"linux", "Architecture":"arm64", "Config":{"User":"1000"}, "RootFS":{"Layers":["one"]}, "Descriptor":{"digest":child,"mediaType":"application/vnd.oci.image.manifest.v1+json", "platform":{"os":"linux","architecture":"arm64"}} }]);
+        let observed = SelectedImage::parse(&serde_json::to_vec(&inspect).unwrap(), true).unwrap();
+        assert_ne!(
+            observed.manifest,
+            format!("sha256:{}", hex_image(&engine_reference))
+        );
+        let output = serde_json::json!({"version":1,"architecture":"arm64","selected_manifest":child,"candidate_config":candidate,"candidate_history_sha256":"44".repeat(32),"base_history_sha256":"55".repeat(32)});
+        assert!(
+            observed
+                .verify_archive_output(&serde_json::to_vec(&output).unwrap(), true)
+                .is_ok()
+        );
+        let mut wrong = output.clone();
+        wrong["selected_manifest"] = format!("sha256:{}", hex_image(&engine_reference)).into();
+        assert!(
+            observed
+                .verify_archive_output(&serde_json::to_vec(&wrong).unwrap(), true)
+                .is_err()
+        );
+        wrong = output.clone();
+        wrong["architecture"] = "amd64".into();
+        assert!(
+            observed
+                .verify_archive_output(&serde_json::to_vec(&wrong).unwrap(), true)
+                .is_err()
+        );
+        wrong = output.clone();
+        wrong["candidate_config"] = "sha256:invalid".into();
+        assert!(
+            observed
+                .verify_archive_output(&serde_json::to_vec(&wrong).unwrap(), true)
+                .is_err()
+        );
+    }
+    #[test]
     fn platform_manifest_selection_and_reinspection_drift() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let mut value = serde_json::json!([{ "Id": digest, "Os":"linux", "Architecture":"arm64", "Config":{"User":"1000"}, "RootFS":{"Layers":["one"]}, "Descriptor":{"digest":digest,"mediaType":"application/vnd.oci.image.manifest.v1+json", "platform":{"os":"linux","architecture":"arm64"}} }]);
@@ -366,6 +405,12 @@ impl ProbeOutput {
     }
 }
 
+impl SelectedImage {
+    fn verify_archive_output(&self, raw: &[u8], arm64: bool) -> Result<ProbeOutput, StageError> {
+        ProbeOutput::parse(raw, arm64, &self.manifest)
+    }
+}
+
 struct PinnedFile {
     path: PathBuf,
     id: Identity,
@@ -425,6 +470,8 @@ pub struct ReceiverImageRequest<'a> {
     pub python_sha256: [u8; 32],
     pub scripts_dir: &'a Path,
     pub stage_path: &'a Path,
+    /// Full local engine reference digest. A platform inspect may resolve an
+    /// image index to a different, independently verified child manifest.
     pub image: [u8; 32],
     pub arm64: bool,
     pub owner: [u8; 32],
@@ -478,9 +525,9 @@ pub async fn observe_receiver_image(
         .map_err(|_| StageError::Io)?;
     revalidate()?;
     let selected = SelectedImage::parse(&before_raw, arm64)?;
-    if selected.manifest != format!("sha256:{}", hex_image(&image)) {
-        return Err(StageError::Unsafe);
-    }
+    // The input identifies the engine image (which may be a multi-platform
+    // index). Docker's fixed platform inspect supplies the distinct child
+    // manifest; the archive verifier below must bind to that observed child.
     let stage = ImageStage::prepare(stage_path, image, arm64)?;
     revalidate()?;
     docker
@@ -528,7 +575,7 @@ pub async fn observe_receiver_image(
     if Identity::from(&checked_path(&inspect_path).map_err(|_| StageError::Drift)?) != inspect_id {
         return Err(StageError::Drift);
     }
-    let output = ProbeOutput::parse(&result, arm64, &selected.manifest)?;
+    let output = selected.verify_archive_output(&result, arm64)?;
     let candidate_config = output.candidate_config;
     let base_history = output.base_history_sha256;
     let candidate_history = output.candidate_history_sha256;
