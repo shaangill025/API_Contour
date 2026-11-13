@@ -28,7 +28,7 @@ L = 'f9000000-0000-4000-8000-000000000001'
 CASES = ('basic','wrong_identity','quota','rollback','race','export_revoked','credential_revoked','lifecycle_closed','selected_revoked_other_live','superseded','expired','product_leaf_lock','export_leaf_lock','disabled_duplicate','policy_drift_duplicate','delayed_insert')
 EXTRAS = ('db/opt-in-migrations/0023_causal_marker_bindings.sql', 'db/tests/causal_marker_bindings.sql',
           'scripts/test-postgres-causal-marker-binding.py','tests/fixtures/causal-marker-binding/test_driver.py')
-SOURCE_ONLY_MIGRATIONS = ('db/opt-in-migrations/0024_causal_live_profile.sql','db/opt-in-migrations/0025_historical_origin.sql','db/opt-in-migrations/0026_causal_evidence_enrollment.sql','db/opt-in-migrations/0027_causal_observer_inbox.sql','db/opt-in-migrations/0028_causal_receiver_enrollment.sql','db/opt-in-migrations/0029_causal_receiver_inbox.sql','db/opt-in-migrations/0030_causal_gateway_reader.sql','db/opt-in-migrations/0031_causal_edge_reconciliation.sql')
+SOURCE_ONLY_MIGRATIONS = ('db/opt-in-migrations/0024_causal_live_profile.sql','db/opt-in-migrations/0025_historical_origin.sql','db/opt-in-migrations/0026_causal_evidence_enrollment.sql','db/opt-in-migrations/0027_causal_observer_inbox.sql','db/opt-in-migrations/0028_causal_receiver_enrollment.sql','db/opt-in-migrations/0029_causal_receiver_inbox.sql','db/opt-in-migrations/0030_causal_gateway_reader.sql','db/opt-in-migrations/0031_causal_edge_reconciliation.sql','db/opt-in-migrations/0032_human_causal_reader.sql')
 SOURCES = GEN['SOURCES'] + EXTRAS + SOURCE_ONLY_MIGRATIONS
 
 

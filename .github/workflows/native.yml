@@ -191,7 +191,11 @@ jobs:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python3 -B scripts/test-postgres-causal-inbox.py
       - name: Test signed causal bridge qualification driver
-        run: python3 -B -m unittest discover -s tests/fixtures/causal-bridge -p 'test_bridge_driver.py'
+        run: |
+          python3 -B -m unittest discover -s tests/fixtures/causal-bridge -p 'test_bridge_driver.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-receiver-inbox -p 'test_driver.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-edge-reconciliation -p 'test_driver.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-gateway-reader -p 'test_fixture.py'
       - name: Qualify signed causal bridge through PostgreSQL TLS
         timeout-minutes: 16
         env:
