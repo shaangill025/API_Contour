@@ -105,7 +105,7 @@ fn supported_profile(name: &str, hash: &str) -> bool {
         || (name == "nodered_5_0_9_wire_v1"
             && hash == "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e")
         || (name == "nodered_5_0_9_receiver_v1"
-            && hash == "c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0")
+            && hash == "d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344")
 }
 
 /// Valid signature and checked grant data, not enrollment or capture authorization.
@@ -276,7 +276,7 @@ mod receiver_profile_tests {
 
     #[test]
     fn receiver_profile_is_fixed_and_separate_from_wire_and_artifact() {
-        let manifest = "c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0";
+        let manifest = "d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344";
         let artifact = "707e7b359fb757c668d8a22c999e067556b5f2a785f9c3333c12fca7debfa660";
         let wire = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
         assert!(supported_profile("nodered_5_0_9_receiver_v1", manifest));
@@ -308,7 +308,7 @@ mod receiver_profile_tests {
             .unwrap()
         };
         payload["profile_sha256"] =
-            json!("c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0");
+            json!("d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344");
         let checked = VerifiedCausalGrant::from_signed_json(&signed(&payload), &keys, now).unwrap();
         assert_eq!(checked.causal_profile(), "nodered_5_0_9_receiver_v1");
         payload["profile_sha256"] =

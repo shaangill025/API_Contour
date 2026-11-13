@@ -13,16 +13,16 @@ CREATE ROLE contour_causal_receiver_reader NOLOGIN INHERIT NOSUPERUSER NOBYPASSR
 SET LOCAL ROLE contour_owner;
 ALTER TABLE contour.causal_runtime_profiles
  DROP CONSTRAINT causal_runtime_profiles_profile_artifact_check,
- ADD CONSTRAINT causal_runtime_profiles_profile_artifact_check CHECK (((profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'))));
+ ADD CONSTRAINT causal_runtime_profiles_profile_artifact_check CHECK (((profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'))));
 ALTER TABLE contour.causal_runtime_bindings
  DROP CONSTRAINT causal_runtime_bindings_profile_artifact_check,
- ADD CONSTRAINT causal_runtime_bindings_profile_artifact_check CHECK (((profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'))));
+ ADD CONSTRAINT causal_runtime_bindings_profile_artifact_check CHECK (((profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile_id IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact_sha256 IS NOT DISTINCT FROM decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'))));
 CREATE OR REPLACE FUNCTION contour.register_causal_profile(t uuid,profile uuid,artifact bytea) RETURNS uuid
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE existing contour.causal_runtime_profiles;
 BEGIN
  PERFORM contour.begin_origin_operation(t);
- IF NOT ((profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact IS NOT DISTINCT FROM decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'))) THEN RAISE EXCEPTION 'profile unavailable' USING ERRCODE='23514'; END IF;
+ IF NOT ((profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact IS NOT DISTINCT FROM decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'))) THEN RAISE EXCEPTION 'profile unavailable' USING ERRCODE='23514'; END IF;
  SELECT * INTO existing FROM contour.causal_runtime_profiles WHERE tenant_id=t AND profile_id=profile;
  IF FOUND THEN
   IF existing.artifact_sha256=artifact AND existing.point_kind='node_in' AND existing.method='POST' AND existing.route='/run'
@@ -40,7 +40,7 @@ BEGIN
  PERFORM contour.begin_origin_operation(t);
  PERFORM contour.lock_origin_credential(leaf);
  PERFORM contour.lock_origin_collector(t,c);
- IF runtime IS NULL OR lifecycle IS NULL OR NOT ((profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact IS NOT DISTINCT FROM decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'))) THEN RAISE EXCEPTION 'runtime unavailable' USING ERRCODE='23514'; END IF;
+ IF runtime IS NULL OR lifecycle IS NULL OR NOT ((profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000501'::uuid AND artifact IS NOT DISTINCT FROM decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000503'::uuid AND artifact IS NOT DISTINCT FROM decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex')) OR (profile IS NOT DISTINCT FROM '00000000-0000-4000-8000-000000000504'::uuid AND artifact IS NOT DISTINCT FROM decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex'))) THEN RAISE EXCEPTION 'runtime unavailable' USING ERRCODE='23514'; END IF;
  IF NOT contour.causal_legacy_authorized(t,c,src,p,s,e,d,i) OR NOT EXISTS (
   SELECT 1 FROM contour.causal_runtime_profiles x WHERE x.tenant_id=t AND x.profile_id=profile AND x.artifact_sha256=artifact
    AND x.point_kind='node_in' AND x.method='POST' AND x.route='/run' AND x.technique='runtime' AND x.parser_profile='http_json_v1')
@@ -85,7 +85,7 @@ BEGIN
   AND b.artifact_sha256=x.profile_hash
   AND ((b.profile_id='00000000-0000-4000-8000-000000000501'::uuid AND x.profile_name='nodered_5_0_9_v1' AND x.profile_hash=decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'))
    OR (b.profile_id='00000000-0000-4000-8000-000000000503'::uuid AND x.profile_name='nodered_5_0_9_wire_v1' AND x.profile_hash=decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex'))
-   OR (b.profile_id='00000000-0000-4000-8000-000000000504'::uuid AND x.profile_name='nodered_5_0_9_receiver_v1' AND x.profile_hash=decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex')))
+   OR (b.profile_id='00000000-0000-4000-8000-000000000504'::uuid AND x.profile_name='nodered_5_0_9_receiver_v1' AND x.profile_hash=decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex')))
   AND b.enrolled_at<=now_at AND now_at>=contour.origin_history_highwater(x.tenant_id,x.lifecycle_id)
   AND now_at>=x.grant_issued AND now_at<x.grant_expires AND now_at>=x.policy_issued AND now_at<x.policy_expires
   AND contour.causal_legacy_authorized(x.tenant_id,x.collector_id,x.source_id,x.project_id,x.service_id,x.environment_id,x.deployment_id,x.instance_id)
@@ -202,7 +202,7 @@ BEGIN
   'lifecycle_id',x.lifecycle_id::text, 'policy_envelope_sha256',encode(sha256((s.claim).policy_envelope),'hex'),
   'policy_revision',trunc((s.claim).policy_revision)::text, 'product_credential_id',x.product_credential::text,
   'product_leaf_sha256',encode(x.product_leaf,'hex'), 'profile_id','00000000-0000-4000-8000-000000000504',
-  'profile_manifest_sha256','c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0',
+  'profile_manifest_sha256','d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344',
   'runtime_id',x.runtime_id::text, 'session_epoch',trunc(x.session_epoch)::text,
   'session_nonce',s.nonce::text, 'tenant_id',x.tenant_id::text, 'version',1)),'UTF8');
  IF octet_length(body) NOT BETWEEN 1 AND 4096 THEN RAISE EXCEPTION 'receiver encoding unavailable' USING ERRCODE='23514'; END IF;
@@ -233,7 +233,7 @@ BEGIN
   AND x.instance_id=b.instance_id AND x.lifecycle_id=b.lifecycle_id
   AND x.export_leaf=b.export_leaf_sha256 AND x.export_leaf=(s.claim).export_leaf
   AND b.profile_id='00000000-0000-4000-8000-000000000504'::uuid
-  AND b.artifact_sha256=decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex')
+  AND b.artifact_sha256=decode('d962370fac25f596deabe2a978893780d25426cb7b0bd0c4eb5dfb1737b4e344','hex')
   AND (s.claim).profile_name='nodered_5_0_9_receiver_v1'
   AND (s.claim).profile_hash=b.artifact_sha256
   AND at_time>=x.backend_not_before AND at_time<x.backend_not_after
