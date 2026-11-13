@@ -14,6 +14,10 @@ mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod batch_v2;
 pub use batch_v2::{BatchV2, BatchV2Record, OriginWitness};
+mod receiver_enrollment;
+pub use receiver_enrollment::{
+    MAX_RECEIVER_ENROLLMENT_BYTES, ReceiverEnrollment, ReceiverEnrollmentError,
+};
 mod causal_marker;
 pub use causal_marker::{
     CausalMarkerClaim, CausalMarkerError, CausalMarkerScope, CausalMarkerVerifier,
