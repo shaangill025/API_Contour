@@ -7,6 +7,7 @@ mod authority;
 mod catalog;
 mod catalog_reader;
 mod causal;
+mod causal_receiver_reader;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
@@ -39,6 +40,10 @@ pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
     CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
     CausalMarkerBinding, CausalReceipt, CausalSession, CausalWireProfile503,
+};
+pub use causal_receiver_reader::{
+    CausalReceiverObservation, CausalReceiverReadError, CausalReceiverReader,
+    CausalReceiverSelector,
 };
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
 pub use submit::{DurableReceipt, OriginIngress, ReceiptStatus, SubmitError, V2Ingress};
