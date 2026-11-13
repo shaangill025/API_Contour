@@ -62,40 +62,58 @@ class QualificationDriverTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): driver._wait_publication_intent(proof,setup_timeout=4,cancel=cancel)
         proof.publication_exec_ready.assert_not_called()
 
-    def test_reserved_candidate_never_counts_as_publisher_ack(self):
-        owner=mock.Mock(); owner.peer.envoy_cid='a'*64; owner._load.return_value={'pending':{'phase':'reserved'},'binding':{'envoy_started':'fixed'}}; owner.renew.side_effect=[ValueError('staging failed'),RuntimeError('blocked')]; owner.rollback.side_effect=RuntimeError('blocked')
-        with mock.patch.object(driver.products,'_command',return_value=b'a'*64),mock.patch.object(driver.products,'_objects',return_value={'State':{'Running':True,'Paused':True,'StartedAt':'fixed'}}):
-            with self.assertRaises(ValueError): driver._pause_and_reconcile(owner)
-        owner.reconcile.assert_not_called()
+    def test_preflight_failure_never_pauses_or_fabricates_stage(self):
+        owner=mock.Mock(); owner.peer.envoy_cid='a'*64; owner.peer.envoy_image_id='image'
+        owner._load.side_effect=[{'pending':None,'binding':{'envoy_started':'fixed'}},{'pending':None}]
+        owner.renew.side_effect=ValueError('managed gate failed')
+        original=owner._confirm
+        obj={'Id':'a'*64,'Image':'image','Config':{},'HostConfig':{},'Mounts':[],'State':{'StartedAt':'fixed'}}
+        with mock.patch.object(driver.products,'_command') as command,mock.patch.object(driver.products,'_objects',return_value=obj):
+            with self.assertRaisesRegex(ValueError,'staged publication missing'): driver._pause_and_reconcile(owner)
+        command.assert_not_called(); self.assertIs(owner._confirm,original); owner.reconcile.assert_not_called()
 
-    def test_staged_pending_requires_fresh_exact_publisher_ack(self):
+    def test_pause_occurs_after_ack_before_original_confirmation_and_unpause_before_pending_checks(self):
         import hashlib
-        for changed in (False,True):
-            with self.subTest(changed=changed):
-                owner=mock.Mock(); owner.peer.envoy_cid='a'*64
-                before={'pending':None,'binding':{'envoy_started':'fixed'}}; pending={'phase':'staged','candidate':'v-fixed','commitment':{'fixed':'value'}}
-                owner._load.side_effect=[before,{'pending':pending}]; owner._document.return_value=b'exact document'; owner.publisher.identity.return_value={'publisher':'exact'}
-                owner.renew.side_effect=[TimeoutError('unconfirmed'),RuntimeError('blocked')]; owner.rollback.side_effect=RuntimeError('blocked')
-                receipt={'sequence':2,'publisher':{'publisher':'exact'},'document_sha256':hashlib.sha256(b'exact document').hexdigest(),'nonce':'b'*32}
-                if changed: receipt['document_sha256']='0'*64
-                proof=mock.Mock(); proof.publication_ack.side_effect=[{'sequence':1},receipt]
-                with mock.patch.object(driver.products,'_command',return_value=b'a'*64),mock.patch.object(driver.products,'_objects',return_value={'State':{'Running':True,'Paused':True,'StartedAt':'fixed'}}):
-                    if changed:
-                        with self.assertRaises(ValueError): driver._pause_and_reconcile(owner,proof)
-                        owner.reconcile.assert_not_called()
-                    else:
-                        driver._pause_and_reconcile(owner,proof); owner.reconcile.assert_called_once()
+        from deploy.gateway.managed_edge import ManagedEdge
+        owner=mock.Mock(); owner.peer.envoy_cid='a'*64; owner.peer.envoy_image_id='image'; events=[]
+        before={'pending':None,'binding':{'envoy_started':'fixed'}}; pending={'phase':'staged','candidate':'v-fixed','commitment':{'fixed':'value'}}
+        owner._load.side_effect=[before,{'pending':pending}]; owner._document.return_value=b'exact document'; owner.publisher.identity.return_value={'publisher':'exact'}
+        original=owner._confirm; original.side_effect=lambda *a,**k:(events.append(('confirm',a,k)), (_ for _ in ()).throw(TimeoutError('not confirmed')))[1]
+        owner._publish.side_effect=lambda *a:events.append('ack')
+        data={'pending':pending,'binding':{'envoy_started':'fixed'},'current':'old','current_commitment':{}}
+        def renew():
+            if not events:
+                events.append('stage')
+                return ManagedEdge._publish_and_confirm(owner,data)
+            events.append('renew-block'); raise RuntimeError('pending')
+        owner.renew.side_effect=renew; owner.rollback.side_effect=lambda:(events.append('rollback-block'),(_ for _ in ()).throw(RuntimeError('pending')))[1]
+        receipt={'sequence':2,'publisher':{'publisher':'exact'},'document_sha256':hashlib.sha256(b'exact document').hexdigest(),'nonce':'b'*32}
+        proof=mock.Mock(); proof.publication_ack.side_effect=[{'sequence':1},receipt]
+        def command(args,*unused): events.append(args[1]); return b'a'*64
+        with mock.patch.object(driver.products,'_command',side_effect=command),mock.patch.object(driver.products,'_objects',return_value={'Id':'a'*64,'Image':'image','Config':{},'HostConfig':{},'Mounts':[],'State':{'Running':True,'Paused':True,'StartedAt':'fixed'}}):
+            driver._pause_and_reconcile(owner,proof)
+        self.assertEqual(events,['stage','ack','pause',('confirm',('v-fixed',{'fixed':'value'},{'envoy_started':'fixed'},'old',{}),{}),'unpause','renew-block','rollback-block'])
+        self.assertIs(owner._confirm,original); owner.reconcile.assert_called_once()
 
-    def test_unknown_pause_always_attempts_exact_unpause(self):
-        owner=mock.Mock(); owner.peer.envoy_cid='a'*64; calls=[]
-        def command(args,*unused):
-            calls.append(args)
-            if args[1]=='pause': raise TimeoutError('unknown')
-            return owner.peer.envoy_cid.encode()
-        with mock.patch.object(driver.products,'_command',side_effect=command):
-            with self.assertRaises(TimeoutError): driver._pause_and_reconcile(owner)
-        self.assertEqual(calls,[['docker','pause','a'*64],['docker','unpause','a'*64]])
-        owner.reconcile.assert_not_called()
+    def test_unknown_pause_and_changed_or_unknown_generation_never_unpauses(self):
+        for mode in ('pause_unknown','wrong_generation','inspect_unknown','config_changed'):
+            with self.subTest(mode=mode):
+                owner=mock.Mock(); owner.peer.envoy_cid='a'*64; owner.peer.envoy_image_id='image'; calls=[]; original=owner._confirm
+                owner._load.return_value={'pending':None,'binding':{'envoy_started':'fixed'}}
+                owner.renew.side_effect=lambda:owner._confirm('unchanged')
+                def command(args,*unused):
+                    calls.append(args)
+                    if args[1]=='pause' and mode in ('pause_unknown','inspect_unknown','config_changed'): raise TimeoutError('unknown')
+                    return owner.peer.envoy_cid.encode()
+                good={'Id':'a'*64,'Image':'image','Config':{},'HostConfig':{},'Mounts':[],'State':{'Running':True,'Paused':True,'StartedAt':'fixed'}}
+                bad={**good,'State':{'Running':True,'Paused':True,'StartedAt':'wrong'}}
+                reads=[good,bad,bad] if mode=='wrong_generation' else [good,RuntimeError('inspect unknown') if mode=='inspect_unknown' else ({**good,'Config':{'changed':True}} if mode=='config_changed' else good)]
+                with mock.patch.object(driver.products,'_command',side_effect=command),mock.patch.object(driver.products,'_objects',side_effect=reads):
+                    with self.assertRaises(BaseException): driver._pause_and_reconcile(owner)
+                expected=[['docker','pause','a'*64]]
+                if mode=='pause_unknown': expected.append(['docker','unpause','a'*64])
+                self.assertEqual(calls,expected)
+                self.assertIs(owner._confirm,original); original.assert_not_called(); owner.reconcile.assert_not_called()
 
     def test_unexpected_renewal_and_watcher_failures_are_both_retained(self):
         import tempfile
