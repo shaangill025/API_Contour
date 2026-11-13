@@ -366,6 +366,76 @@ impl SessionProfile {
     }
 }
 
+/// Receiver-only session data. It is not a deployment, peer, or permit proof.
+/// The inner session is private and cannot be passed to legacy session APIs.
+/// ```compile_fail
+/// use contour_postgres::{CausalReceiverSession504, CausalSession};
+/// fn legacy(_: &CausalSession) {}
+/// fn receiver(value: &CausalReceiverSession504) { legacy(value); }
+/// ```
+pub struct CausalReceiverSession504 {
+    session: CausalSession,
+}
+/// Borrowed receiver data tied to its issued session; not authority.
+/// ```compile_fail
+/// use contour_postgres::CausalReceiverProfile504;
+/// let _value = CausalReceiverProfile504 { session: todo!() };
+/// ```
+/// ```compile_fail
+/// use contour_postgres::CausalReceiverSession504;
+/// fn no_mutation_while_borrowed(session: &mut CausalReceiverSession504) {
+///     let view = session.receiver_profile_504().unwrap();
+///     let _mutable = &mut *session;
+///     println!("{}", view.epoch());
+/// }
+/// ```
+pub struct CausalReceiverProfile504<'a> {
+    session: &'a CausalSession,
+}
+impl CausalReceiverSession504 {
+    pub fn receiver_profile_504(&self) -> Option<CausalReceiverProfile504<'_>> {
+        (self.session.profile == SessionProfile::Candidate504
+            && !self.session.verified_remaining().is_zero())
+        .then_some(CausalReceiverProfile504 {
+            session: &self.session,
+        })
+    }
+}
+impl fmt::Debug for CausalReceiverSession504 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CausalReceiverSession504")
+    }
+}
+impl CausalReceiverProfile504<'_> {
+    pub fn tenant_id(&self) -> &str {
+        &self.session.issue.binding.ids[0]
+    }
+    pub fn runtime_id(&self) -> &str {
+        &self.session.issue.binding.ids[1]
+    }
+    pub fn nonce(&self) -> &str {
+        &self.session.issue.nonce
+    }
+    pub fn epoch(&self) -> u64 {
+        self.session.epoch
+    }
+    pub fn profile_id(&self) -> &'static str {
+        "00000000-0000-4000-8000-000000000504"
+    }
+    pub fn profile_name(&self) -> &'static str {
+        RECEIVER_PROFILE
+    }
+    pub fn profile_sha256(&self) -> &'static str {
+        RECEIVER_MANIFEST
+    }
+    pub fn verified_until(&self) -> Instant {
+        self.session.verified_until
+    }
+    pub fn verified_remaining(&self) -> Duration {
+        self.session.verified_remaining()
+    }
+}
+
 /// Created only after confirmed SQL commit. It retains the exact authenticated
 /// envelopes and original input in memory; it cannot be deserialized from a journal.
 pub struct CausalSession {
@@ -725,9 +795,22 @@ fn receipt(row: &Row) -> Result<CausalReceipt, CausalError> {
 
 const ISSUE_SQL: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_v1',decode('b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
 const ISSUE_SQL_WIRE: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_wire_v1',decode('a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
+const ISSUE_SQL_RECEIVER: &str = "SELECT epoch::text,floor(extract(epoch FROM issued_at)*1000000)::bigint,floor(extract(epoch FROM expires_at)*1000000)::bigint FROM contour.issue_causal_session(ROW($1::text::uuid,$2::text::uuid,$3::text::uuid,$4::text::uuid,$5::text::uuid,$6::text::uuid,$7::text::uuid,$8::text::uuid,$9::text::uuid,$10::text::uuid,$11::bytea,'nodered_5_0_9_receiver_v1',decode('af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d','hex'),$12::text::uuid,$13::text::numeric,$14::bytea,$15::text::timestamptz,$16::text::timestamptz,$17::text::numeric,$18::bytea,$19::text::timestamptz,$20::text::timestamptz,$21::bigint,$22::bigint,$23::bigint,$24::bigint,$25::bigint)::contour.causal_session_claim)";
 
 // 504 data may be parsed, but generic session issuance remains closed until
 // a separately qualified opaque receiver factory establishes its prerequisites.
+#[derive(Clone, Copy)]
+enum IssueMode {
+    Generic,
+    Receiver504,
+}
+fn issue_statement(mode: IssueMode, profile: SessionProfile) -> Result<&'static str, CausalError> {
+    match mode {
+        IssueMode::Generic => issue_sql(profile),
+        IssueMode::Receiver504 if profile == SessionProfile::Candidate504 => Ok(ISSUE_SQL_RECEIVER),
+        IssueMode::Receiver504 => Err(CausalError::Identity),
+    }
+}
 fn issue_sql(profile: SessionProfile) -> Result<&'static str, CausalError> {
     match profile {
         SessionProfile::Legacy501 => Ok(ISSUE_SQL),
@@ -1120,6 +1203,46 @@ impl CausalIssuer {
         policy_keys: &PolicyKeys,
         deadline: Instant,
     ) -> Result<CausalSession, CausalError> {
+        self.issue_profile_until(
+            request,
+            peer,
+            grant_keys,
+            policy_keys,
+            deadline,
+            IssueMode::Generic,
+        )
+        .await
+    }
+    /// Issue receiver-only signed/database scope. Deployment and peer proof are separate.
+    pub async fn issue_receiver_504_until(
+        &mut self,
+        request: &CausalIssue,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<CausalReceiverSession504, CausalError> {
+        let session = self
+            .issue_profile_until(
+                request,
+                peer,
+                grant_keys,
+                policy_keys,
+                deadline,
+                IssueMode::Receiver504,
+            )
+            .await?;
+        Ok(CausalReceiverSession504 { session })
+    }
+    async fn issue_profile_until(
+        &mut self,
+        request: &CausalIssue,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+        mode: IssueMode,
+    ) -> Result<CausalSession, CausalError> {
         let deadline = deadline.min(Instant::now() + self.connection.deadline);
         check_deadline(deadline)?;
         if request.binding.peer != *peer {
@@ -1127,7 +1250,6 @@ impl CausalIssuer {
         }
         let mut guard = CancellationGuard::arm(&mut self.connection);
         let mut committing = false;
-        let mut accepted = None;
         let work = async {
             let client = guard
                 .connection
@@ -1151,7 +1273,7 @@ impl CausalIssuer {
                 let now = clock(&tx).await?;
                 let (grant, policy) = verify(request, peer, grant_keys, policy_keys, now)?;
                 let profile = SessionProfile::from_verified(&grant)?;
-                let issue_statement = issue_sql(profile)?;
+                let issue_statement = issue_statement(mode, profile)?;
                 let g_start = pg_time(grant.issued_at(), true)?;
                 let g_end = pg_time(grant.expires_at(), false)?;
                 let p_start = pg_time(policy.issued_at(), true)?;
@@ -1242,11 +1364,15 @@ impl CausalIssuer {
                 Ok(session) => {
                     committing = true;
                     tx.commit().await.map_err(|_| CausalError::OutcomeUnknown)?;
-                    accepted = Some(session);
-                    empty_context(client).await?;
-                    check_deadline(deadline)?;
+                    empty_context(client)
+                        .await
+                        .map_err(|_| CausalError::OutcomeUnknown)?;
+                    check_deadline(deadline).map_err(|_| CausalError::OutcomeUnknown)?;
+                    if Instant::now() >= session.verified_until {
+                        return Err(CausalError::OutcomeUnknown);
+                    }
                     guard.confirm();
-                    Ok(())
+                    Ok(session)
                 }
                 Err(e) => {
                     tx.rollback().await.map_err(|_| CausalError::Database)?;
@@ -1261,13 +1387,9 @@ impl CausalIssuer {
                 }
             }
         };
-        let result = timeout_at(deadline, work).await;
-        if let Some(session) = accepted {
-            return Ok(session);
-        }
-        match result {
-            Ok(Ok(())) => Err(CausalError::Database),
-            Ok(Err(e)) => Err(e),
+        match timeout_at(deadline, work).await {
+            Ok(Err(_)) if committing => Err(CausalError::OutcomeUnknown),
+            Ok(result) => result,
             Err(_) if committing => Err(CausalError::OutcomeUnknown),
             Err(_) => Err(CausalError::Deadline),
         }
@@ -1864,6 +1986,56 @@ mod tests {
             issue_sql(SessionProfile::Candidate504),
             Err(CausalError::Identity)
         ));
+    }
+
+    #[test]
+    fn receiver_dispatch_and_view_stay_separate() {
+        assert_eq!(
+            issue_statement(IssueMode::Receiver504, SessionProfile::Candidate504),
+            Ok(ISSUE_SQL_RECEIVER)
+        );
+        for profile in [SessionProfile::Legacy501, SessionProfile::Candidate503] {
+            assert_eq!(
+                issue_statement(IssueMode::Receiver504, profile),
+                Err(CausalError::Identity)
+            );
+        }
+        assert_eq!(
+            issue_statement(IssueMode::Generic, SessionProfile::Candidate504),
+            Err(CausalError::Identity)
+        );
+        let v = fixture();
+        let mut value = CausalReceiverSession504 {
+            session: session(request(&v, "grant", "policy")),
+        };
+        value.session.profile = SessionProfile::Candidate504;
+        value.session.verified_until = Instant::now() + Duration::from_secs(10);
+        let view = value.receiver_profile_504().unwrap();
+        assert_eq!(
+            (
+                view.tenant_id(),
+                view.runtime_id(),
+                view.epoch(),
+                view.profile_id(),
+                view.profile_name(),
+                view.profile_sha256()
+            ),
+            (
+                ID,
+                ID,
+                u64::MAX,
+                "00000000-0000-4000-8000-000000000504",
+                RECEIVER_PROFILE,
+                RECEIVER_MANIFEST
+            )
+        );
+        assert!(value.session.wire_profile_503().is_none());
+        assert!(!value.session.is_legacy_intent_profile());
+        value.session.verified_until = Instant::now();
+        assert!(value.receiver_profile_504().is_none());
+        value.session.profile = SessionProfile::Candidate503;
+        value.session.verified_until = Instant::now() + Duration::from_secs(10);
+        assert!(value.receiver_profile_504().is_none());
     }
 
     #[test]

@@ -39,7 +39,8 @@ pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
     CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
-    CausalMarkerBinding, CausalReceipt, CausalSession, CausalWireProfile503,
+    CausalMarkerBinding, CausalReceipt, CausalReceiverProfile504, CausalReceiverSession504,
+    CausalSession, CausalWireProfile503,
 };
 pub use causal_receiver_reader::{
     CausalReceiverObservation, CausalReceiverReadError, CausalReceiverReader,
