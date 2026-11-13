@@ -5,10 +5,16 @@ const {performance}=require('node:perf_hooks');
 const {randomBytes}=require('node:crypto');
 const {decode}=require('../causal-evidence-codec');
 const MAX_U64=(1n<<64n)-1n;
+// Logical serialized-copy ledger, excluding V8, TLS and kernel heaps:
+// Fact selection/recheck: retained canonical + send buffer, plus at most
+// JSON source, encoded source, decoded text and recanonicalized text (6 x 4096).
+// Receipt verification: retained chunks, concatenation, decoded text and
+// JSON.stringify comparison can coexist (4 x 1024). Reserve both peaks together.
+const FLIGHT_BYTES=6*4096+4*1024;
 function create({base,authority,tenantId,runtimeId,epoch,queueTtlMs,clock=()=>performance.now()}) {
  if(typeof tenantId!=='string'||typeof runtimeId!=='string'||!base||!['offer','gate','freeze','ack','close'].every(k=>typeof base[k]==='function')||typeof authority!=='function'||typeof clock!=='function'||typeof epoch!=='bigint'||epoch<1n||epoch>MAX_U64||!Number.isSafeInteger(queueTtlMs)||queueTtlMs<1||queueTtlMs>86400000)throw Error('unsupported root handoff');
- let closed=false,busy=false,bytes=0,frozen;const entries=new Map(),roots=new Map(),tombstones=new Map();
- function close(){closed=true;entries.clear();roots.clear();tombstones.clear();bytes=0;frozen=undefined;try{base.close();}catch(_){}}
+ let closed=false,busy=false,bytes=0,frozen,flight;const entries=new Map(),roots=new Map(),tombstones=new Map();
+ function close(){closed=true;entries.clear();roots.clear();tombstones.clear();bytes=flight?FLIGHT_BYTES:0;frozen=undefined;try{base.close();}catch(_){}}
  function current(){
   if(closed)return false;
   try {const now=clock(),a=authority();return Number.isFinite(now)&&a&&a.allowed===true&&a.epoch===epoch&&Number.isFinite(a.deadline)&&now<a.deadline&&base.gate()===true;}catch(_){return false;}
@@ -73,9 +79,34 @@ function create({base,authority,tenantId,runtimeId,epoch,queueTtlMs,clock=()=>pe
   const result=fact(e);entries.delete(ticket);if(roots.get(e.root)===ticket)roots.delete(e.root);bytes-=e.charge;return result;
  },undefined);}
  function peek(){return run(()=>{for(const [ticket,e] of entries)if(e.state==='committed')return Object.freeze({ticket,fact:fact(e),deadline:e.deadline});return undefined;},undefined);}
+ // Reserve before materializing any sender-owned serialized representation.
+ // Cancellation/expiry/close never release these bytes while a sender holds them.
+ function reserveFlight(){return run(()=>{
+  if(flight||bytes+FLIGHT_BYTES>32768)return undefined;
+  for(const [ticket,e] of entries)if(e.state==='committed'){
+   const token=Object.freeze({});flight={token,ticket,deadline:e.deadline};bytes+=FLIGHT_BYTES;return token;
+  }
+  return undefined;
+ },undefined);}
+ function readFlight(token){return run(()=>{
+  if(!flight||flight.token!==token)return undefined;
+  const e=entries.get(flight.ticket);if(!e||e.state!=='committed'||e.deadline!==flight.deadline)return undefined;
+  return Object.freeze({ticket:flight.ticket,fact:fact(e),deadline:e.deadline});
+ },undefined);}
+ function settleFlight(token,ticket,canonical,digest,live){return run(()=>{
+  if(!flight||flight.token!==token||flight.ticket!==ticket||typeof canonical!=='string'||typeof digest!=='string'||typeof live!=='function')return false;
+  const e=entries.get(ticket);if(!e||e.state!=='committed'||e.deadline!==flight.deadline)return false;
+  const result=fact(e);if(result.canonical!==canonical||result.sha256!==digest)return false;
+  if(live()!==true||!current()||clock()>=flight.deadline)return false;
+  entries.delete(ticket);if(roots.get(e.root)===ticket)roots.delete(e.root);bytes-=e.charge;return true;
+ },false);}
+ function releaseFlight(token){
+  if(busy||!flight||flight.token!==token)return false;
+  flight=undefined;bytes-=FLIGHT_BYTES;return true;
+ }
  const producer=Object.freeze({prepare,root,offerRoot,cancel});
  const exporter=Object.freeze({gate:()=>run(()=>true,false),freeze,ack});
- const outbox=Object.freeze({drain,peek,cancel});
+ const outbox=Object.freeze({drain,peek,cancel,reserveFlight,readFlight,settleFlight,releaseFlight});
  return Object.freeze({producer,exporter,outbox,close});
 }
 module.exports=Object.freeze({create});

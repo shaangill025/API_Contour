@@ -1,6 +1,6 @@
 'use strict';
 // Nonsecret fixture-only process; does not launch the proxy or confer authority.
-const allowed=['FLOWS','HOME','HOSTNAME','LANG','NODE_PATH','NODE_RED_VERSION','NODE_VERSION','PATH','TZ','YARN_VERSION'];
+const allowed=['FLOWS','HOME','HOSTNAME','LANG','NODE_PATH','NODE_RED_VERSION','NODE_VERSION','PATH','TZ','UV_USE_IO_URING','YARN_VERSION'];
 // Bit positions follow these fixed lists; values are never inspected or emitted.
 const knownExtra=['_','QEMU_EXECVE','QEMU_LD_PREFIX','ROSETTA_ADVERTISE_AVX','ROSETTA_LD_LIBRARY_PATH','LD_PRELOAD','LD_LIBRARY_PATH'];
 const names=Object.keys(process.env),extras=names.filter(k=>!allowed.includes(k));

@@ -61,8 +61,8 @@ function load(d){
  const treeBytes=read(tree.path,8388608);if(hash(treeBytes)!==tree.sha256)throw Error('tree mismatch');let treeManifest;try{treeManifest=JSON.parse(treeBytes.toString('utf8'));}catch(_){throw Error('tree');}
  shared.validateTree('/usr/src/node-red/node_modules',treeManifest,limits);
  if(process.execPath!==NODE||JSON.stringify(process.argv)!=='["/usr/local/bin/node","/adapter/receiver-integration/live-main-504.js"]'||process.execArgv.length)throw Error('launch mismatch');
- const allowed=['FLOWS','HOME','HOSTNAME','LANG','NODE_PATH','NODE_RED_VERSION','NODE_VERSION','PATH','TZ','YARN_VERSION'];
- if(!record(m.env,allowed)||Object.keys(process.env).sort().join(',')!==allowed.join(',')||allowed.some(k=>typeof m.env[k]!=='string'||process.env[k]!==m.env[k])||process.env.FLOWS!=='flows.json'||process.env.HOME!=='/data'||process.env.NODE_PATH!=='/usr/src/node-red/node_modules'||process.env.NODE_VERSION!==m.node||process.env.NODE_RED_VERSION!=='v5.0.9')throw Error('launch mismatch');
+ const allowed=['FLOWS','HOME','HOSTNAME','LANG','NODE_PATH','NODE_RED_VERSION','NODE_VERSION','PATH','TZ','UV_USE_IO_URING','YARN_VERSION'];
+ if(!record(m.env,allowed)||Object.keys(process.env).sort().join(',')!==allowed.join(',')||allowed.some(k=>typeof m.env[k]!=='string'||process.env[k]!==m.env[k])||process.env.UV_USE_IO_URING!=='0'||process.env.FLOWS!=='flows.json'||process.env.HOME!=='/data'||process.env.NODE_PATH!=='/usr/src/node-red/node_modules'||process.env.NODE_VERSION!==m.node||process.env.NODE_RED_VERSION!=='v5.0.9')throw Error('launch mismatch');
  const material={};for(const [name,path] of Object.entries(MOUNTS))material[name]=read(path,65536,name.endsWith('_key'));
  if(hash(material.ca)!==d.ca_sha256||hash(read('/data/flows.json',4194304))!==m.flow_sha256)throw Error('material mismatch');
  return {manifest:m,material,treeManifest};

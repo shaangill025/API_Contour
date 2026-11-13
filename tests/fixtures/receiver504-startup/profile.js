@@ -15,3 +15,15 @@ assert.throws(()=>profile.validateManifest(raw,{...descriptor,manifest_sha256:'0
 assert.throws(()=>profile.binarySpec('other'));
 assert.match(fs.readFileSync(path.join(__dirname,'../../../collectors/nodered/receiver-integration/live-main-504.js'),'utf8'),/module\.exports=Object\.freeze\(\{\}\)/);
 console.log('receiver 504 source profile offline tests passed');
+// Exercise the actual closed environment predicates, with synthetic process state.
+{
+ const vm=require('node:vm'),dir=path.join(__dirname,'../../../collectors/nodered/receiver-integration');
+ const profileSource=fs.readFileSync(path.join(dir,'private-profile-504.js'),'utf8');
+ const profileGuard=profileSource.match(/const allowed=\[[^\n]+\];\n if\([^\n]+throw Error\('launch mismatch'\);/)[0];
+ const proxySource=fs.readFileSync(path.join(dir,'private-launch-proxy-504.js'),'utf8');
+ const proxyGuard=proxySource.match(/const allowed=\[[^\n]+\];\n if\([^\n]+\{process.exitCode=1;return;\}/)[0];
+ function checks(env){const process={env,stdin:{},stdout:{},stderr:{},execPath:'/usr/local/bin/node',argv:['/usr/local/bin/node','/adapter/receiver-integration/private-launch-proxy-504.js'],execArgv:[]};let profileOk=true;try{vm.runInNewContext(`(function(){${profileGuard}})()`,{process,m,record:(x,keys)=>Object.keys(x).join(',')===keys.join(',')});}catch(_){profileOk=false;}vm.runInNewContext(`(function(){${proxyGuard}})()`,{process});return [profileOk,process.exitCode!==1];}
+ const env={...m.env};assert.deepEqual(checks(env),[true,true]);
+ const oldKeys=Object.keys(env).filter(k=>k!=='UV_USE_IO_URING');assert.notEqual(Object.keys(env).sort().join(','),oldKeys.sort().join(','));
+ for(const bad of [{...env,UV_USE_IO_URING:'1'},Object.fromEntries(Object.entries(env).filter(([k])=>k!=='UV_USE_IO_URING')),{...env,UNKNOWN_EXTRA:'0'}])assert.deepEqual(checks(bad),[false,false]);
+}
