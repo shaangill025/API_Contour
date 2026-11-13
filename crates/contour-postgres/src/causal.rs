@@ -378,6 +378,12 @@ impl SessionProfile {
 /// fn legacy(_: &CausalSession) {}
 /// fn receiver(value: &CausalReceiverSession504) { legacy(value); }
 /// ```
+/// ```compile_fail
+/// use contour_postgres::CausalReceiverSession504;
+/// fn wire(value: &CausalReceiverSession504) {
+///     let _ = value.wire_profile_503();
+/// }
+/// ```
 pub struct CausalReceiverSession504 {
     session: CausalSession,
 }
@@ -886,6 +892,32 @@ impl Drop for MarkerSessionGuard<'_> {
     }
 }
 
+/// Trusted marker inputs for a receiver-only binding operation.
+pub struct CausalReceiverMarkerInputs504<'a> {
+    pub generation: &'a [u8; 32],
+    pub product_credential_id: &'a str,
+    pub product_leaf: &'a [u8; 32],
+    pub public_key: &'a [u8; 32],
+    pub peer: &'a [u8; 32],
+    pub grant_keys: &'a CausalGrantKeys,
+    pub policy_keys: &'a PolicyKeys,
+}
+
+fn receiver_owner_entry_check(
+    session: &CausalSession,
+    peer: &[u8; 32],
+    deadline: Instant,
+) -> Result<(), CausalError> {
+    check_deadline(deadline)?;
+    if session.profile != SessionProfile::Candidate504 || !session.matches_peer(peer) {
+        return Err(CausalError::Identity);
+    }
+    if session.verified_remaining().is_zero() {
+        return Err(CausalError::Expired);
+    }
+    Ok(())
+}
+
 /// Dedicated provisioner connection. The selected credential and public key
 /// are trusted operator inputs; database state is rechecked under locks.
 pub struct CausalMarkerBinder {
@@ -960,6 +992,38 @@ impl CausalMarkerBinder {
             )
             .await;
         session_guard.succeeded = result.is_ok();
+        result
+    }
+    /// Bind receiver session data within the original session and caller deadlines.
+    /// This receipt does not grant deployment authority.
+    pub async fn bind_receiver_504_until(
+        &mut self,
+        session: &mut CausalReceiverSession504,
+        inputs: CausalReceiverMarkerInputs504<'_>,
+        deadline: Instant,
+    ) -> Result<CausalMarkerBinding, CausalError> {
+        let mut guard = MarkerSessionGuard {
+            session: &mut session.session,
+            succeeded: false,
+        };
+        receiver_owner_entry_check(guard.session, inputs.peer, deadline)?;
+        let deadline = deadline
+            .min(guard.session.verified_until)
+            .min(Instant::now() + self.connection.deadline);
+        let result = self
+            .bind_checked(
+                guard.session,
+                inputs.generation,
+                inputs.product_credential_id,
+                inputs.product_leaf,
+                inputs.public_key,
+                inputs.peer,
+                inputs.grant_keys,
+                inputs.policy_keys,
+                deadline,
+            )
+            .await;
+        guard.succeeded = result.is_ok();
         result
     }
     #[allow(clippy::too_many_arguments)]
@@ -1199,6 +1263,36 @@ impl CausalIssuer {
                 Err(error)
             }
         }
+    }
+    /// Claim a generation for receiver-only session data. Cancellation and any
+    /// failed or ambiguous outcome invalidate the session.
+    pub async fn claim_receiver_generation_504_until(
+        &mut self,
+        session: &mut CausalReceiverSession504,
+        generation: &[u8; 32],
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<(), CausalError> {
+        let mut guard = MarkerSessionGuard {
+            session: &mut session.session,
+            succeeded: false,
+        };
+        receiver_owner_entry_check(guard.session, peer, deadline)?;
+        let deadline = deadline.min(guard.session.verified_until);
+        let result = self
+            .claim_generation_until(
+                guard.session,
+                generation,
+                peer,
+                grant_keys,
+                policy_keys,
+                deadline,
+            )
+            .await;
+        guard.succeeded = result.is_ok();
+        result
     }
     pub async fn issue_until(
         &mut self,
@@ -2172,6 +2266,49 @@ mod tests {
         );
         assert_eq!(
             inbox_entry_check(&session, &other_peer, Instant::now()),
+            Err(CausalError::Deadline)
+        );
+    }
+
+    #[test]
+    fn receiver_owner_guard_and_entry_enforce_scope_and_freshness() {
+        let v = fixture();
+        let mut value = session(request(&v, "grant", "policy"));
+        value.verified_until = Instant::now() + Duration::from_secs(10);
+        let peer = value.issue.binding.peer;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(
+            receiver_owner_entry_check(&value, &peer, deadline),
+            Err(CausalError::Identity)
+        );
+        value.profile = SessionProfile::Candidate504;
+        let mut wrong = peer;
+        wrong[0] ^= 1;
+        assert_eq!(
+            receiver_owner_entry_check(&value, &wrong, deadline),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(receiver_owner_entry_check(&value, &peer, deadline), Ok(()));
+        {
+            let _guard = MarkerSessionGuard {
+                session: &mut value,
+                succeeded: false,
+            };
+        }
+        assert_eq!(
+            receiver_owner_entry_check(&value, &peer, deadline),
+            Err(CausalError::Expired)
+        );
+        value.verified_until = Instant::now() + Duration::from_secs(10);
+        {
+            let _guard = MarkerSessionGuard {
+                session: &mut value,
+                succeeded: true,
+            };
+        }
+        assert_eq!(receiver_owner_entry_check(&value, &peer, deadline), Ok(()));
+        assert_eq!(
+            receiver_owner_entry_check(&value, &peer, Instant::now()),
             Err(CausalError::Deadline)
         );
     }
