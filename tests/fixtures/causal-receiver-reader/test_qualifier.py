@@ -32,9 +32,9 @@ class Boundaries(unittest.TestCase):
             if change=='privileged': x['HostConfig']['Privileged']=True
             with self.subTest(change=change),self.assertRaises(ValueError): q.validate_container(x,T,C,I,N,['postgres'],['ONE=1'],START)
     def test_network_requires_exact_no_masquerade_bridge(self):
-        network={'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':{'com.docker.network.bridge.enable_ip_masquerade':'false'},'Labels':{q.LABEL:T},'Containers':{}}
+        network={'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':dict(q.NETWORK_OPTIONS),'Labels':{q.LABEL:T},'Containers':{}}
         q.validate_network(network,T,N,[])
-        for field,value in [('Internal',True),('Driver','host'),('Options',{}),('Options',{'com.docker.network.bridge.enable_ip_masquerade':'true'})]:
+        for field,value in [('Internal',True),('Driver','host'),('Options',{}),('Options',{**q.NETWORK_OPTIONS,'com.docker.network.bridge.enable_ip_masquerade':'true'}),('Options',{**q.NETWORK_OPTIONS,'com.docker.network.enable_ipv4':'false'}),('Options',{**q.NETWORK_OPTIONS,'com.docker.network.enable_ipv6':'true'}),('Options',{**q.NETWORK_OPTIONS,'unknown':'false'}),('Options',{k:v for k,v in q.NETWORK_OPTIONS.items() if k!='com.docker.network.enable_ipv4'})]:
             bad=copy.deepcopy(network);bad[field]=value
             with self.subTest(field=field,value=value),self.assertRaises(ValueError):q.validate_network(bad,T,N,[])
         wildcard=sample();wildcard['HostConfig']['PortBindings']['5432/tcp'][0]['HostIp']='0.0.0.0'
@@ -76,7 +76,7 @@ class Boundaries(unittest.TestCase):
                     if self.oom_drift: x['HostConfig']['OomKillDisable']=None
                     if self.type_drift: x['Config']['Nested']['flag']=1
                     return json.dumps([x]).encode()
-                return json.dumps([{'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':{'com.docker.network.bridge.enable_ip_masquerade':'false'},'Labels':{q.LABEL:T},'Containers':{C:{}}}]).encode()
+                return json.dumps([{'Id':N,'Name':NAME,'Internal':False,'Driver':'bridge','Options':dict(q.NETWORK_OPTIONS),'Labels':{q.LABEL:T},'Containers':{C:{}}}]).encode()
             def check(self): pass
         source=object();tool=Tool();fixture={'clean_head':lambda _: 'head','tracked_snapshot':lambda _: {'source':'hash'}}
         fence=q.OwnershipFence(tool,fixture,source,Output(),'head',{'source':'hash'},T,C,I,N,['postgres'],['ONE=1'],START,{k:sample().get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')})
