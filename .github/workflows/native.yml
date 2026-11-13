@@ -86,12 +86,17 @@ jobs:
           python3 -B -m unittest discover -s tests/fixtures/node243-qualification -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/node243-archive -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/causal-receiver-nodered -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/receiver504-actual -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-receiver-enrollment -p 'test_*.py'
+          python3 -B -m unittest discover -s tests/fixtures/causal-receiver-reader -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/docker-metadata -p 'test_*.py'
           python3 -B -m unittest discover -s tests/fixtures/qualification-git -p 'test_*.py'
           node tests/fixtures/causal-receiver-nodered/test_diagnostics.js
           node tests/fixtures/receiver504-bootstrap/test.js
           node tests/fixtures/receiver504-permit/test.js
           node tests/fixtures/receiver504-profile/test.js
+          node tests/fixtures/receiver504-exporter/test.js
+          node tests/fixtures/receiver504-actual/test_parent.js
           node tests/fixtures/receiver504-startup/entrypoint.js
           node tests/fixtures/receiver504-startup/composition.js
           node tests/fixtures/receiver504-startup/outbox.js
