@@ -88,6 +88,21 @@ class Framing(unittest.TestCase):
             with self.assertRaises(TimeoutError): m._Stream(r,time.monotonic()-1).read(1)
         finally: os.close(r); os.close(w)
 
+    def test_exact_exec_inspection_is_fresh_typed_get(self):
+        route = m._route(['docker','inspect','--type','exec',IDENT])
+        self.assertEqual(route,'/v1.56/exec/'+IDENT+'/json')
+        payload=b'{"Running":true,"ContainerID":"'+IDENT.encode()+b'"}'
+        value,request=exchange(http(payload,b'Content-Length: '+str(len(payload)).encode()+b'\r\n'),route)
+        self.assertIs(value['Running'],True)
+        self.assertEqual(value['ContainerID'],IDENT)
+        self.assertTrue(request.startswith(('GET '+route+' HTTP/1.1\r\n').encode()))
+        for argv in (['docker','inspect','--type','exec',IDENT[:12]],
+                     ['docker','inspect','--type','exec',IDENT+'?x=1'],
+                     ['docker','inspect','--type','container',IDENT],
+                     ['docker','inspect','--type','exec',IDENT,IDENT],
+                     ['docker','exec','inspect',IDENT]):
+            self.assertIsNone(m._route(argv))
+
     def test_strict_routes(self):
         for argv in (['docker','inspect',IDENT], ['docker','container','inspect',IDENT],
                      ['docker','network','inspect',IDENT], ['docker','image','inspect','sha256:'+IDENT]):
@@ -314,6 +329,22 @@ class Integration(unittest.TestCase):
             self.assertEqual(run.call_args.args[0],['/original/docker','inspect',IDENT])
             self.assertEqual(run.call_args.kwargs['deadline'],17)
             self.assertNotIn('DOCKER_CONFIG',run.call_args.kwargs['env'])
+
+    def test_exec_route_is_opt_in_and_each_read_is_fresh(self):
+        from deploy.local import docker_metadata as bound, origin21_products as products
+        args=['docker','inspect','--type','exec',IDENT]
+        with patch.object(products.shutil,'which',return_value='/original/docker'), \
+             patch.object(products.origin21_transport,'_run',return_value='ordinary') as run:
+            self.assertEqual(products._command(args),b'ordinary')
+            self.assertEqual(run.call_args.args[0],['/original/docker',*args[1:]])
+        pool=bound._Pool(None,Path('/private/config')); token=bound._ACTIVE.set(pool)
+        try:
+            with patch.object(bound,'Session',self.FakeSession), patch.object(products.origin21_transport,'_run') as run:
+                first=json.loads(products._command(args)); second=json.loads(products._command(args))
+                self.assertNotEqual(first,second); self.assertEqual(self.FakeSession.created[0].calls,2)
+                run.assert_not_called()
+        finally:
+            bound._ACTIVE.reset(token); pool.close()
 
     def test_scoped_supported_fresh_and_unsupported_preserves_timeout_environment(self):
         from deploy.local import docker_metadata as bound, origin21_products as products
