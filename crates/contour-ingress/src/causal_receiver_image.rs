@@ -674,21 +674,14 @@ mod probe_output_tests {
             .is_err()
         );
         assert!(ProbeOutput::parse(format!("{valid} {{}}").as_bytes(), true, &selected).is_err());
-        assert!(
-            ProbeOutput::parse(
-                valid
-                    .replace(&format!("sha256:{hash}\"}}"), "sha256:bad\"}")
-                    .as_bytes(),
-                true,
-                &selected
-            )
-            .is_err()
-        );
         let mut value: serde_json::Value = serde_json::from_str(&valid).unwrap();
         value["candidate_config"] = "sha256:bad".into();
         assert!(ProbeOutput::parse(&serde_json::to_vec(&value).unwrap(), true, &selected).is_err());
         value["candidate_config"] = format!("sha256:{hash}").into();
         value["base_history_sha256"] = "bad".into();
+        assert!(ProbeOutput::parse(&serde_json::to_vec(&value).unwrap(), true, &selected).is_err());
+        value["base_history_sha256"] = hash.clone().into();
+        value["candidate_history_sha256"] = "bad".into();
         assert!(ProbeOutput::parse(&serde_json::to_vec(&value).unwrap(), true, &selected).is_err());
     }
 }
