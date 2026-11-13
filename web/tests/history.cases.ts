@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {api, ApiError} from '../src/api.ts';
-import {observation, observations} from '../src/validate.ts';
-import {requestEpoch} from '../src/domain.ts';
+import {connections, observation, observations} from '../src/validate.ts';
+import {acceptConnectionPage, requestEpoch} from '../src/domain.ts';
 const op='11111111-1111-4111-8111-111111111111';
 const id='22222222-2222-4222-8222-222222222222';
 const record=()=>({id,operation_id:op,structure:{kind:'object',fields:{payload:{kind:'unknown',reason:'limit'}},additional:null},visibility:'structure',completeness:'partial',reasons:['limit','sampled'],route_uncertain:true,first_seen:'2026-11-11T12:00:00Z',last_seen:'2026-11-11T12:01:00Z',queued_at:'2026-11-11T12:02:00Z',expires_at:'2026-11-12T12:02:00Z',sample_numerator:1,sample_denominator:3,count:5,parser_profile:'http_json_v1',status_code:null,structure_fingerprint:'a'.repeat(64),policy_revision:'18446744073709551615',protocol:'http',direction:'request',operation:'POST',route_template:'/items',canonicalization_version:1,origin_evidence:'unavailable'});
@@ -172,4 +172,49 @@ test('same-session 401 still invalidates while a newer session probe stalls',asy
     await assert.rejects(request('operations')); assert.equal(clears,1);
     release(); await pending;
   } finally {release(); unsubscribe(); globalThis.fetch=previous;}
+});
+
+const cursor=`${id}.${'a'.repeat(32)}.${'b'.repeat(32)}`;
+const endpoint=()=>({project_id:id,service_id:id,environment_id:id,deployment_id:id,instance_id:id,batch_id:id,event_id:id,receipt_id:id});
+const connection=()=>({resolved_at:'2026-11-11T12:00:00.000000Z',expires_at:'2026-12-11T12:00:00.000000Z',producer:endpoint(),receiver:endpoint()});
+test('connection pages reject malformed and excess evidence',()=>{
+  assert.equal(connections({items:[connection()],next_cursor:cursor}).items.length,1);
+  for (const page of [
+    {items:[{...connection(),extra:1}],next_cursor:null},
+    {items:[{...connection(),producer:{...endpoint(),event_id:'bad'}}],next_cursor:null},
+    {items:[{...connection(),receiver:{...endpoint(),raw:'secret'}}],next_cursor:null},
+    {items:[{...connection(),resolved_at:'2026-02-30T12:00:00.000000Z'}],next_cursor:null},
+    {items:[{...connection(),expires_at:'2026-12-11T12:00:00Z'}],next_cursor:null},
+    {items:[{...connection(),resolved_at:'0000-11-11T12:00:00.000000Z'}],next_cursor:null},
+    {items:[{...connection(),expires_at:'2026-12-11T12:00:00.000001Z'}],next_cursor:null},
+    {items:[{...connection(),expires_at:'2026-12-10T12:00:00.000000Z'}],next_cursor:null},
+    {items:[connection()],next_cursor:cursor.toUpperCase()},
+    {items:[],next_cursor:cursor}, {items:Array.from({length:51},connection),next_cursor:null},
+    {items:[],next_cursor:null,extra:true}
+  ]) assert.throws(()=>connections(page));
+});
+test('connection request is scoped, bounded, abortable and pins the session view',async()=>{
+  const previous=globalThis.fetch; const view='sv1_'+'j'.repeat(43); let url='';
+  try {
+    globalThis.fetch=async input=>{url=String(input);return Response.json({items:[connection()],next_cursor:cursor},{headers:{'x-contour-session-view':view}});};
+    await api.observationConnections(op,id,undefined,undefined,view);
+    assert.equal(url,`/v1/observations/${id}/connections?operation_id=${op}&limit=50`);
+    await api.observationConnections(op,id,cursor,undefined,view); assert.equal(new URL(url,'https://example.test').searchParams.get('cursor'),cursor);
+    assert.throws(()=>api.observationConnections(op,id,'bad'));
+    globalThis.fetch=async()=>new Response('x'.repeat(65537),{headers:{'x-contour-session-view':view}});
+    await assert.rejects(api.observationConnections(op,id,undefined,undefined,view),ApiError);
+    globalThis.fetch=async()=>Response.json({items:[],next_cursor:null},{headers:{'x-contour-session-view':'sv1_'+'k'.repeat(43)}});
+    const {SessionChanged}=await import('../src/api.ts');
+    await assert.rejects(api.observationConnections(op,id,undefined,undefined,view),SessionChanged);
+    globalThis.fetch=async(_url,init)=>new Promise((_resolve,reject)=>init?.signal?.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
+    const ctrl=new AbortController(); const pending=api.observationConnections(op,id,undefined,ctrl.signal); ctrl.abort(); await assert.rejects(pending);
+    globalThis.fetch=async()=>new Response('{}',{status:401}); await assert.rejects(api.observationConnections(op,id), (e:unknown)=>e instanceof ApiError && e.status===401);
+  } finally {globalThis.fetch=previous;}
+});
+
+test('pagination refuses a repeated cursor and display overflow',()=>{
+  const seen=new Set<string>(); acceptConnectionPage(cursor,seen,0,50);
+  assert.throws(()=>acceptConnectionPage(cursor,seen,50,50));
+  assert.throws(()=>acceptConnectionPage(null,seen,499,2));
+  acceptConnectionPage(null,seen,499,1);
 });

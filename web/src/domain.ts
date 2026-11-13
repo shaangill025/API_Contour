@@ -34,6 +34,13 @@ export type Shape = {kind: 'null'|'boolean'|'integer'|'number'|'string'|'binary'
   {kind: 'array'; items: Shape} | {kind: 'union'; alternatives: Shape[]};
 export type HistoricalOrigin = { observation_id: string; operation_id: string; status: 'unavailable'; origin: null } |
   { observation_id: string; operation_id: string; status: 'verified'; origin: { project_id: string; service_id: string; environment_id: string; deployment_id: string; instance_id: string; lifecycle_id: string; credential_id: string; grant_id: string } };
+export interface ConnectionEndpoint { project_id: string; service_id: string; environment_id: string; deployment_id: string; instance_id: string; batch_id: string; event_id: string; receipt_id: string }
+export interface HistoricalConnection { resolved_at: string; expires_at: string; producer: ConnectionEndpoint; receiver: ConnectionEndpoint }
+export function validConnectionCursor(value: string): boolean { return new RegExp(`^${uuidPattern}\\.[0-9a-f]{32}\\.[0-9a-f]{32}$`).test(value); }
+export function acceptConnectionPage(cursor: string | null, seen: Set<string>, existingCount: number, pageCount: number): void {
+  if (existingCount + pageCount > 500 || (cursor !== null && seen.has(cursor))) throw new Error('Invalid connection page');
+  if (cursor !== null) seen.add(cursor);
+}
 export interface Observation {
   id: string; operation_id: string; structure: Shape; structure_fingerprint: string;
   canonicalization_version: 1; origin_evidence: 'unavailable'; policy_revision: string;

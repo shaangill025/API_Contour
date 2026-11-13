@@ -1,5 +1,5 @@
-import type {Comparison, Contract, HistoricalOrigin, Observation, Operation, Page, Review, Shape} from './domain.ts';
-import {validUuid} from './domain.ts';
+import type {Comparison, Contract, HistoricalConnection, HistoricalOrigin, Observation, Operation, Page, Review, Shape} from './domain.ts';
+import {validConnectionCursor, validUuid} from './domain.ts';
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid response');
@@ -58,6 +58,25 @@ export function historicalOrigin(value: unknown, operationId: string, observatio
     exact(origin,keys); ids(origin,keys);
   } else throw new Error('Invalid response');
   return value as HistoricalOrigin;
+}
+function canonicalTimestamp(value: unknown) {
+  if (typeof value !== 'string' || value.startsWith('0000-') || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) throw new Error('Invalid response');
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value.slice(0,23)+'Z') throw new Error('Invalid response');
+  return parsed.getTime();
+}
+export function connections(value: unknown): Page<HistoricalConnection> {
+  const o=object(value); exact(o,['items','next_cursor']);
+  if (o.next_cursor !== null && (typeof o.next_cursor !== 'string' || !validConnectionCursor(o.next_cursor))) throw new Error('Invalid response');
+  if (!Array.isArray(o.items) || o.items.length>50 || (o.next_cursor!==null && o.items.length===0)) throw new Error('Invalid response');
+  const keys=['project_id','service_id','environment_id','deployment_id','instance_id','batch_id','event_id','receipt_id'];
+  for (const value of o.items) {
+    const item=object(value); exact(item,['resolved_at','expires_at','producer','receiver']);
+    const resolved=canonicalTimestamp(item.resolved_at), expires=canonicalTimestamp(item.expires_at);
+    if (expires-resolved!==30*24*60*60*1000 || (item.resolved_at as string).slice(23,26)!==(item.expires_at as string).slice(23,26)) throw new Error('Invalid response');
+    for (const side of ['producer','receiver']) { const endpoint=object(item[side]); exact(endpoint,keys); ids(endpoint,keys); }
+  }
+  return value as Page<HistoricalConnection>;
 }
 export function observation(value: unknown): Observation {
   const o=object(value);

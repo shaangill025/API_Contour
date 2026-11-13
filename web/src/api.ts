@@ -1,6 +1,6 @@
 import type {ComparisonRequest, ImportRequest, Origin, Review, ReviewRequest} from './domain.ts';
 import * as validate from './validate.ts';
-import {decisionBody, safeFailure, validUuid} from './domain.ts';
+import {decisionBody, safeFailure, validConnectionCursor, validUuid} from './domain.ts';
 export class ApiError extends Error {
   status: number;
   constructor(status: number) { super(safeFailure(status)); this.status = status; }
@@ -235,6 +235,12 @@ export const api = {
     const params=new URLSearchParams({operation_id:operationId});
     return request(`observations/${encodeURIComponent(id)}/origin?${params}`,undefined,30_000,
       value=>validate.historicalOrigin(value,operationId,id),4096,signal,expectedView);
+  },
+  observationConnections: (operationId: string, id: string, cursor?: string, signal?: AbortSignal, expectedView?: string) => {
+    if (!validUuid(operationId) || !validUuid(id) || (cursor !== undefined && !validConnectionCursor(cursor))) throw new ApiError(400);
+    const params=new URLSearchParams({operation_id:operationId,limit:'50'});
+    if (cursor !== undefined) params.set('cursor',cursor);
+    return request(`observations/${encodeURIComponent(id)}/connections?${params}`,undefined,30_000,validate.connections,65536,signal,expectedView);
   },
   import: (body: ImportRequest) => request('contracts/import', body, 30_000, validate.contract),
   compare: (body: ComparisonRequest) => request('comparisons', body, 30_000, validate.comparison),

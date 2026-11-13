@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {api, ApiError, SessionChanged, SessionViewFailure, sessionFenced, onSessionInvalidated} from './api.ts';
-import type {HistoricalOrigin, Observation} from './domain.ts';
-import {requestEpoch} from './domain.ts';
+import type {HistoricalConnection, HistoricalOrigin, Observation} from './domain.ts';
+import {acceptConnectionPage, requestEpoch} from './domain.ts';
 
 // A keyed instance is scoped to one operation. Sequence numbers also prevent
 // overlapping requests within that instance from replacing newer results.
@@ -11,20 +11,26 @@ export function History({operationId}: {operationId: string}) {
   const [detail,setDetail]=useState<Observation|null>(null); const [detailLoading,setDetailLoading]=useState(false);
   const [origin,setOrigin]=useState<HistoricalOrigin|null>(null); const [originLoading,setOriginLoading]=useState(false);
   const [originError,setOriginError]=useState('');
+  const [connections,setConnections]=useState<HistoricalConnection[]>([]); const [connectionCursor,setConnectionCursor]=useState<string|null>(null);
+  const [connectionLoading,setConnectionLoading]=useState(false); const [connectionLoaded,setConnectionLoaded]=useState(false); const [connectionError,setConnectionError]=useState('');
+  const connectionCursors=useRef(new Set<string>());
+  function clearConnections() { setConnections([]); setConnectionCursor(null); setConnectionLoading(false); setConnectionLoaded(false); setConnectionError(''); connectionCursors.current.clear(); }
+
   const [error,setError]=useState(''); const [detailError,setDetailError]=useState('');
   const generation=useRef(requestEpoch()); const pending=useRef<AbortController|null>(null); const activeView=useRef<string|null>(null);
   function clearHistory() {
     generation.current.invalidate(); pending.current?.abort(); pending.current=null; activeView.current=null;
     setItems([]); setCursor(null); setLoaded(false); setLoading(false);
     setDetail(null); setDetailLoading(false); setDetailError('');
-    setOrigin(null); setOriginLoading(false); setOriginError(''); setError('');
+    setOrigin(null); setOriginLoading(false); setOriginError(''); clearConnections(); setError('');
   }
   useEffect(()=>{
+    clearHistory();
     const clear=()=>clearHistory();
     const unsubscribe=onSessionInvalidated(clear);
     window.addEventListener('focus',clear); document.addEventListener('visibilitychange',clear);
     return ()=>{ unsubscribe(); window.removeEventListener('focus',clear); document.removeEventListener('visibilitychange',clear); generation.current.invalidate(); pending.current?.abort(); };
-  },[]);
+  },[operationId]);
   function begin() {
     pending.current?.abort(); const controller=new AbortController(); pending.current=controller;
     return {controller,serial:generation.current.start()};
@@ -41,7 +47,7 @@ export function History({operationId}: {operationId: string}) {
   }
   async function load(more=false) {
     const {controller,serial}=begin(); setLoading(true); setDetailLoading(false); setOriginLoading(false); setError('');
-    if (!more) { setDetail(null); setOrigin(null); setOriginError(''); setDetailError(''); }
+    setDetail(null); setOrigin(null); setOriginError(''); setDetailError(''); clearConnections();
     try {
       const page=await sessionFenced((signal,view)=>api.observations(operationId,more && cursor ? cursor : undefined,signal,view),controller.signal,view=>captureView(serial,view));
       if (!generation.current.current(serial)) return;
@@ -53,19 +59,33 @@ export function History({operationId}: {operationId: string}) {
   async function open(id: string) {
     const {controller,serial}=begin(); setLoading(false);
     setDetail(null); setDetailError(''); setDetailLoading(true);
-    setOrigin(null); setOriginError(''); setOriginLoading(true);
+    setOrigin(null); setOriginError(''); setOriginLoading(true); clearConnections(); setConnectionLoading(true);
     try {
       const result=await sessionFenced(async (signal,view)=>{
-        const [item, evidence]=await Promise.all([api.observation(operationId,id,signal,view),api.observationOrigin(operationId,id,signal,view).then(value=>({value}),error=>({error}))]);
+        const [item, evidence, links]=await Promise.all([api.observation(operationId,id,signal,view),api.observationOrigin(operationId,id,signal,view).then(value=>({value}),error=>({error})),api.observationConnections(operationId,id,undefined,signal,view).then(value=>({value}),error=>({error}))]);
         if ('error' in evidence && (evidence.error instanceof SessionChanged || (evidence.error instanceof ApiError && evidence.error.status===401))) throw evidence.error;
-        return {item,evidence};
+        if ('error' in links && (links.error instanceof SessionChanged || links.error instanceof SessionViewFailure || (links.error instanceof ApiError && links.error.status===401))) throw links.error;
+        return {item,evidence,links};
       },controller.signal,view=>captureView(serial,view));
       if (!generation.current.current(serial)) return;
       setDetail(result.item);
       if ('value' in result.evidence) setOrigin(result.evidence.value);
       else setOriginError(result.evidence.error instanceof ApiError ? result.evidence.error.message : 'Historical origin could not be verified.');
+      if ('value' in result.links) { setConnections(result.links.value.items); setConnectionCursor(result.links.value.next_cursor); setConnectionLoaded(true); if (result.links.value.next_cursor) connectionCursors.current.add(result.links.value.next_cursor); }
+      else setConnectionError(result.links.error instanceof ApiError ? result.links.error.message : 'Historical connections could not be verified.');
     } catch (e) { failed(e,serial,setDetailError); }
-    finally { if (generation.current.current(serial)) { setDetailLoading(false); setOriginLoading(false); } }
+    finally { if (generation.current.current(serial)) { setDetailLoading(false); setOriginLoading(false); setConnectionLoading(false); } }
+  }
+  async function moreConnections() {
+    if (!detail || !connectionCursor || connectionLoading || connections.length>=500) return;
+    const requested=connectionCursor; const {controller,serial}=begin(); setConnectionLoading(true); setConnectionError('');
+    try {
+      const page=await sessionFenced((signal,view)=>api.observationConnections(operationId,detail.id,requested,signal,view),controller.signal,view=>captureView(serial,view));
+      if (!generation.current.current(serial)) return;
+      acceptConnectionPage(page.next_cursor,connectionCursors.current,connections.length,page.items.length);
+      setConnections([...connections,...page.items]); setConnectionCursor(page.next_cursor);
+    } catch (e) { failed(e,serial,setConnectionError); }
+    finally { if (generation.current.current(serial)) setConnectionLoading(false); }
   }
   return <section className="panel" aria-labelledby="history-title"><p className="step">OBSERVED EVIDENCE</p><h2 id="history-title">Observation history</h2>
     <p>Immutable observations for operation <code>{operationId}</code>.</p>
@@ -85,6 +105,12 @@ export function History({operationId}: {operationId: string}) {
       <dt>First / last seen</dt><dd>{detail.first_seen} / {detail.last_seen}</dd><dt>Queued / expires</dt><dd>{detail.queued_at} / {detail.expires_at}</dd>
       <dt>Policy revision / parser</dt><dd>{detail.policy_revision} / {detail.parser_profile}</dd><dt>Status code</dt><dd>{detail.status_code ?? 'Unavailable'}</dd>
       <dt>Structure fingerprint</dt><dd><code>{detail.structure_fingerprint}</code> · canonicalization {detail.canonicalization_version}</dd></dl>
+      <h4>Historical connections</h4><p>Resolved historical evidence for this observation. It does not establish current connectivity or complete coverage.</p>
+      {connectionLoading && <p role="status">Loading historical connections…</p>}{connectionError && <p className="error" role="alert">Historical connections unavailable. {connectionError}</p>}
+      {connectionLoaded && !connections.length && !connectionLoading && !connectionError && <p className="empty">No historical connections returned.</p>}
+      {connections.map((connection,index)=><div className="result" key={`${connection.producer.event_id}-${connection.receiver.event_id}-${index}`}><h5>Producer → receiver</h5><p>Resolved {connection.resolved_at} · Expires {connection.expires_at}</p>{(['producer','receiver'] as const).map(side=><div key={side}><strong>{side==='producer' ? 'Producer' : 'Receiver'}</strong><dl>{(['project_id','service_id','environment_id','deployment_id','instance_id','batch_id','event_id','receipt_id'] as const).map(key=><div key={key}><dt>{key.replace('_',' ')}</dt><dd><code>{connection[side][key]}</code></dd></div>)}</dl></div>)}</div>)}
+      {connectionCursor && connections.length<500 && <button className="secondary" disabled={connectionLoading} onClick={()=>void moreConnections()}>Load more connections</button>}
+      {connectionCursor && connections.length>=500 && <p>Connection display limit reached. Inspect the observation again to restart.</p>}
       <h4>Sanitized structure</h4><p>Unknown nodes and their reasons are shown as returned.</p><pre className="history-structure">{JSON.stringify(detail.structure,null,2)}</pre>
     </div>}
   </section>;
