@@ -4,6 +4,7 @@ import datetime
 import json
 import hashlib
 import re
+import secrets
 import uuid
 from pathlib import Path
 
@@ -14,7 +15,7 @@ IDS=(TENANT,'fc000000-0000-4000-8000-000000000010','f6000000-0000-4000-8000-0000
      'f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000010',
      'f9000000-0000-4000-8000-000000000010')
 MANIFEST='af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d'
-CHECKS=('receiver-issuer-positive','receiver-issuer-generic-refusal','receiver-issuer-cross-profiles','receiver-issuer-negatives')
+CHECKS=('receiver-issuer-positive','receiver-issuer-generic-refusal','receiver-issuer-cross-profiles','receiver-issuer-negatives','receiver-events-positive-retry','receiver-events-denials')
 
 
 def _canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
@@ -52,6 +53,10 @@ def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passw
               'wrong-scope':dict(grant,tenant_id='f0000000-0000-4000-8000-000000000002'),
               'expired':dict(grant,issued_at=stamp(now-datetime.timedelta(minutes=3)),expires_at=stamp(now-datetime.timedelta(minutes=1)))}
     grants={name:signed(name,value,'grant',b'apicontour/causal-grant/1\n') for name,value in profiles.items()}
+    writer_password=secrets.token_hex(32)
+    batch={'wire_version':1,'batch_id':str(uuid.uuid4()),'tenant_id':IDS[0],'runtime_id':IDS[1],'session_epoch':1,'first_seq':1,'last_seq':1,'events':[{'kind':'root','event_id':'1'*32,'seq':1,'root':'a'*32}]}
+    raw_batch=_canonical(batch); wrong_batch=_canonical(dict(batch,tenant_id='f0000000-0000-4000-8000-000000000002'))
+    execute("BEGIN; CREATE ROLE causal_event_writer_login LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD '%s'; GRANT contour_causal_inbox_writer TO causal_event_writer_login; GRANT CONNECT ON DATABASE contour_local TO causal_event_writer_login; COMMIT;"%writer_password)
     execute("BEGIN; CREATE ROLE causal_issuer_login LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD '%s'; GRANT contour_causal_issuer TO causal_issuer_login; GRANT CONNECT ON DATABASE contour_local TO causal_issuer_login; CREATE ROLE causal_provisioner_login LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD '%s'; GRANT contour_causal_provisioner TO causal_provisioner_login; GRANT CONNECT ON DATABASE contour_local TO causal_provisioner_login; COMMIT;"%(passwords['issuer'],passwords['wrong']))
     # Create a separate source/lifecycle/runtime; append policy revision 2 under
     # the existing collector guard. Existing reader rows remain immutable.
@@ -66,7 +71,7 @@ def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passw
         nonce=str(uuid.uuid4());g=dict(grants[grant_name])
         if damaged:
             signature=g['signature_base64url'];g['signature_base64url']=('B' if signature[0]=='A' else 'A')+signature[1:]
-        payload={'ca_pem':ca_pem.decode('ascii'),'epoch':'1','grant':g,'grant_public':public['grant'],'ids':list(i),'mode':mode,'nonce':nonce,'password':passwords['wrong' if wrong_role else 'issuer'],'peer':'ed'*32,'policy':p,'policy_public':public['policy'],'port':str(port),'user':'causal_provisioner_login' if wrong_role else 'causal_issuer_login'}
+        payload={'batch':raw_batch.decode(),'wrong_batch':wrong_batch.decode(),'writer_password':writer_password,'ca_pem':ca_pem.decode('ascii'),'epoch':'1','grant':g,'grant_public':public['grant'],'ids':list(i),'mode':mode,'nonce':nonce,'password':passwords['wrong' if wrong_role else 'issuer'],'peer':'ed'*32,'policy':p,'policy_public':public['policy'],'port':str(port),'user':'causal_provisioner_login' if wrong_role else 'causal_issuer_login'}
         probe_call(_canonical(payload))
         row=execute("SELECT count(*)::text FROM contour.causal_sessions WHERE tenant_id='%s' AND runtime_id='%s' AND nonce='%s';"%(i[0],i[1],nonce))
         if row!=('1' if mode=='positive' else '0'): raise RuntimeError('issuer fixture nonce evidence')
@@ -74,7 +79,15 @@ def run(*,execute,openssl,write_private,private_dir,probe_call,ca_pem,port,passw
     case('generic');case('wrong-profile','legacy');case('wrong-profile','wire')
     for mode in ('wrong-peer','wrong-scope','expired','wrong-role','deadline','wrong-signature'):
         case(mode,mode if mode in ('wrong-scope','expired') else 'valid',damaged=mode=='wrong-signature',wrong_role=mode=='wrong-role')
+    baseline=execute("SELECT coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='%s'),'0');"%i[0])
+    if not baseline.isdigit(): raise RuntimeError('issuer fixture quota baseline')
     nonce=case('positive')
+    digest=hashlib.sha256(b'apicontour/causal-events/1\n'+raw_batch).hexdigest()
+    evidence=execute("SELECT (count(*)=1 AND bool_and(canonical_batch=decode('%s','hex') AND batch_digest=decode('%s','hex') AND event_count=1 AND receipt_id IS NOT NULL AND isfinite(accepted_at) AND receipt_digest=contour.causal_receipt_digest(tenant_id,runtime_id,session_epoch,batch_id,receipt_id,accepted_at,batch_digest,event_count)))::text FROM contour.causal_inbox_batches WHERE tenant_id='%s' AND runtime_id='%s' AND session_epoch=1 AND batch_id='%s';"%(raw_batch.hex(),digest,i[0],i[1],batch['batch_id']))
+    if evidence!='true': raise RuntimeError('receiver event batch receipt evidence')
+    events=execute("SELECT count(*)::text FROM contour.causal_inbox_events WHERE tenant_id='%s' AND runtime_id='%s' AND session_epoch=1 AND batch_id='%s' AND seq=1 AND event_id='%s' AND kind='root' AND root='%s';"%(i[0],i[1],batch['batch_id'],'1'*32,'a'*32))
+    used=execute("SELECT coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='%s'),'0');"%i[0])
+    if events!='1' or not used.isdigit() or int(used)!=int(baseline)+len(raw_batch): raise RuntimeError('receiver event quota evidence')
     grant_digest=hashlib.sha256(_canonical(grant)).hexdigest()
     query=("SELECT (count(*)=1 AND bool_and(epoch=1 AND (claim).profile_name='nodered_5_0_9_receiver_v1' AND (claim).profile_hash=decode('%s','hex') AND (claim).collector_id='%s'::uuid AND (claim).source_id='%s'::uuid AND (claim).project_id='%s'::uuid AND (claim).service_id='%s'::uuid AND (claim).environment_id='%s'::uuid AND (claim).deployment_id='%s'::uuid AND (claim).instance_id='%s'::uuid AND (claim).lifecycle_id='%s'::uuid AND (claim).export_leaf=decode(repeat('ed',32),'hex') AND (claim).grant_digest=decode('%s','hex') AND (claim).policy_revision=2 AND (claim).policy_envelope=decode('%s','hex')))::text FROM contour.causal_sessions WHERE tenant_id='%s' AND runtime_id='%s' AND nonce='%s';"%(MANIFEST,*i[2:10],grant_digest,_canonical(p).hex(),i[0],i[1],nonce))
     if execute(query)!='true': raise RuntimeError('issuer fixture committed scope')

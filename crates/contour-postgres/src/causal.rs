@@ -1437,11 +1437,9 @@ impl CausalInbox {
         deadline: Instant,
     ) -> Result<CausalReceipt, CausalError> {
         let deadline = deadline.min(Instant::now() + self.connection.deadline);
-        check_deadline(deadline)?;
+        inbox_entry_check(session, peer, deadline)?;
+        let deadline = deadline.min(session.verified_until);
         let ids = &session.issue.binding.ids;
-        if *peer != session.issue.binding.peer {
-            return Err(CausalError::Identity);
-        }
         if bytes.len() > contour_core::MAX_CAUSAL_EVENT_BATCH_BYTES {
             return Err(CausalError::InvalidBatch);
         }
@@ -1509,15 +1507,127 @@ impl CausalInbox {
             }
         };
         let result = timeout_at(deadline, work).await;
-        if let Some(receipt) = accepted {
-            return Ok(receipt);
-        }
         match result {
-            Ok(Ok(())) => Err(CausalError::Database),
+            Ok(Ok(())) => accepted.ok_or(CausalError::Database),
+            Ok(Err(_)) if committing => Err(CausalError::OutcomeUnknown),
             Ok(Err(e)) => Err(e),
             Err(_) if committing => Err(CausalError::OutcomeUnknown),
             Err(_) => Err(CausalError::Deadline),
         }
+    }
+}
+
+// Preserve the existing caller/connection deadline and peer error priority before
+// applying the session ceiling to the transaction and its completion checks.
+fn inbox_entry_check(
+    session: &CausalSession,
+    peer: &[u8; 32],
+    deadline: Instant,
+) -> Result<(), CausalError> {
+    check_deadline(deadline)?;
+    if *peer != session.issue.binding.peer {
+        return Err(CausalError::Identity);
+    }
+    if session.verified_remaining().is_zero() {
+        return Err(CausalError::Expired);
+    }
+    Ok(())
+}
+
+/// Dedicated producer-event inbox for an issued receiver504 session. A receipt
+/// is committed data; it does not attest a receiver, peer, or deployment.
+/// The legacy and receiver session types cannot be exchanged:
+/// ```compile_fail
+/// use contour_postgres::{CausalInbox, CausalReceiverEventInbox504, CausalSession, CausalReceiverSession504};
+/// fn receiver_only(_: &CausalReceiverSession504) {}
+/// fn legacy_only(_: &CausalSession) {}
+/// fn cannot_swap(legacy: &CausalSession, receiver: &CausalReceiverSession504) {
+///     receiver_only(legacy);
+///     legacy_only(receiver);
+/// }
+/// ```
+pub struct CausalReceiverEventInbox504 {
+    inbox: CausalInbox,
+}
+impl fmt::Debug for CausalReceiverEventInbox504 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CausalReceiverEventInbox504")
+    }
+}
+fn receiver_event_session(session: &CausalReceiverSession504) -> Result<(), CausalError> {
+    if session.session.profile != SessionProfile::Candidate504 {
+        return Err(CausalError::Identity);
+    }
+    if session.session.verified_remaining().is_zero() {
+        return Err(CausalError::Expired);
+    }
+    Ok(())
+}
+fn receiver_event_entry_check(
+    session: &CausalReceiverSession504,
+    peer: &[u8; 32],
+    deadline: Instant,
+) -> Result<(), CausalError> {
+    inbox_entry_check(&session.session, peer, deadline)?;
+    receiver_event_session(session)
+}
+// The delegated inbox returns only after its CancellationGuard drops. The
+// guard sets reusable solely after commit, empty-context and deadline checks.
+fn receiver_event_completed(
+    reusable: bool,
+    client_present: bool,
+    now: Instant,
+    deadline: Instant,
+) -> Result<(), CausalError> {
+    if !reusable || !client_present || now >= deadline {
+        return Err(CausalError::OutcomeUnknown);
+    }
+    Ok(())
+}
+impl CausalReceiverEventInbox504 {
+    pub fn new(connection: ConnectedDatabase) -> Self {
+        Self {
+            inbox: CausalInbox::new(connection),
+        }
+    }
+    /// Return the owned connection with its cancellation state intact.
+    pub fn into_database(self) -> ConnectedDatabase {
+        self.inbox.into_database()
+    }
+    /// Submit through the existing checked inbox and the original session ceiling.
+    pub async fn accept_until(
+        &mut self,
+        session: &CausalReceiverSession504,
+        peer: &[u8; 32],
+        bytes: &[u8],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: Instant,
+    ) -> Result<CausalReceipt, CausalError> {
+        let deadline = deadline.min(Instant::now() + self.inbox.connection.deadline);
+        receiver_event_entry_check(session, peer, deadline)?;
+        let deadline = deadline.min(session.session.verified_until);
+        let receipt = self
+            .inbox
+            .accept_until(
+                &session.session,
+                peer,
+                bytes,
+                grant_keys,
+                policy_keys,
+                deadline,
+            )
+            .await?;
+        if let Err(error) = receiver_event_completed(
+            self.inbox.connection.reusable,
+            self.inbox.connection.client.is_some(),
+            Instant::now(),
+            deadline,
+        ) {
+            self.inbox.connection.invalidate();
+            return Err(error);
+        }
+        Ok(receipt)
     }
 }
 
@@ -2036,6 +2146,84 @@ mod tests {
         value.session.profile = SessionProfile::Candidate503;
         value.session.verified_until = Instant::now() + Duration::from_secs(10);
         assert!(value.receiver_profile_504().is_none());
+    }
+
+    #[test]
+    fn inbox_entry_preserves_deadline_and_peer_priority_for_expired_session() {
+        let v = fixture();
+        let mut session = session(request(&v, "grant", "policy"));
+        session.verified_until = Instant::now();
+        let peer = session.issue.binding.peer;
+        let mut other_peer = peer;
+        other_peer[0] ^= 1;
+        let future = Instant::now() + Duration::from_secs(10);
+        assert_eq!(
+            inbox_entry_check(&session, &peer, future),
+            Err(CausalError::Expired)
+        );
+        assert_eq!(
+            inbox_entry_check(&session, &other_peer, future),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            inbox_entry_check(&session, &other_peer, Instant::now()),
+            Err(CausalError::Deadline)
+        );
+    }
+
+    #[test]
+    fn receiver_event_boundary_requires_profile_and_live_monotonic_ceiling() {
+        let v = fixture();
+        let mut session = CausalReceiverSession504 {
+            session: session(request(&v, "grant", "policy")),
+        };
+        session.session.verified_until = Instant::now() + Duration::from_secs(10);
+        for profile in [SessionProfile::Legacy501, SessionProfile::Candidate503] {
+            session.session.profile = profile;
+            assert_eq!(receiver_event_session(&session), Err(CausalError::Identity));
+        }
+        session.session.profile = SessionProfile::Candidate504;
+        assert_eq!(receiver_event_session(&session), Ok(()));
+        session.session.verified_until = Instant::now();
+        assert_eq!(receiver_event_session(&session), Err(CausalError::Expired));
+        let peer = session.session.issue.binding.peer;
+        let mut wrong_peer = peer;
+        wrong_peer[0] ^= 1;
+        assert_eq!(
+            receiver_event_entry_check(&session, &peer, Instant::now() + Duration::from_secs(10)),
+            Err(CausalError::Expired)
+        );
+        assert_eq!(
+            receiver_event_entry_check(
+                &session,
+                &wrong_peer,
+                Instant::now() + Duration::from_secs(10)
+            ),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            receiver_event_entry_check(&session, &wrong_peer, Instant::now()),
+            Err(CausalError::Deadline)
+        );
+    }
+
+    #[test]
+    fn receiver_event_requires_confirmed_connection_and_live_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert_eq!(receiver_event_completed(true, true, now, deadline), Ok(()));
+        assert_eq!(
+            receiver_event_completed(false, true, now, deadline),
+            Err(CausalError::OutcomeUnknown)
+        );
+        assert_eq!(
+            receiver_event_completed(true, false, now, deadline),
+            Err(CausalError::OutcomeUnknown)
+        );
+        assert_eq!(
+            receiver_event_completed(true, true, deadline, deadline),
+            Err(CausalError::OutcomeUnknown)
+        );
     }
 
     #[test]

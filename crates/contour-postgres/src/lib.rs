@@ -40,8 +40,8 @@ pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
     CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
-    CausalMarkerBinding, CausalReceipt, CausalReceiverProfile504, CausalReceiverSession504,
-    CausalSession, CausalWireProfile503,
+    CausalMarkerBinding, CausalReceipt, CausalReceiverEventInbox504, CausalReceiverProfile504,
+    CausalReceiverSession504, CausalSession, CausalWireProfile503,
 };
 pub use causal_gateway_reader::{
     CausalGatewayObservation, CausalGatewayReadError, CausalGatewayReader, CausalGatewaySelector,

@@ -2,7 +2,8 @@
 //! Private bounded input goes over stdin; output contains only fixed labels.
 use contour_core::{CausalGrantKeys, PolicyKeys};
 use contour_postgres::{
-    CausalBinding, CausalError, CausalIssue, CausalIssuer, DatabaseSettings, TrustedCa,
+    CausalBinding, CausalError, CausalIssue, CausalIssuer, CausalReceiverEventInbox504,
+    DatabaseSettings, TrustedCa,
 };
 use serde_json::Value;
 use std::{
@@ -41,6 +42,9 @@ fn run() -> Result<(), ()> {
     raw.fill(0);
     let o = input.as_object().ok_or(())?;
     let keys = [
+        "batch",
+        "wrong_batch",
+        "writer_password",
         "ca_pem",
         "epoch",
         "grant",
@@ -157,6 +161,71 @@ fn run() -> Result<(), ()> {
                     || view.profile_sha256()
                         != "af3171bdf0ca4bfc70c63aaf998fdfd4cf988b4409e7f7f47e015325608b302d"
                     || view.verified_remaining().is_zero()
+                {
+                    return Err(());
+                }
+                let writer_settings = DatabaseSettings::new(
+                    "localhost",
+                    port,
+                    "contour_local",
+                    "causal_event_writer_login",
+                    get("writer_password")?.as_bytes(),
+                    Duration::from_secs(10),
+                )
+                .map_err(|_| ())?;
+                let mut wrong_role = CausalReceiverEventInbox504::new(
+                    settings.connect(&trust).await.map_err(|_| ())?,
+                );
+                let deadline = || Instant::now() + Duration::from_secs(8);
+                let batch = get("batch")?.as_bytes();
+                if !matches!(
+                    wrong_role
+                        .accept_until(&session, &peer, batch, &grants, &policies, deadline())
+                        .await,
+                    Err(CausalError::Identity)
+                ) {
+                    return Err(());
+                }
+                let mut inbox = CausalReceiverEventInbox504::new(
+                    writer_settings.connect(&trust).await.map_err(|_| ())?,
+                );
+                if !matches!(
+                    inbox
+                        .accept_until(&session, &[0x7f; 32], batch, &grants, &policies, deadline())
+                        .await,
+                    Err(CausalError::Identity)
+                ) || !matches!(
+                    inbox
+                        .accept_until(
+                            &session,
+                            &peer,
+                            get("wrong_batch")?.as_bytes(),
+                            &grants,
+                            &policies,
+                            deadline()
+                        )
+                        .await,
+                    Err(CausalError::Identity)
+                ) || !matches!(
+                    inbox
+                        .accept_until(&session, &peer, batch, &grants, &policies, Instant::now())
+                        .await,
+                    Err(CausalError::Deadline)
+                ) {
+                    return Err(());
+                }
+                let first = inbox
+                    .accept_until(&session, &peer, batch, &grants, &policies, deadline())
+                    .await
+                    .map_err(|_| ())?;
+                let again = inbox
+                    .accept_until(&session, &peer, batch, &grants, &policies, deadline())
+                    .await
+                    .map_err(|_| ())?;
+                if first.duplicate()
+                    || !again.duplicate()
+                    || first.id() != again.id()
+                    || first.accepted_at() != again.accepted_at()
                 {
                     return Err(());
                 }

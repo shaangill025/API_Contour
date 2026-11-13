@@ -18,3 +18,12 @@ In-flight cancellation and unknown commit are not covered by this scenario;
 they require separately reviewed deterministic barriers and are not in its
 receipt. Runtime execution, independent review and actual resource cleanup must
 succeed before reporting a pass.
+
+The dedicated issuer's live 504 session also enters the separately owned
+SQL20 event-writer login through the 504 inbox. A canonical root batch is
+submitted after wrong-role, wrong-peer, wrong-scope and expired-deadline
+denials. The probe checks that an exact retry returns the same receipt and
+acceptance time with duplicate status. Independent SQL verifies the committed
+canonical bytes, digest, receipt integrity, root event and the single-batch
+quota increase. This remains synthetic database/TLS evidence; it does not
+prove a production receiver, registered peer or request.

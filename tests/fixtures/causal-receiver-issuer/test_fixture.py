@@ -16,6 +16,8 @@ class FixtureTests(unittest.TestCase):
             if sql.startswith('SELECT count(*)::text FROM contour.causal_sessions'):
                 self.assertIn(latest['nonce'],sql)
                 return '1' if latest['mode']=='positive' else '0'
+            if sql.startswith('SELECT coalesce((SELECT used_bytes'): return str(13+(len(latest['batch'].encode()) if latest.get('mode')=='positive' else 0))
+            if sql.startswith('SELECT count(*)::text FROM contour.causal_inbox_events'): return '1'
             if sql.startswith('SELECT (count(*)=1'): return 'true'
             return ''
         def openssl(args):
@@ -38,6 +40,11 @@ class FixtureTests(unittest.TestCase):
         self.assertTrue(any('bool_and(epoch=1' in s and m.MANIFEST in s for s in calls))
         self.assertFalse(any('UPDATE contour.policy_revisions' in s or 'DISABLE TRIGGER' in s for s in calls))
         self.assertEqual(payloads[6]['user'],'causal_provisioner_login')
+        self.assertTrue(any('GRANT contour_causal_inbox_writer TO causal_event_writer_login' in sql for sql in calls))
+        batch=json.loads(payloads[-1]['batch']); self.assertEqual(batch['events'][0]['kind'],'root')
+        self.assertNotEqual(json.loads(payloads[-1]['wrong_batch'])['tenant_id'],batch['tenant_id'])
+        self.assertTrue(any('causal_receipt_digest' in sql and payloads[-1]['batch'].encode().hex() in sql for sql in calls))
+        self.assertEqual(sum('SELECT coalesce((SELECT used_bytes' in sql for sql in calls),2)
     def test_refuses_unverified_result(self):
         with self.assertRaises(ValueError):
             m.run(execute=None,openssl=None,write_private=None,private_dir='/private',probe_call=None,ca_pem=b'CA',port='1',passwords={'issuer':'secret','wrong':'b'*64},fixture_bytes=b'{}')
