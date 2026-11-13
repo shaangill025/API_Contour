@@ -103,16 +103,34 @@ class QualifierTests(unittest.TestCase):
         with self.assertRaises(ValueError): Q['journal_records'](intent,cid,image.hex(),'ff'*32)
         with self.assertRaises(ValueError): Q['journal_records'](intent,cid+b'x',image.hex(),net.hex())
     def test_network_and_container_ownership_must_match(self):
-        cid='1'*64; token='2'*64; image='3'*64; network='4'*64; config='sha256:'+'5'*64; name='owned'
+        cid='1'*64; token='2'*64; image='3'*64; network='4'*64; name='owned'
+        descriptor={'digest':'sha256:'+'5'*64,'mediaType':'application/vnd.oci.image.manifest.v1+json','size':1234,'platform':{'os':'linux','architecture':'arm64'}}
         net={'Id':network,'Name':name,'Internal':True,'Driver':'bridge','Labels':{Q['LABEL']:token},'Containers':{}}
         Q['validate_network'](net,network,name,token,[])
         for key,value in [('Internal',False),('Id','0'*64),('Containers',{cid:{}})]:
             bad=dict(net);bad[key]=value
             with self.assertRaises(ValueError): Q['validate_network'](bad,network,name,token,[])
-        c={'Id':cid,'Name':'/contour-causal-'+token,'Image':config,'Config':{'Image':'sha256:'+image,'Labels':{'org.apicontour.causal.owner':token}},'HostConfig':{'NetworkMode':name},'NetworkSettings':{'Networks':{name:{'NetworkID':''}}},'State':{'Status':'created','Running':False,'Pid':0,'StartedAt':'0001-01-01T00:00:00Z'}}
-        Q['validate_container'](c,cid,token,image,name,network,config)
-        for key,value in [('Id','0'*64),('Image','sha256:'+'6'*64),('Name','/wrong')]:
+        c={'Id':cid,'Name':'/contour-causal-'+token,'Image':'sha256:'+image,'ImageManifestDescriptor':descriptor,'Config':{'Image':'sha256:'+image,'Labels':{'org.apicontour.causal.owner':token}},'HostConfig':{'NetworkMode':name},'NetworkSettings':{'Networks':{name:{'NetworkID':''}}},'State':{'Status':'created','Running':False,'Pid':0,'StartedAt':'0001-01-01T00:00:00Z'}}
+        Q['validate_container'](c,cid,token,image,name,network,descriptor)
+        for key,value in [('Id','0'*64),('Image','sha256:'+'6'*64),('Name','/wrong'),('ImageManifestDescriptor',None)]:
             bad=dict(c);bad[key]=value
-            with self.assertRaises(ValueError): Q['validate_container'](bad,cid,token,image,name,network,config)
+            with self.assertRaises(ValueError): Q['validate_container'](bad,cid,token,image,name,network,descriptor)
+        import copy
+        for field,value in [('digest','sha256:'+'6'*64),('size',True)]:
+            bad=copy.deepcopy(c);bad['ImageManifestDescriptor'][field]=value
+            with self.assertRaises(ValueError): Q['validate_container'](bad,cid,token,image,name,network,descriptor)
+        bad=copy.deepcopy(c);bad['ImageManifestDescriptor']['platform']['architecture']='amd64'
+        with self.assertRaises(ValueError): Q['validate_container'](bad,cid,token,image,name,network,descriptor)
+        bad=copy.deepcopy(c);bad['Config']['Image']='sha256:'+'6'*64
+        with self.assertRaises(ValueError): Q['validate_container'](bad,cid,token,image,name,network,descriptor)
+        selected={'Id':descriptor['digest'],'Os':'linux','Architecture':'arm64','Descriptor':descriptor}
+        self.assertEqual(Q['selected_descriptor'](selected,'arm64'),descriptor)
+        for mutate in ('digest','arch','missing','size'):
+            bad=copy.deepcopy(selected)
+            if mutate=='digest': bad['Descriptor']['digest']='sha256:'+'7'*64
+            elif mutate=='arch': bad['Descriptor']['platform']['architecture']='amd64'
+            elif mutate=='missing': del bad['Descriptor']
+            else: bad['Descriptor']['size']=True
+            with self.assertRaises(ValueError): Q['selected_descriptor'](bad,'arm64')
 
 if __name__=='__main__': unittest.main()

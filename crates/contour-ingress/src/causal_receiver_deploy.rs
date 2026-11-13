@@ -407,6 +407,26 @@ fn valid_ports(settings: &serde_json::Value) -> bool {
                 .all(|(key, value)| key == "1880/tcp" && value.is_null())
         })
 }
+fn matches_receiver_image(
+    container: &serde_json::Value,
+    selected: &serde_json::Value,
+    image_ref: &str,
+) -> bool {
+    let descriptor = selected
+        .get("Descriptor")
+        .and_then(|value| value.as_object());
+    descriptor.is_some()
+        && container.get("Image").and_then(|value| value.as_str()) == Some(image_ref)
+        && container
+            .get("Config")
+            .and_then(|value| value.get("Image"))
+            .and_then(|value| value.as_str())
+            == Some(image_ref)
+        && container
+            .get("ImageManifestDescriptor")
+            .and_then(|value| value.as_object())
+            == descriptor
+}
 fn inspect_container(
     raw: &[u8],
     cid: [u8; 32],
@@ -426,11 +446,9 @@ fn inspect_container(
         .ok_or(LaunchObserveError::Invalid)?;
     let (image_id, _, _, selected) = image.deployment_image();
     let image_ref = format!("sha256:{}", hex(&image_id));
-    let config_image = image.candidate_config();
     let owner_hex = hex(&owner);
     if value["Id"] != hex(&cid)
-        || value["Image"] != config_image
-        || config["Image"] != image_ref
+        || !matches_receiver_image(&value, selected, &image_ref)
         || value["Name"] != format!("/contour-causal-{owner_hex}")
         || config["Hostname"] != "causal-live"
         || config["User"] != "1000:1000"
@@ -816,8 +834,42 @@ impl<'a> ReceiverInertCreated<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_mounts, valid_namespace, valid_ports, valid_sysctls};
+    use super::{
+        exact_mounts, matches_receiver_image, valid_namespace, valid_ports, valid_sysctls,
+    };
     use serde_json::json;
+    #[test]
+    fn image_reference_and_exact_platform_descriptor_are_required() {
+        let index = format!("sha256:{}", "11".repeat(32));
+        let descriptor = json!({"digest":format!("sha256:{}", "22".repeat(32)),"mediaType":"application/vnd.oci.image.manifest.v1+json","size":1234,"platform":{"os":"linux","architecture":"arm64"}});
+        let selected = json!({"Descriptor":descriptor});
+        let good =
+            json!({"Image":index,"Config":{"Image":index},"ImageManifestDescriptor":descriptor});
+        assert!(matches_receiver_image(&good, &selected, &index));
+        for (key, value) in [
+            ("Image", json!(format!("sha256:{}", "33".repeat(32)))),
+            ("ImageManifestDescriptor", json!(null)),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(!matches_receiver_image(&bad, &selected, &index));
+        }
+        let mut bad = good.clone();
+        bad["Config"]["Image"] = json!("sha256:other");
+        assert!(!matches_receiver_image(&bad, &selected, &index));
+        let mut bad = good.clone();
+        bad["ImageManifestDescriptor"]["digest"] = json!(format!("sha256:{}", "44".repeat(32)));
+        assert!(!matches_receiver_image(&bad, &selected, &index));
+        let mut bad = good.clone();
+        bad["ImageManifestDescriptor"]["platform"]["architecture"] = json!("amd64");
+        assert!(!matches_receiver_image(&bad, &selected, &index));
+        let mut bad = good.clone();
+        bad.as_object_mut()
+            .unwrap()
+            .remove("ImageManifestDescriptor");
+        assert!(!matches_receiver_image(&bad, &selected, &index));
+        assert!(!matches_receiver_image(&good, &json!({}), &index));
+    }
     #[test]
     fn mounts_reject_substitution_writable_and_extra_seed() {
         let expected = [

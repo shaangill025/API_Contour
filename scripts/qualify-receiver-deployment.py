@@ -97,9 +97,26 @@ def journal_records(intent, cid, image, network):
     if len(cid)!=41 or not cid.startswith(b'CCI-CID1\n') or not any(cid[9:]): raise ValueError('cid')
     return payload[:32].hex(),cid[9:].hex()
 
-def validate_container(item,cid,token,image,name,network,config_digest,started=None):
+def selected_descriptor(item, architecture):
+    descriptor=item.get('Descriptor')
+    if type(descriptor) is not dict: raise ValueError('image descriptor')
+    platform=descriptor.get('platform')
+    digest=descriptor.get('digest')
+    if (item.get('Os')!='linux' or item.get('Architecture')!=architecture or
+        not isinstance(digest,str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',digest) or
+        item.get('Id')!=digest or descriptor.get('mediaType')!='application/vnd.oci.image.manifest.v1+json' or
+        type(descriptor.get('size')) is not int or descriptor['size']<=0 or
+        type(platform) is not dict or platform.get('os')!='linux' or platform.get('architecture')!=architecture):
+        raise ValueError('image descriptor')
+    return descriptor
+
+def same_json(left,right):
+    try: return json.dumps(left,sort_keys=True,separators=(',',':'),allow_nan=False)==json.dumps(right,sort_keys=True,separators=(',',':'),allow_nan=False)
+    except (TypeError,ValueError): return False
+
+def validate_container(item,cid,token,image,name,network,descriptor,started=None):
     cfg=item.get('Config') or {}; host=item.get('HostConfig') or {}; state=item.get('State') or {}
-    if item.get('Id')!=cid or item.get('Name')!='/contour-causal-'+token or item.get('Image')!=config_digest or cfg.get('Image')!='sha256:'+image or (cfg.get('Labels') or {}).get('org.apicontour.causal.owner')!=token or host.get('NetworkMode')!=name: raise ValueError('container ownership')
+    if item.get('Id')!=cid or item.get('Name')!='/contour-causal-'+token or item.get('Image')!='sha256:'+image or cfg.get('Image')!='sha256:'+image or not same_json(item.get('ImageManifestDescriptor'),descriptor) or (cfg.get('Labels') or {}).get('org.apicontour.causal.owner')!=token or host.get('NetworkMode')!=name: raise ValueError('container ownership')
     settings=item.get('NetworkSettings') or {}; networks=settings.get('Networks')
     if type(networks) is not dict or set(networks)!={name}: raise ValueError('container topology')
     endpoint=networks[name]
@@ -252,6 +269,10 @@ def main(path):
     probe_ok=status=='pass';outcome=status
     if not probe_ok and result_phase in ('create','start'): raise ValueError('unknown mutation')
     phase='cleanup';CURRENT_PHASE=phase
+    image_args=['image','inspect','--platform','linux/'+data['architecture'],'sha256:'+data['image_sha256']]
+    descriptor=selected_descriptor(inspect(image_args),data['architecture'])
+    def verify_image():
+        if not same_json(selected_descriptor(inspect(image_args),data['architecture']),descriptor): raise ValueError('image drift')
     # Unknown outcomes are quarantined: no CID adoption or cleanup on start failure.
     intent_path=journal/'create.intent';cid_path=journal/'create.cid';start_path=journal/'create.start'
     if intent_path.exists():
@@ -270,15 +291,16 @@ def main(path):
             import datetime
             try: datetime.datetime.fromisoformat(stamp.replace('Z','+00:00'))
             except ValueError: raise ValueError('generation') from None
-        validate_container(first,cid,owner_token,data['image_sha256'],name,network_id,config_digest,stamp)
-        second=inspect(['container','inspect',cid]);validate_container(second,cid,owner_token,data['image_sha256'],name,network_id,config_digest,stamp)
+        validate_container(first,cid,owner_token,data['image_sha256'],name,network_id,descriptor,stamp)
+        second=inspect(['container','inspect',cid]);validate_container(second,cid,owner_token,data['image_sha256'],name,network_id,descriptor,stamp)
         if any(first.get(k)!=second.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')): raise ValueError('container changed')
         if snapshot_file(intent_path,512,mode=0o600)[1]!=intent_id or snapshot_file(cid_path,128,mode=0o600)[1]!=cid_id: raise ValueError('journal drift')
         members=[cid] if (second.get('State') or {}).get('Running') is True else []
         validate_network(inspect(['network','inspect',network_id]),network_id,name,token,members)
+        verify_image()
         if (second.get('State') or {}).get('Running') is True: docker(['stop','--time','2',cid])
-        stopped=inspect(['container','inspect',cid]);validate_container(stopped,cid,owner_token,data['image_sha256'],name,network_id,config_digest,stamp)
-        record(output,'inspect-after.json',stopped);docker(['container','rm',cid])
+        stopped=inspect(['container','inspect',cid]);validate_container(stopped,cid,owner_token,data['image_sha256'],name,network_id,descriptor,stamp)
+        record(output,'inspect-after.json',stopped);verify_image();docker(['container','rm',cid])
         if docker(['container','ls','-a','--no-trunc','--filter','id='+cid,'--format','{{.ID}}']): raise ValueError('container removal unknown')
     elif cid_path.exists() or start_path.exists(): raise ValueError('incomplete journal')
     validate_network(inspect(['network','inspect',network_id]),network_id,name,token,[])
