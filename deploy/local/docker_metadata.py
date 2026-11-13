@@ -236,8 +236,8 @@ class Session:
         self.tool = self.endpoint = self.directory = None
         self._guard = threading.Lock(); self._cancel = threading.Event()
 
-    def _context(self, deadline=None):
-        limit = min(self.deadline,deadline) if deadline is not None and self.deadline is not None else (deadline or self.deadline)
+    def _context(self, deadline=None, *, cleanup=False):
+        limit = None if cleanup else (min(self.deadline,deadline) if deadline is not None and self.deadline is not None else (deadline or self.deadline))
         if limit is not None and time.monotonic() >= limit: raise TimeoutError()
         if _tool(self.docker) != self.tool or _socket(self.socket) != self.endpoint or _config(self.config) != self.directory: _fail()
         if limit is not None and time.monotonic() >= limit: raise TimeoutError()
@@ -314,7 +314,7 @@ class Session:
         if not acquired: raise MetadataError('metadata session cleanup failed') from None
         try:
             try:
-                if self.active and not self._cancel.is_set(): self._context()
+                if self.active and not self._cancel.is_set(): self._context(cleanup=True)
             finally: self._close()
             if self._cancel.is_set(): _fail()
         except BaseException:

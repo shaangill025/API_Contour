@@ -469,36 +469,62 @@ def qualify_lost_publication_ack(proof):
 
 
 def _pause_and_reconcile(owner,proof=None):
-    envoy=owner.peer.envoy_cid; paused=False
+    envoy=owner.peer.envoy_cid; paused=False; pause_error=None
     before=owner._load()
     owner._managed_gate(before)
+    original_obj=products._objects(['docker','inspect',envoy])
+    fixed_keys=('Id','Image','Config','HostConfig','Mounts')
+    if (type(original_obj) is not dict or original_obj.get('Id')!=envoy or original_obj.get('Image')!=owner.peer.envoy_image_id
+        or type(original_obj.get('Config')) is not dict or type(original_obj.get('HostConfig')) is not dict or type(original_obj.get('Mounts')) is not list
+        or (original_obj.get('State') or {}).get('StartedAt')!=before['binding']['envoy_started']): raise ValueError('Envoy identity unavailable')
+    fixed={key:original_obj[key] for key in fixed_keys}
     previous=proof.publication_ack() if proof is not None else None
-    try:
+    original_confirm=owner._confirm
+    def confirm(*args,**kwargs):
+        nonlocal paused,pause_error
+        if paused: raise RuntimeError('duplicate confirmation')
         paused=True
-        if products._command(['docker','pause',envoy],15)!=envoy.encode(): raise RuntimeError('Envoy pause uncertain')
-        obj=products._objects(['docker','inspect',envoy]); state=obj.get('State') or {}
-        if state.get('Running') is not True or state.get('Paused') is not True or state.get('StartedAt')!=before['binding']['envoy_started']: raise ValueError('paused Envoy generation changed')
+        try:
+            if products._command(['docker','pause',envoy],15)!=envoy.encode(): raise RuntimeError('Envoy pause uncertain')
+            obj=products._objects(['docker','inspect',envoy]); state=obj.get('State') or {}
+            if state.get('Running') is not True or state.get('Paused') is not True or state.get('StartedAt')!=before['binding']['envoy_started']: raise ValueError('paused Envoy generation changed')
+        except BaseException as error:
+            pause_error=error
+            raise
+        return original_confirm(*args,**kwargs)
+    owner._confirm=confirm
+    try:
         try: owner.renew()
         except (ValueError,RuntimeError,OSError,TimeoutError): pass
         else: raise AssertionError('unconfirmed publication accepted')
+        if pause_error is not None: raise pause_error
         pending=owner._load()['pending']
         if type(pending) is not dict or pending.get('phase')!='staged': raise ValueError('staged publication missing')
-        if proof is None: raise ValueError('qualification publication proof required')
+        if not paused or proof is None: raise ValueError('qualification publication proof required')
         receipt=proof.publication_ack(); expected=hashlib.sha256(owner._document(pending['candidate'],pending['commitment'])).hexdigest()
         if (type(receipt) is not dict or set(receipt)!={'sequence','publisher','document_sha256','nonce'} or type(receipt['sequence']) is not int or receipt['sequence']!=(1 if previous is None else previous['sequence']+1) or receipt['publisher']!=owner.publisher.identity() or receipt['document_sha256']!=expected or not re.fullmatch('[0-9a-f]{32}',receipt['nonce'])): raise ValueError('publication ACK missing')
         obj=products._objects(['docker','inspect',envoy]); state=obj.get('State') or {}
         if state.get('Running') is not True or state.get('Paused') is not True or state.get('StartedAt')!=before['binding']['envoy_started']: raise ValueError('paused Envoy generation changed')
-        for operation in (owner.renew,owner.rollback):
-            try: operation()
-            except RuntimeError: pass
-            else: raise AssertionError('pending publication did not block')
     finally:
+        owner._confirm=original_confirm
         primary=sys.exc_info()[1]
         try:
-            if paused and products._command(['docker','unpause',envoy],15)!=envoy.encode(): raise RuntimeError('Envoy unpause uncertain')
+            if paused:
+                current=products._objects(['docker','inspect',envoy])
+                state=current.get('State') if type(current) is dict else None
+                if (type(current) is not dict or any(current.get(key)!=value for key,value in fixed.items())
+                    or type(state) is not dict or state.get('StartedAt')!=before['binding']['envoy_started']
+                    or state.get('Running') is not True or type(state.get('Paused')) is not bool):
+                    raise RuntimeError('Envoy cleanup identity uncertain')
+                if state['Paused'] and products._command(['docker','unpause',envoy],15)!=envoy.encode(): raise RuntimeError('Envoy unpause uncertain')
         except BaseException as cleanup:
             if primary is not None: raise BaseExceptionGroup('qualification and unpause failures',[primary,cleanup]) from None
             raise
+    owner._managed_gate(before)
+    for operation in (owner.renew,owner.rollback):
+        try: operation()
+        except RuntimeError: pass
+        else: raise AssertionError('pending publication did not block')
     owner.reconcile()
 
 
