@@ -79,6 +79,9 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
     leaf = hashlib.sha256(client).hexdigest()
     backend = hashlib.sha256(server).hexdigest()
     if len({leaf, backend, hashlib.sha256(other).hexdigest(), 'ed' * 32, 'e9' * 32}) != 5: raise ValueError('fact leaf collision')
+    # Distinct purpose selectors are synthetic enrollment data, not TLS proof.
+    observer_selector=hashlib.sha256(b'fixture/receiver-fact/gateway-observer/1\n'+ca).hexdigest()
+    backend_selector=hashlib.sha256(b'fixture/receiver-fact/gateway-backend/1\n'+ca).hexdigest()
     # Separate gateway lifecycle and policy; these are synthetic public enrollment inputs.
     t, _, _, _, p, service, env, deployment, _, _ = i
     gc='f6000000-0000-4000-8000-000000000021'; gs='f7000000-0000-4000-8000-000000000021'
@@ -88,7 +91,7 @@ def run(*, execute, openssl, write_private, private_dir, probe_call, issuer_payl
     execute("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_admin; SELECT contour.enroll_origin('%s','%s','%s','%s','%s','%s','%s','trusted_platform_v1',decode(repeat('cb',32),'hex')); RESET ROLE;"%(t,t,gl,p,service,env,deployment,gi))
     now=datetime.datetime.now(datetime.timezone.utc); stamp=lambda x:x.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     start=stamp(now-datetime.timedelta(minutes=1)); end=stamp(now+datetime.timedelta(minutes=8))
-    execute("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_causal_evidence_provisioner; SELECT * FROM contour.enroll_causal_gateway(ROW('%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,decode(repeat('c8',32),'hex'),decode(repeat('c9',32),'hex'),decode(repeat('ca',32),'hex'),1,decode('01','hex'),'%s'::timestamptz,'%s'::timestamptz,300000000)::contour.gateway_enrollment_claim); RESET ROLE;"%(t,t,gid,gc,gs,p,service,env,deployment,gi,start,end))
+    execute("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_causal_evidence_provisioner; SELECT * FROM contour.enroll_causal_gateway(ROW('%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,'%s'::uuid,decode(repeat('c8',32),'hex'),decode('%s','hex'),decode('%s','hex'),1,decode('01','hex'),'%s'::timestamptz,'%s'::timestamptz,300000000)::contour.gateway_enrollment_claim); RESET ROLE;"%(t,t,gid,gc,gs,p,service,env,deployment,gi,observer_selector,backend_selector,start,end))
     gateway=execute("SELECT generation FROM contour.causal_gateway_enrollments WHERE tenant_id='%s' AND gateway_id='%s';"%(t,gid))
     if not _HEX32.fullmatch(gateway): raise ValueError('fact gateway')
     sql=("SELECT set_config('apicontour.tenant_id','%s',false); SET ROLE contour_causal_evidence_provisioner; "

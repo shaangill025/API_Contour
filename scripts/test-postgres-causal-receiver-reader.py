@@ -22,7 +22,13 @@ def failure_diagnostic(error,phase):
         name=Path(tb.tb_frame.f_code.co_filename).name
         if name in LOCATION_FILES and 1<=tb.tb_lineno<=99999: frames.append(name+':'+str(tb.tb_lineno))
         tb=tb.tb_next
-    return 'FAIL receiver_reader_fixture phase='+phase+' type='+kind+' location='+(','.join(frames[-6:]) or 'unavailable')
+    diagnostic='FAIL receiver_reader_fixture phase='+phase+' type='+kind+' location='+(','.join(frames[-6:]) or 'unavailable')
+    # The transport constructs this closed finite diagnostic; never print SQL/errors.
+    if type(error).__name__=='ReceiverQueryError':
+        detail=str(error)
+        pattern=r'receiver-sql state=(?:[0-9A-Z]{5}|unavailable) function=(?:contour\.[a-z_]+|inline_code_block|unavailable) line=(?:[0-9]{1,4}|unavailable) input_line=(?:[0-9]{1,6}|unavailable) case=(?:[a-z-]+|unavailable)'
+        if len(detail)<=300 and re.fullmatch(pattern,detail): diagnostic+=' '+detail
+    return diagnostic
 
 START=re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z\Z')
 
