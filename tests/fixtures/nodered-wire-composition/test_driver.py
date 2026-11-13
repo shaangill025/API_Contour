@@ -205,6 +205,20 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(sync.call_args_list[0].args[0],Path(tmp).resolve())
         self.assertTrue(all(call.args[0].parent==Path(tmp).resolve() for call in sync.call_args_list[1:]))
 
+    def test_explicit_single_mode_runs_only_requested_component(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(q.sys,'argv',['driver','--mode','wire-composition']), \
+             mock.patch.object(q.os,'getuid',return_value=1000), mock.patch.object(q.os,'umask'), \
+             mock.patch.object(q.tempfile,'gettempdir',return_value=tmp), \
+             mock.patch.object(q,'head_and_clean',return_value='head'), mock.patch.object(q,'snapshot',return_value={}), \
+             mock.patch.object(q,'verify_profile'), mock.patch.object(q,'validate_image_platform'), mock.patch.object(q,'make_certificates'), \
+             mock.patch.object(q,'run_mode') as run, mock.patch.object(q,'sync_directory'), \
+             mock.patch.object(q,'checked',return_value=b'[{"Id":"sha256:' + b'b'*64 + b'","Architecture":"amd64","Os":"linux"}]'), \
+             mock.patch('builtins.print') as printed:
+            q.main()
+        self.assertEqual(run.call_count,1);self.assertEqual(run.call_args.args[0],'wire-composition')
+        output=' '.join(str(call.args) for call in printed.call_args_list)
+        self.assertIn('single synthetic wire-composition mode',output);self.assertNotIn('seven synthetic inactive',output)
+
     def test_cli_rejects_arguments_before_external_commands(self):
         with mock.patch.object(q.sys,'argv',['driver','--unknown']), mock.patch.object(q,'head_and_clean') as head:
             with self.assertRaises(ValueError): q.main()

@@ -314,7 +314,9 @@ def run_mode(mode, folder, certs, image_id):
 def main():
     global _MODE
     _phase('arguments'); _MODE='none'; _ERROR_PHASE.clear()
-    if len(sys.argv)!=1: raise ValueError('no arguments accepted')
+    if len(sys.argv)==1: modes=list(MODES)
+    elif sys.argv[1:]==['--mode','wire-composition']: modes=['wire-composition']
+    else: raise ValueError('unsupported mode')
     if os.getuid()==0: raise RuntimeError('nonroot required')
     os.umask(0o077)
     _phase('source'); head=head_and_clean(); before=snapshot(); verify_profile(before)
@@ -334,7 +336,7 @@ def main():
     try:
         _phase('certificates')
         make_certificates(certs)
-        for index,mode in enumerate(MODES):
+        for index,mode in enumerate(modes):
             _MODE=mode; _phase('source')
             if head_and_clean()!=head or snapshot()!=before: raise RuntimeError('source changed')
             mode_dir=folder/('%02d-%s'%(index,mode)); mode_dir.mkdir(mode=0o700)
@@ -353,8 +355,10 @@ def main():
             if failure is not None: raise BaseExceptionGroup('qualification and cleanup failed',[failure,exc]) from None
             raise
     if failure is not None: raise failure
-    if passed != list(MODES): raise RuntimeError('qualification incomplete')
-    _phase('complete'); print('PASS: seven synthetic inactive Node modes; no production authority',flush=True)
+    if passed != modes: raise RuntimeError('qualification incomplete')
+    _phase('complete')
+    if modes==list(MODES): print('PASS: seven synthetic inactive Node modes; no production authority',flush=True)
+    else: print('PASS: single synthetic wire-composition mode; no production authority',flush=True)
 
 
 if __name__=='__main__':
