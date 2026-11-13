@@ -170,6 +170,7 @@ fn run() -> Result<(), &'static str> {
         })
         .await
         .map_err(|_| "image")?;
+        println!("receiver504_image_config={}", image.candidate_config());
         let sources = ReceiverCandidateSources::seal(&input.source_root).map_err(|_| "sources")?;
         let m = input.material;
         let paths = ReceiverMaterialPaths {
