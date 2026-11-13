@@ -27,6 +27,8 @@ BATCH='00000000-0000-4000-8000-00000000ce09'
 RECORD='00000000-0000-4000-8000-00000000ce0a'
 PROFILE='00000000-0000-4000-8000-000000000503'
 ARTIFACT='a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e'
+ARRIVAL_BATCH='31000000-0000-4000-8000-000000000100'
+ARRIVAL_RECORDS=tuple('31000000-0000-4000-8000-%012x' % (0x200+i) for i in range(24))
 
 
 def _uuid(value):
@@ -42,6 +44,17 @@ def _sign(policy, directory, name):
     enc=lambda value: base64.urlsafe_b64encode(value).rstrip(b'=').decode()
     return json.dumps(dict(key_id='fixture',signature_profile='ed25519-v1',payload_base64url=enc(payload),signature_base64url=enc(signature.read_bytes())),separators=(',',':')).encode()
 
+
+def arrival_batch(body, revision):
+    """24 distinct actual REQUESTs; only the opt-in edge lane calls this."""
+    candidate=copy.deepcopy(body)
+    candidate['batch_id']=ARRIVAL_BATCH
+    candidate['records']=[]
+    for record_id in ARRIVAL_RECORDS:
+        wrapper=copy.deepcopy(body['records'][1])
+        wrapper['record'].update(record_id=record_id,source_id=GATE_SOURCE,policy_revision=revision,direction='request')
+        candidate['records'].append(wrapper)
+    return candidate
 
 def run_cases(execute, submit, body, port, directory, environment, target_dir, *, receiver_scenario=None, receiver_after=None):
     tenant=_uuid(body['tenant_id']); collector=_uuid(body['collector_id'])
@@ -77,6 +90,10 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir, *
     probe=Path(target_dir)/'debug/examples/catalog_probe'
     result=subprocess.run([str(probe),str(port),str(directory/'ca.crt'),BATCH,'Processed',tenant,collector,'5000'],input='\n',capture_output=True,text=True,env=environment,timeout=15,check=True)
     if result.stdout.strip()!='Processed' or result.stderr: raise RuntimeError('observer catalog materialization failed')
+    if sys.argv[1:]==['--causal-edge-reconciliation']:
+        submit(arrival_batch(body,revision),status='accepted')
+        result=subprocess.run([str(probe),str(port),str(directory/'ca.crt'),ARRIVAL_BATCH,'Processed',tenant,collector,'5000'],input='\n',capture_output=True,text=True,env=environment,timeout=15,check=True)
+        if result.stdout.strip()!='Processed' or result.stderr: raise RuntimeError('arrival catalog materialization failed')
     # Exact 1..25 comes from the historical lane; apply the trusted migrations separately.
     if execute("SELECT array_agg(version ORDER BY version)::text FROM contour.schema_migrations;")!='{'+','.join(map(str,range(1,26)))+'}': raise RuntimeError('observer input ledger mismatch')
     for name in ('0026_causal_evidence_enrollment.sql','0027_causal_observer_inbox.sql'):
@@ -101,6 +118,8 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir, *
         if receiver_after is None: raise ValueError('edge requires receiver scenario')
         edge = runpy.run_path(str(ROOT / 'scripts/test-postgres-tls.py'))['checked_edge_loader']()
         combined += '\n' + edge['continuation_sql']()
+        if sys.argv[1:] == ['--causal-edge-reconciliation']:
+            combined += '\n' + edge['arrival_sql']()
         if sys.argv[1:] == ['--causal-human-connections']:
             human = runpy.run_path(str(ROOT / 'scripts/test-postgres-tls.py'))['checked_human_causal_loader']()
             combined += '\n' + human['continuation_sql']()

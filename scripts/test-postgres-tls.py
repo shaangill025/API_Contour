@@ -135,6 +135,7 @@ def checked_edge_loader():
              'db/opt-in-migrations/0031_causal_edge_reconciliation.sql',
              'tests/fixtures/causal-edge-reconciliation/seed.sql',
              'tests/fixtures/causal-edge-reconciliation/clock_boundaries.sql',
+             'tests/fixtures/causal-edge-reconciliation/arrival.sql',
              'db/tests/causal_join_facts_integrity.sql',
              'db/tests/causal_edge_reconciliation.sql')
     if bounded_git(['status','--porcelain','--untracked-files=all'],16777216): raise ValueError('fixture source is not clean')

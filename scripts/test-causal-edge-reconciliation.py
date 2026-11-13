@@ -19,6 +19,14 @@ def continuation_sql():
     return '\n'.join((ledger(29), values[0], ledger(30), values[1], ledger(31), *values[2:]))
 
 
+def arrival_sql():
+    """Return only the fixed, bounded permutation fixture."""
+    value = _fixed_driver['arrival_sql']()
+    if type(value) is not str or not value or len(value.encode('utf-8')) > 1000000:
+        raise ValueError('invalid arrival fixture')
+    return value
+
+
 def write_receipt(directory):
     path = Path(directory) / 'causal-edge-reconciliation.done'
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
