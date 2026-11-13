@@ -54,6 +54,7 @@ def source_paths():
            ROOT/'crates/contour-core/src/causal_grant.rs',ROOT/'crates/contour-core/src/policy.rs',
            ROOT/'crates/contour-core/src/causal_event.rs',
            ROOT/'crates/contour-postgres/tests/fixtures/causal_bridge.json',
+           ROOT/'crates/contour-postgres/tests/fixtures/causal_candidate_504.json',
            ROOT/'db/bootstrap.sql',ROOT/'db/tests/causal_runtime_registry_pre.sql',
            ROOT/'db/tests/causal_session_setup.sql',ROOT/'scripts/test-postgres-causal-bridge.py',
            ROOT/'tests/fixtures/causal-bridge/test_bridge_driver.py',

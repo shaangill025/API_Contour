@@ -323,6 +323,13 @@ class DriverTests(unittest.TestCase):
                 for path in MODULE['source_paths']():
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 before=MODULE['snapshot']()
+                fixture=root/'crates/contour-postgres/tests/fixtures/causal_candidate_504.json'
+                self.assertIn(str(fixture),before)
+                fixture.write_bytes(b'changed')
+                self.assertNotEqual(before[str(fixture)],MODULE['snapshot']()[str(fixture)])
+                fixture.unlink()
+                with self.assertRaisesRegex(ValueError,'source file unavailable'): MODULE['snapshot']()
+                fixture.write_bytes(b'original')
                 target=root/'db/opt-in-migrations/0021_origin_admission.sql';target.write_bytes(b'mutated')
                 self.assertNotEqual(before,MODULE['snapshot']())
                 target.unlink()

@@ -226,6 +226,35 @@ impl CausalIssue {
         }
         Ok(())
     }
+    /// Signature/scope preflight for an inert receiver candidate. This local
+    /// wall-clock check is not database time or peer, deployment, session, or permit authority.
+    pub fn signature_preflight_504(
+        &self,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| CausalError::Expired)?;
+        let nanos = i128::try_from(duration.as_nanos()).map_err(|_| CausalError::Expired)?;
+        let now =
+            OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| CausalError::Expired)?;
+        self.signature_preflight_504_at(peer, grant_keys, policy_keys, now)
+    }
+    fn signature_preflight_504_at(
+        &self,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        now: OffsetDateTime,
+    ) -> Result<(), CausalError> {
+        let (grant, _) = verify(self, peer, grant_keys, policy_keys, now)?;
+        if SessionProfile::from_verified(&grant)? != SessionProfile::Candidate504 {
+            return Err(CausalError::Identity);
+        }
+        Ok(())
+    }
     /// Parse only original request inputs, with no verification or session creation.
     pub fn from_original_bytes(bytes: &[u8]) -> Result<Self, CausalError> {
         const FIXED: usize = 4 + 10 * 36 + 32 + 36 + 8 + 8;
@@ -1692,6 +1721,151 @@ mod tests {
         assert!(!old_session.is_legacy_intent_profile());
         assert!(old_session.wire_profile_503().is_none());
     }
+    #[test]
+    fn receiver_preflight_checks_signed_profile_scope_and_policy() {
+        let receiver: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/causal_candidate_504.json"))
+                .unwrap();
+        let legacy = fixture();
+        let receiver_keys = CausalGrantKeys::new(&[(
+            "receiver-fixture",
+            hex32(receiver["public_hex"].as_str().unwrap()),
+        )])
+        .unwrap();
+        let (_, policy_keys) = keys(&legacy);
+        let issue = |name: &str, policy: &str| {
+            CausalIssue::new(
+                binding(),
+                ID,
+                Duration::from_secs(60),
+                &bytes(&receiver, name),
+                &bytes(&legacy, policy),
+            )
+            .unwrap()
+        };
+        let valid = issue("valid", "policy");
+        assert_eq!(
+            valid.signature_preflight_504_at(&[3; 32], &receiver_keys, &policy_keys, now()),
+            Ok(())
+        );
+        assert_eq!(
+            valid.signature_preflight_503_at(&[3; 32], &receiver_keys, &policy_keys, now()),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            valid.signature_preflight_504_at(&[9; 32], &receiver_keys, &policy_keys, now()),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            valid.signature_preflight_504_at(
+                &[3; 32],
+                &receiver_keys,
+                &policy_keys,
+                now() + time::Duration::days(1)
+            ),
+            Err(CausalError::Expired)
+        );
+        assert_eq!(
+            issue("valid", "wrong_policy_tenant").signature_preflight_504_at(
+                &[3; 32],
+                &receiver_keys,
+                &policy_keys,
+                now()
+            ),
+            Err(CausalError::Identity)
+        );
+        // The core verifier checks the Ed25519 signature before profile semantics.
+        // Semantic proves each signed cross-profile mutation passed that check.
+        for name in ["artifact_hash", "wire_hash", "wire_name"] {
+            assert!(
+                matches!(
+                    VerifiedCausalGrant::from_signed_json(
+                        &bytes(&receiver, name),
+                        &receiver_keys,
+                        now()
+                    ),
+                    Err(contour_core::CausalGrantError::Semantic)
+                ),
+                "{name}"
+            );
+            assert_eq!(
+                issue(name, "policy").signature_preflight_504_at(
+                    &[3; 32],
+                    &receiver_keys,
+                    &policy_keys,
+                    now()
+                ),
+                Err(CausalError::Scope),
+                "{name}"
+            );
+        }
+        assert!(
+            VerifiedCausalGrant::from_signed_json(
+                &bytes(&receiver, "wrong_tenant"),
+                &receiver_keys,
+                now()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            issue("wrong_tenant", "policy").signature_preflight_504_at(
+                &[3; 32],
+                &receiver_keys,
+                &policy_keys,
+                now()
+            ),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            issue("wire", "policy").signature_preflight_504_at(
+                &[3; 32],
+                &receiver_keys,
+                &policy_keys,
+                now()
+            ),
+            Err(CausalError::Identity)
+        );
+        assert_eq!(
+            issue("wire", "policy").signature_preflight_503_at(
+                &[3; 32],
+                &receiver_keys,
+                &policy_keys,
+                now()
+            ),
+            Ok(())
+        );
+        let (legacy_keys, _) = keys(&legacy);
+        assert_eq!(
+            request(&legacy, "grant", "policy").signature_preflight_504_at(
+                &[3; 32],
+                &legacy_keys,
+                &policy_keys,
+                now()
+            ),
+            Err(CausalError::Identity)
+        );
+        let mut damaged = receiver["valid"].clone();
+        let signature = damaged["signature_base64url"].as_str().unwrap().to_owned();
+        let first = if signature.starts_with('A') { "B" } else { "A" };
+        damaged["signature_base64url"] = json!(format!("{first}{}", &signature[1..]));
+        let invalid = CausalIssue::new(
+            binding(),
+            ID,
+            Duration::from_secs(60),
+            &serde_json::to_vec(&damaged).unwrap(),
+            &bytes(&legacy, "policy"),
+        )
+        .unwrap();
+        assert_eq!(
+            invalid.signature_preflight_504_at(&[3; 32], &receiver_keys, &policy_keys, now()),
+            Err(CausalError::Signature)
+        );
+        assert!(matches!(
+            issue_sql(SessionProfile::Candidate504),
+            Err(CausalError::Identity)
+        ));
+    }
+
     #[test]
     fn profile_authority_is_a_closed_pair_mapping() {
         assert!(authorized_profile(PROFILE, ARTIFACT));
