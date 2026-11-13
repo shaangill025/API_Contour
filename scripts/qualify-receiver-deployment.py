@@ -232,7 +232,7 @@ def main(path):
     cargo=envtools['CARGO'][0];rustc=envtools['RUSTC'][0]
     env=['/usr/bin/env','-i','LC_ALL=C','HOME='+os.environ.get('HOME',''), 'PATH=/usr/bin:/bin','RUSTC='+rustc,'CARGO_TARGET_DIR='+str(target)]
     if os.environ.get('CARGO_HOME'): env.append('CARGO_HOME='+os.environ['CARGO_HOME'])
-    build=run([*env,cargo,'build','-p','contour-ingress','--example','receiver_deployment_probe','--locked','--offline','--message-format=json'],timeout=540)
+    build=run([*env,cargo,'build','-p','contour-ingress','--example','receiver_deployment_probe','--locked','--offline','--message-format=json'],timeout=540,log=output.path/'build.log')
     fences();artifact,artifact_id=select_artifact(build,target)
     token=secrets.token_hex(32); name='contour-receiver504-'+secrets.token_hex(16)
     record(output,'network-intent.json',{'version':1,'head':head,'name':name,'owner':token})
@@ -294,11 +294,23 @@ def entry():
     if len(sys.argv)!=3 or sys.argv[1]!='--run-owned': raise ValueError('arguments')
     return main(sys.argv[2])
 
+def failure_diagnostic(error):
+    allowed={'ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','TypeError','KeyError','IndexError','AttributeError','ExceptionGroup','BaseExceptionGroup'}
+    kind=type(error).__name__
+    if kind not in allowed: kind='OtherError'
+    lines=[]; trace=error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == __file__ and 1 <= trace.tb_lineno <= 999999:
+            lines.append(trace.tb_lineno)
+        trace=trace.tb_next
+    return kind,lines[-3:]
+
 def report(run=entry):
     try:
         value=run()
-    except BaseException:
-        value={'status':'fail','phase':CURRENT_PHASE,'cleanup':'unknown'}
+    except BaseException as error:
+        kind,lines=failure_diagnostic(error)
+        value={'status':'fail','phase':CURRENT_PHASE,'cleanup':'unknown','failure_type':kind,'source_lines':lines}
         if CURRENT_OWNER is not None:
             value['output']=str(CURRENT_OWNER.path)
             try: record(CURRENT_OWNER,'receipt.json',{'version':1,**value})

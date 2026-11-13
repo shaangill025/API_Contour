@@ -22,7 +22,12 @@ class QualifierTests(unittest.TestCase):
         with contextlib.redirect_stdout(output): actual=report(fail)
         self.assertEqual(actual,1)
         lines=output.getvalue().splitlines();self.assertEqual(len(lines),1)
-        self.assertEqual(json.loads(lines[0]),{'status':'fail','phase':'input','cleanup':'unknown'})
+        value=json.loads(lines[0])
+        self.assertEqual(value['status'],'fail');self.assertEqual(value['phase'],'input');self.assertEqual(value['cleanup'],'unknown')
+        self.assertEqual(value['failure_type'],'RuntimeError')
+        self.assertTrue(len(value['source_lines'])<=3 and all(type(line) is int and 1<=line<=999999 for line in value['source_lines']))
+        self.assertNotIn('private diagnostic',output.getvalue())
+        self.assertNotIn(__file__,output.getvalue())
     def test_duplicate_and_oversize_json_rejected(self):
         with self.assertRaises(ValueError): Q['parse'](b'{"x":1,"x":2}')
         with self.assertRaises(ValueError): Q['parse'](b' '*32769)
