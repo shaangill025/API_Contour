@@ -12,6 +12,8 @@ mod causal_receiver_reader;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
+mod human_causal_connections;
+pub use human_causal_connections::{HumanCausalConnectionPage, HumanCausalConnectionQuery};
 mod human_observations;
 pub use human_observations::{HumanObservationError, HumanObservationPage};
 mod human_catalog;

@@ -30,6 +30,7 @@
     "/v1/operations/{id}/variants": {
       "$ref": "./paths/catalog.json#/~1v1~1operations~1{id}~1variants"
     },
+    "/v1/observations/{id}/connections": {"get":{"operationId":"listObservationHistoricalConnections","description":"Read retained, committed historical connections for the exact observation and operation after current human authorization for both endpoint services. Hidden endpoints are excluded before pagination.","security":[{"userOidc":[]}],"parameters":[{"name":"id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/HistoryUuid"}},{"name":"operation_id","in":"query","required":true,"schema":{"$ref":"#/components/schemas/HistoryUuid"}},{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":50,"default":50}},{"name":"cursor","in":"query","schema":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.[0-9a-f]{32}\\.[0-9a-f]{32}$"}}],"responses":{"200":{"description":"Authorized historical connections. Absence does not imply complete capture or current connectivity.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HistoricalCausalConnectionPage"}}}},"400":{"description":"Invalid query or identifier.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"401":{"description":"Authentication required.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"403":{"description":"Configured scope forbidden.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},"503":{"description":"Evidence, cursor, authorization or database unavailable.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}}}}},
     "/v1/observations": {
       "get": {
         "operationId": "listObservationHistory",
@@ -131,6 +132,10 @@
       }
     },
     "schemas": {
+      "CausalConnectionEndpoint": {"type":"object","additionalProperties":false,"required":["project_id","service_id","environment_id","deployment_id","instance_id","batch_id","event_id","receipt_id"],"properties":{"project_id":{"$ref":"#/components/schemas/HistoryUuid"},"service_id":{"$ref":"#/components/schemas/HistoryUuid"},"environment_id":{"$ref":"#/components/schemas/HistoryUuid"},"deployment_id":{"$ref":"#/components/schemas/HistoryUuid"},"instance_id":{"$ref":"#/components/schemas/HistoryUuid"},"batch_id":{"$ref":"#/components/schemas/HistoryUuid"},"event_id":{"$ref":"#/components/schemas/HistoryUuid"},"receipt_id":{"$ref":"#/components/schemas/HistoryUuid"}}},
+      "HistoricalCausalConnection": {"type":"object","additionalProperties":false,"required":["resolved_at","expires_at","producer","receiver"],"properties":{"resolved_at":{"type":"string","format":"date-time"},"expires_at":{"type":"string","format":"date-time"},"producer":{"$ref":"#/components/schemas/CausalConnectionEndpoint"},"receiver":{"$ref":"#/components/schemas/CausalConnectionEndpoint"}}},
+      "HistoricalCausalConnectionPage": {"type":"object","additionalProperties":false,"required":["items","next_cursor"],"properties":{"items":{"type":"array","maxItems":50,"items":{"$ref":"#/components/schemas/HistoricalCausalConnection"}},"next_cursor":{"oneOf":[{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.[0-9a-f]{32}\\.[0-9a-f]{32}$"},{"type":"null"}]}}},
+
       "HistoryUuid": {"type":"string","format":"uuid","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
       "ObservationHistoryPage": {
         "type":"object","additionalProperties":false,"required":["items","next_cursor"],
