@@ -121,20 +121,20 @@ ROLLBACK;
 \echo receiver-case=second-credential
 -- Separate current receiver: revocation cannot mask the primary closure checks.
 SET ROLE contour_admin;
-SELECT contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000001','fa000000-0000-4000-8000-000000000009','f9000000-0000-4000-8000-000000000001',decode(repeat('b5',32),'hex'));
+SELECT contour.enroll_origin_credential('f0000000-0000-4000-8000-000000000001','fa000000-0000-4000-8000-000000000009','f9000000-0000-4000-8000-000000000003',decode(repeat('b5',32),'hex'));
 RESET ROLE;
 SET ROLE contour_causal_provisioner;
 \echo receiver-case=profile-second
 SELECT contour.register_causal_profile('f0000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'));
 \echo receiver-case=runtime-second
-SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008','f6000000-0000-4000-8000-000000000001','f7000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000001','f9000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000504',decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'),decode(repeat('b8',32),'hex'));
+SELECT contour.enroll_causal_runtime('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008','f6000000-0000-4000-8000-000000000003','f7000000-0000-4000-8000-000000000003','f1000000-0000-4000-8000-000000000001','f2000000-0000-4000-8000-000000000001','f3000000-0000-4000-8000-000000000001','f4000000-0000-4000-8000-000000000001','f5000000-0000-4000-8000-000000000003','f9000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000504',decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'),decode(repeat('b8',32),'hex'));
 RESET ROLE;
 CREATE FUNCTION pg_temp.receiver_session_rev() RETURNS contour.causal_session_claim LANGUAGE sql AS $$ SELECT ROW(
  'f0000000-0000-4000-8000-000000000001'::uuid,'fc000000-0000-4000-8000-000000000008'::uuid,
- 'f6000000-0000-4000-8000-000000000001'::uuid,'f7000000-0000-4000-8000-000000000001'::uuid,
+ 'f6000000-0000-4000-8000-000000000003'::uuid,'f7000000-0000-4000-8000-000000000003'::uuid,
  'f1000000-0000-4000-8000-000000000001'::uuid,'f2000000-0000-4000-8000-000000000001'::uuid,
  'f3000000-0000-4000-8000-000000000001'::uuid,'f4000000-0000-4000-8000-000000000001'::uuid,
- 'f5000000-0000-4000-8000-000000000001'::uuid,'f9000000-0000-4000-8000-000000000001'::uuid,
+ 'f5000000-0000-4000-8000-000000000003'::uuid,'f9000000-0000-4000-8000-000000000003'::uuid,
  decode(repeat('b8',32),'hex'),'nodered_5_0_9_receiver_v1',decode('c370140ed0384aa54048fb41b4a35cca162370fd25c58f55cb8b037998e308b0','hex'),
  'fe000000-0000-4000-8000-000000000008'::uuid,1,decode(repeat('ab',32),'hex'),
  current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',
@@ -145,7 +145,7 @@ SELECT * FROM contour.issue_causal_session(pg_temp.receiver_session_rev());
 RESET ROLE;
 CREATE FUNCTION pg_temp.receiver_claim_rev() RETURNS contour.receiver_enrollment_claim LANGUAGE sql AS $$ SELECT ROW(
  'f0000000-0000-4000-8000-000000000001'::uuid,'fc000000-0000-4000-8000-000000000008'::uuid,1,
- 'f5000000-0000-4000-8000-000000000001'::uuid,'f9000000-0000-4000-8000-000000000001'::uuid,
+ 'f5000000-0000-4000-8000-000000000003'::uuid,'f9000000-0000-4000-8000-000000000003'::uuid,
  'fa000000-0000-4000-8000-000000000009'::uuid,decode(repeat('b5',32),'hex'),decode(repeat('b8',32),'hex'),
  decode(repeat('ca',32),'hex'),decode(repeat('cb',32),'hex'),decode(repeat('cc',32),'hex'),
  current_setting('test.receiver_now')::timestamptz-interval '1 minute',current_setting('test.receiver_now')::timestamptz+interval '10 minutes',
@@ -165,6 +165,9 @@ SET ROLE contour_admin;
 \echo receiver-case=revoke
 SELECT contour.end_origin('f0000000-0000-4000-8000-000000000001','credential_revoked','fa000000-0000-4000-8000-000000000009');
 RESET ROLE;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM contour.origin_credentials c WHERE c.tenant_id='f0000000-0000-4000-8000-000000000001' AND c.lifecycle_id='f9000000-0000-4000-8000-000000000003' AND c.credential_id='fa000000-0000-4000-8000-000000000003' AND c.leaf_sha256=decode(repeat('03',32),'hex') AND NOT EXISTS (SELECT 1 FROM contour.origin_terminal_events z WHERE z.tenant_id=c.tenant_id AND z.credential_id=c.credential_id AND z.event_kind='credential_revoked')) THEN RAISE EXCEPTION 'independent active credential missing'; END IF;
+END $$;
 SET ROLE contour_causal_receiver_reader;
 DO $$ BEGIN
  BEGIN PERFORM contour.current_causal_receiver('f0000000-0000-4000-8000-000000000001','fc000000-0000-4000-8000-000000000008',1,(SELECT generation FROM receiver_result_rev),decode(repeat('cb',32),'hex')); RAISE EXCEPTION 'revoked exact credential accepted'; EXCEPTION WHEN check_violation THEN NULL; END;

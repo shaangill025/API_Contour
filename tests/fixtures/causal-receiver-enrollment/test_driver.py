@@ -52,6 +52,20 @@ class DriverTests(unittest.TestCase):
         tags=re.findall(r'^\\echo receiver-case=([a-z-]+)$',fixture,re.MULTILINE)
         self.assertEqual(tags,list(transport._RECEIVER_CASES))
 
+    def test_receiver_scopes_match_distinct_seeded_lifecycles(self):
+        fixture=(ROOT/'db/tests/causal_receiver_enrollment.sql').read_text()
+        seed=(ROOT/'db/tests/causal_runtime_registry_pre.sql').read_text()
+        first=fixture.split('\\echo receiver-case=second-credential',1)[0]
+        second=fixture.split('\\echo receiver-case=second-credential',1)[1].split('\\echo receiver-case=primary-current',1)[0]
+        for prefix in ('f5','f6','f7','f9'):
+            primary=prefix+'000000-0000-4000-8000-000000000001'
+            alternate=prefix+'000000-0000-4000-8000-000000000003'
+            self.assertIn(primary,first); self.assertIn(alternate,second); self.assertIn(alternate,seed)
+            self.assertNotIn(primary,second)
+        self.assertIn('fa000000-0000-4000-8000-000000000003',seed)
+        self.assertIn("c.credential_id='fa000000-0000-4000-8000-000000000003'",second)
+        self.assertIn("z.event_kind='credential_revoked'",second)
+
     def test_receipt_does_not_claim_races_or_peer(self):
         hook = object.__new__(driver.Hooks)
         hook.complete = True
