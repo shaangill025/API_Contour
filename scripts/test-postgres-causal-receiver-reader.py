@@ -355,7 +355,7 @@ def main(argv):
         if result.returncode or result.stderr: raise RuntimeError('source command')
         return result.stdout.strip()
     head=fixture['clean_head'](source_call);sources=fixture['tracked_snapshot'](source_call)
-    required=('scripts/test-postgres-causal-receiver-reader.py','crates/contour-postgres/examples/causal_receiver_reader_probe.rs','tests/fixtures/causal-receiver-reader/seed.sql','tests/fixtures/causal-receiver-reader/test_qualifier.py','scripts/receiver_issuer_fixture.py','crates/contour-postgres/examples/causal_receiver_issuer_probe.rs','tests/fixtures/causal-receiver-issuer/test_fixture.py','tests/fixtures/causal-receiver-issuer/README.md')
+    required=('scripts/test-postgres-causal-receiver-reader.py','crates/contour-postgres/examples/causal_receiver_reader_probe.rs','tests/fixtures/causal-receiver-reader/seed.sql','tests/fixtures/causal-receiver-reader/test_qualifier.py','scripts/receiver_issuer_fixture.py','crates/contour-postgres/examples/causal_receiver_issuer_probe.rs','tests/fixtures/causal-receiver-issuer/test_fixture.py','tests/fixtures/causal-receiver-issuer/README.md','db/opt-in-migrations/0029_causal_receiver_inbox.sql')
     if any(x not in sources for x in required): raise ValueError('source missing')
     hooks=ReaderHooks(receiver['Hooks'](receiver['load_existing'](),origin25_schema));hooks.preflight(sources)
     output=capture['PrivateOutput'](argv[0]); token=secrets.token_hex(16);name='contour-origin21-qual-'+token

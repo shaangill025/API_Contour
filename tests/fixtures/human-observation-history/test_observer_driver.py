@@ -15,7 +15,7 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 U='00000000-0000-4000-8000-000000000001'
 
 class DriverTests(unittest.TestCase):
-    def _run(self, fail_fixture=False):
+    def _run(self, fail_fixture=False, receiver_scenario=None):
         policy={'issued_at':'2026-11-12T12:00:00Z','expires_at':'2026-11-12T12:10:00Z'}
         payload=base64.urlsafe_b64encode(json.dumps(policy).encode()).rstrip(b'=').decode()
         envelope=json.dumps({'payload_base64url':payload}).encode().hex()
@@ -36,11 +36,13 @@ class DriverTests(unittest.TestCase):
             directory=Path(temp)
             with mock.patch.object(module,'_sign',return_value=b'signed'), mock.patch.object(module.subprocess,'run',return_value=mock.Mock(stdout='Processed\n',stderr='')):
                 if fail_fixture:
-                    with self.assertRaisesRegex(RuntimeError,'fixture failed'):module.run_cases(execute,submit,body,'5432',directory,{},'/unused')
+                    with self.assertRaisesRegex(RuntimeError,'fixture failed'):module.run_cases(execute,submit,body,'5432',directory,{},'/unused',receiver_scenario=receiver_scenario,receiver_after=(lambda execute: None) if receiver_scenario is not None else None)
                     self.assertFalse((directory/'causal-observer.done').exists())
+                    self.assertFalse((directory/'causal-receiver.done').exists())
                 else:
-                    module.run_cases(execute,submit,body,'5432',directory,{},'/unused')
+                    module.run_cases(execute,submit,body,'5432',directory,{},'/unused',receiver_scenario=receiver_scenario,receiver_after=(lambda execute: None) if receiver_scenario is not None else None)
                     self.assertEqual((directory/'causal-observer.done').read_bytes(),b'causal-observer-complete\n')
+                    self.assertEqual((directory/'causal-receiver.done').exists(),receiver_scenario is not None)
         return calls,submissions,body
     def test_owned_new_request_and_same_psql_seed(self):
         calls,submissions,body=self._run()
@@ -53,6 +55,12 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(combined),1)
         self.assertIn('trusted synthetic observer seed required',combined[0])
         self.assertIn('nodered_5_0_9_wire_v1',combined[0])
+    def test_receiver_scenario_is_opt_in_same_psql_and_receipted_only_after_success(self):
+        calls,_,_=self._run(receiver_scenario=lambda fixture:('SELECT receiver_prefix;',fixture,'SELECT receiver_scenario_marker;'))
+        combined=[sql for sql in calls if 'CREATE TEMP TABLE observer_seed' in sql]
+        self.assertEqual(len(combined),1);self.assertIn('SELECT receiver_scenario_marker;',combined[0])
+        self.assertGreater(combined[0].index('SELECT receiver_scenario_marker;'),combined[0].index('trusted synthetic observer seed required'))
+        self._run(fail_fixture=True,receiver_scenario=lambda fixture:('SELECT receiver_prefix;',fixture,'SELECT receiver_scenario_marker;'))
     def test_runtime_export_pin_matches_claim_and_does_not_alias_https_product(self):
         seed=module.SEED_SQL
         enrollment=next(line for line in seed.splitlines() if line.startswith('SELECT contour.enroll_causal_runtime('))

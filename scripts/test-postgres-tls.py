@@ -106,6 +106,27 @@ def checked_history_loader():
     finally: os.close(fd)
 
 
+def checked_receiver_loader():
+    """Load only the fixed committed SQL29 driver under the source fence."""
+    name='scripts/test-causal-receiver-inbox.py';path=ROOT/name
+    for candidate in (path,*path.parents):
+        if candidate.is_symlink(): raise ValueError('fixture source has symlink ancestor')
+    if bounded_git(['status','--porcelain','--untracked-files=all'],16_777_216): raise ValueError('fixture source is not clean')
+    tracked=bounded_git(['show','HEAD:'+name],1000000)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1000000: raise ValueError('fixture source invalid')
+        with os.fdopen(fd,'rb',closefd=False) as source: raw=source.read(1000001)
+        if raw!=tracked: raise ValueError('fixture source differs from committed version')
+        namespace={'__file__':str(path),'__name__':'receiver_inbox_fixture'}
+        exec(compile(raw,str(path),'exec'),namespace)
+        after=os.fstat(fd)
+        if (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns) or hashlib.sha256(path.read_bytes()).digest()!=hashlib.sha256(raw).digest(): raise ValueError('fixture source changed while loading')
+        return namespace
+    finally: os.close(fd)
+
+
 def fixture_environment(password, target, sensor_image=None):
     environment = dict(os.environ, CONTOUR_FIXTURE_PASSWORD=password,
         CONTOUR_ORIGIN_PROBE=str(Path(target)/'debug/examples/origin_submit_probe'),
@@ -230,7 +251,7 @@ class ProtocolServer:
 
 def main():
     flags = sys.argv[1:]
-    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture','--historical-origin','--causal-observer'] for flag in flags):
+    if len(flags)>1 or any(flag not in ['--authority','--origin-sensor','--tls-discovery-matrix','--origin-replacement-only','--origin-admission-only','--https-only','--delivery-only','--refresh-only','--catalog-reader','--comparison-store','--service-import-store','--human-import','--review-store','--human-origin','--human-observation-history','--runtime-capture','--historical-origin','--causal-observer','--causal-receiver'] for flag in flags):
         raise ValueError("choose one supported fixture mode")
     admission = flags == ['--origin-admission-only']
     replacement = flags == ['--origin-replacement-only'] or admission
@@ -239,7 +260,11 @@ def main():
     if origin_sensor:
         sys.dont_write_bytecode = True
     human_history = flags == ['--human-observation-history']
-    causal_observer = flags == ['--causal-observer']
+    causal_receiver = flags == ['--causal-receiver']
+    if causal_receiver:
+        receiver_fixture=checked_receiver_loader()
+        receiver_fixture['require_applicable'](receiver_fixture['source'](receiver_fixture['FILES'][1]))
+    causal_observer = flags in (['--causal-observer'],['--causal-receiver'])
     historical_origin = flags == ['--historical-origin'] or causal_observer
     runtime_capture = flags == ['--runtime-capture']
     supervised = human_history or runtime_capture or historical_origin
@@ -535,6 +560,8 @@ def main():
                 runpy.run_path(str(ROOT/"scripts/test-postgres-authority.py"))["run_cases"](container,sql,authority_probe,port,directory,environment)
                 if human_history:
                     history_fixture['require_receipt'](directory)
+                if causal_receiver:
+                    receiver_fixture['require_receipt'](directory)
                 server = ProtocolServer("begin", directory)
                 servers.append(server)
                 last = json.loads((directory/"batch.json").read_text())

@@ -41,7 +41,7 @@ def _sign(policy, directory, name):
     return json.dumps(dict(key_id='fixture',signature_profile='ed25519-v1',payload_base64url=enc(payload),signature_base64url=enc(signature.read_bytes())),separators=(',',':')).encode()
 
 
-def run_cases(execute, submit, body, port, directory, environment, target_dir):
+def run_cases(execute, submit, body, port, directory, environment, target_dir, *, receiver_scenario=None, receiver_after=None):
     tenant=_uuid(body['tenant_id']); collector=_uuid(body['collector_id'])
     r=body['records'][1]['record']; scope=[_uuid(r[k]) for k in ('project_id','service_id','environment_id','deployment_id')]
     p,s,e,d=scope
@@ -85,7 +85,21 @@ def run_cases(execute, submit, body, port, directory, environment, target_dir):
     for key in ('issued','expires'):
         if not re.fullmatch(r'[0-9T:Z.+-]+',params[key]): raise ValueError('invalid policy time')
     seed=SEED_SQL % params
-    execute(_diagnostic_sql(seed,(ROOT/'db/tests/causal_observer_inbox.sql').read_text()), timeout=300)
+    if (receiver_scenario is None)!=(receiver_after is None) or (receiver_after is not None and not callable(receiver_after)): raise ValueError('incomplete receiver scenario')
+    observer_fixture=(ROOT/'db/tests/causal_observer_inbox.sql').read_text()
+    if receiver_scenario is not None:
+        if not callable(receiver_scenario): raise ValueError('invalid receiver scenario')
+        parts=receiver_scenario(observer_fixture)
+        if type(parts) is not tuple or len(parts)!=3 or any(type(x) is not str or not x for x in parts) or sum(len(x.encode('utf-8')) for x in parts)>6000000: raise ValueError('invalid receiver scenario')
+        prefix,observer_fixture,suffix=parts
+        observer_fixture=prefix+'\n'+observer_fixture+'\n'+suffix
+    combined=_diagnostic_sql(seed,observer_fixture)
+    execute(combined, timeout=300)
+    if receiver_after is not None: receiver_after(execute)
+    if receiver_scenario is not None:
+        path=directory/'causal-receiver.done';fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as out:
+            out.write(b'causal-receiver-complete\n');out.flush();os.fsync(out.fileno())
     path=directory/'causal-observer.done'; fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as out:
         out.write(b'causal-observer-complete\n'); out.flush(); os.fsync(out.fileno())

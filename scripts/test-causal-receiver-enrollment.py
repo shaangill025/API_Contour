@@ -12,6 +12,7 @@ FILES = {
     'm26': 'db/opt-in-migrations/0026_causal_evidence_enrollment.sql',
     'm27': 'db/opt-in-migrations/0027_causal_observer_inbox.sql',
     'm28': 'db/opt-in-migrations/0028_causal_receiver_enrollment.sql',
+    'source29': 'db/opt-in-migrations/0029_causal_receiver_inbox.sql',
     'fixture': 'db/tests/causal_receiver_enrollment.sql',
     'races': 'scripts/receiver_enrollment_races.py',
 }

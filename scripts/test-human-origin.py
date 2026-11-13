@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import runpy
 import subprocess
+import sys
 import time
 from urllib.parse import urlencode
 
@@ -110,7 +111,12 @@ def run_cases(execute, submit, body, expected_origins, port, directory, environm
     runpy.run_path(str(ROOT/'scripts/test-human-catalog.py'))['run_origin_cases'](execute,port,directory,environment,normal,unknown,target_scope,ACTOR,records,expected_operations,token)
     run_business_cases(execute,port,directory,environment,normal,unknown,target_scope,records,expected_operations,target_dir)
     if environment.get('CONTOUR_CAUSAL_OBSERVER_FIXTURE') == '1':
-        runpy.run_path(str(ROOT/'scripts/test-causal-observer-inbox.py'))['run_cases'](execute,submit,body,port,directory,environment,target_dir)
+        observer=runpy.run_path(str(ROOT/'scripts/test-causal-observer-inbox.py'))['run_cases']
+        if sys.argv[1:]==['--causal-receiver']:
+            receiver=runpy.run_path(str(ROOT/'scripts/test-postgres-tls.py'))['checked_receiver_loader']()
+            observer(execute,submit,body,port,directory,environment,target_dir,receiver_scenario=receiver['scenario_sql'],receiver_after=receiver['after_scenario'])
+        else:
+            observer(execute,submit,body,port,directory,environment,target_dir)
     if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
         with (directory/'historical-origin.done').open('xb') as receipt:
             receipt.write(b'historical-origin-complete\n')
