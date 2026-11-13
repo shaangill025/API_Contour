@@ -38,6 +38,8 @@ pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material
 mod causal_receiver_material;
 #[cfg(unix)]
 mod causal_receiver_material_checked;
+#[cfg(unix)]
+mod causal_receiver_sources;
 pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
 #[cfg(unix)]
 pub use causal_launch_process::{
@@ -57,6 +59,8 @@ pub use causal_receiver_material_checked::{
     check_receiver_material,
 };
 pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_metadata};
+#[cfg(unix)]
+pub use causal_receiver_sources::{ReceiverCandidateSources, ReceiverSourcesError};
 pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
 use rustls::{
