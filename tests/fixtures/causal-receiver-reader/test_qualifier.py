@@ -131,11 +131,38 @@ class Boundaries(unittest.TestCase):
             source=Path(d)/'source.rs'
             def line(p): return json.dumps({'reason':'compiler-artifact','target':{'name':'causal_receiver_reader_probe','kind':['example'],'src_path':str(source)},'profile':{'test':False},'executable':str(p)})
             found,digest=q.select_probe([line(probe)],target,source);self.assertEqual(found,probe);self.assertEqual(len(digest),64)
+            issuer_line=line(probe).replace('causal_receiver_reader_probe','causal_receiver_issuer_probe')
+            self.assertEqual(q.select_probe([line(probe),issuer_line],target,source,issuer=True)[0],probe)
+            with self.assertRaises(ValueError): q.select_probe([line(probe)],target,source,issuer=True)
+            with self.assertRaises(ValueError): q.select_probe([issuer_line],target,source,issuer=False)
+            with self.assertRaises(ValueError): q.select_probe([issuer_line],target,source,issuer='true')
             with self.assertRaises(ValueError): q.select_probe([line(probe),line(probe)],target,source)
             outside=Path(d)/'outside';outside.write_bytes(b'x');outside.chmod(0o700)
             with self.assertRaises(ValueError): q.select_probe([line(outside)],target,source)
             link=target/'link';link.symlink_to(probe)
             with self.assertRaises(ValueError): q.select_probe([line(link)],target,source)
+    def test_two_cargo_examples_select_exact_distinct_issuer_and_reader(self):
+        import json,tempfile
+        with tempfile.TemporaryDirectory(dir=Path.home()) as folder:
+            root=Path(folder);target=root/'target';target.mkdir()
+            reader=target/'reader';issuer=target/'issuer'
+            for path in (reader,issuer): path.write_bytes(path.name.encode());path.chmod(0o700)
+            rsrc=root/'reader.rs';isrc=root/'issuer.rs'
+            def line(name,src,exe,kind=['example']):
+                return json.dumps({'reason':'compiler-artifact','target':{'name':name,'kind':kind,'src_path':str(src)},'profile':{'test':False},'executable':str(exe)})
+            r=line('causal_receiver_reader_probe',rsrc,reader);i=line('causal_receiver_issuer_probe',isrc,issuer)
+            self.assertEqual(q.select_probe([r,i],target,rsrc)[0],reader)
+            self.assertEqual(q.select_probe([r,i],target,isrc,issuer=True)[0],issuer)
+            for lines,source in (([r,i,i],isrc),([r,i],rsrc),([r,line('wrong_target',isrc,issuer)],isrc),([r,line('causal_receiver_issuer_probe',isrc,issuer,kind=['bin'])],isrc)):
+                with self.assertRaises(ValueError): q.select_probe(lines,target,source,issuer=True)
+            with self.assertRaises(ValueError): q.select_probe([i],target,isrc,issuer=1)
+
+    def test_issuer_failure_location_is_closed(self):
+        try: exec(compile('raise ValueError("private-canary")','/private/receiver_issuer_fixture.py','exec'))
+        except ValueError as error: line=q.failure_diagnostic(error,'issuer')
+        self.assertIn('receiver_issuer_fixture.py:1',line)
+        self.assertNotIn('private-canary',line);self.assertNotIn('/private/',line)
+
     def test_probe_snapshot_detects_replaced_and_modified_binary(self):
         import tempfile
         from deploy.local import docker_metadata as metadata
