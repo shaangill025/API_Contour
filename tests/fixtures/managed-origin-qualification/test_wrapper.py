@@ -39,6 +39,12 @@ class ManagedWrapperTests(unittest.TestCase):
     def command(self,args,**kwargs):
         self.calls.append(args)
         return b'owned' if self.survives and args[-1]=='id='+self.containers[0] else b''
+    def test_lost_ack_failure_log_exposes_only_closed_diagnostics(self):
+        log=self.child/'qualification.log'
+        log.write_bytes(b'managed-lost-ack phase=marker ms=123 ok=1\nmanaged-lost-ack phase=secret ms=123 ok=1\nmanaged-lost-ack phase=exec ms=1 ok=1 secret\nprivate-canary\n')
+        log.chmod(0o600); owner=mock.Mock(); owner.path=self.child
+        self.assertEqual(wrapper.child_failure_lines(owner),['managed-lost-ack phase=marker ms=123 ok=1'])
+
     def test_exact_absence_removes_only_synthetic_tree(self):
         sentinel=self.child/'keep'; sentinel.write_text('foreign')
         wrapper.cleanup_private(self.command,self.child,self.owner,self.head)
@@ -57,6 +63,36 @@ class ManagedWrapperTests(unittest.TestCase):
         (self.base/'foreign-link').symlink_to(self.child/'outside')
         with self.assertRaises(ValueError): wrapper.cleanup_private(self.command,self.child,self.owner,self.head)
         self.assertTrue((self.base/'foreign-link').is_symlink())
+    def test_lost_ack_mode_propagates_without_full_success_and_checks_output(self):
+        for valid in (True,False):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as folder:
+                owner_path=Path(folder); calls=[]
+                class Owner:
+                    path=owner_path
+                    def verify(self): pass
+                    def write(self,name,data):
+                        path=self.path/name; path.write_bytes(data); return path
+                def run(args,**kwargs):
+                    calls.append(args)
+                    if args[:3]==['git','worktree','add']:
+                        path=Path(args[-2]); path.mkdir(); (path/'.git').write_text('gitdir: owned')
+                    if args[:3]==['git','worktree','remove']:
+                        import shutil; shutil.rmtree(args[-1])
+                    if len(args)>1 and args[1]=='scripts/test-managed-origin-qualification.py':
+                        return b'managed-component scope=single-lost-ack-diagnostic result=pass\n' if valid else b'managed Origin qualification passed\n'
+                    return b''
+                h={'snapshot':lambda *_:('b'*40,{'source':'fixed'}),'require_registration':lambda *a,**k:None,'encode':lambda x:json.dumps(x,sort_keys=True,separators=(',',':')).encode(),'OWNER_LABEL':'owner','HEAD_LABEL':'head','image_identity':lambda *a:'sha256:'+'a'*64}
+                with mock.patch.object(wrapper,'cleanup_private') as cleanup,mock.patch.object(wrapper,'child_failure_lines',return_value=[]):
+                    if valid: wrapper.qualify(run,Owner(),'a'*32,h,profile_lost_ack=True,fresh_metadata=True,fresh_source=True)
+                    else:
+                        with self.assertRaises(ValueError): wrapper.qualify(run,Owner(),'a'*32,h,profile_lost_ack=True,fresh_metadata=True,fresh_source=True)
+                    self.assertEqual(cleanup.call_count,int(valid))
+                inner=next(cmd for cmd in calls if len(cmd)>1 and cmd[1]=='scripts/test-managed-origin-qualification.py')
+                self.assertIn('--profile-lost-ack',inner); self.assertIn('--fresh-metadata',inner); self.assertIn('--fresh-source',inner); self.assertNotIn('--profile-readiness',inner)
+        with mock.patch.object(wrapper,'helper') as helper,mock.patch.object(wrapper.sys,'argv',['qualify-managed-origin.py','--profile-lost-ack','--profile-readiness']):
+            with self.assertRaises(ValueError): wrapper.main()
+            helper.assert_not_called()
+
     def test_outer_build_failure_retains_worktree_and_never_runs_inner(self):
         owner_path=self.child.parent/'owner'; owner_path.mkdir(mode=0o700); calls=[]
         class Owner:

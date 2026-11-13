@@ -393,7 +393,25 @@ def _wait_publication_intent(proof,*,setup_timeout=120,cancel=None):
         time.sleep(.01)
 
 
-def qualify_lost_publication_ack(proof):
+class _LostAckDiagnostics:
+    """Finite, value-free progress; diagnostics never decide qualification."""
+    _names=frozenset(('arm','intent','marker','exec','join','cleanup-start','cleanup-end'))
+    def __init__(self):
+        import threading
+        self.start=time.monotonic(); self.lock=threading.Lock(); self.count=0
+    def emit(self,name,ok):
+        try:
+            if name not in self._names or type(ok) is not bool: return
+            with self.lock:
+                if self.count>=16: return
+                ms=int((time.monotonic()-self.start)*1000)
+                if not 0<=ms<=999999999: return
+                self.count+=1
+                print('managed-lost-ack phase='+name+' ms='+str(ms)+' ok='+str(int(ok)),file=sys.stderr,flush=True)
+        except Exception: pass
+
+
+def qualify_lost_publication_ack(proof,*,_diagnostics=None):
     """Prove remote commit followed by an unknown CLI outcome, never reconcile it."""
     import hashlib
     import threading
@@ -410,6 +428,7 @@ def qualify_lost_publication_ack(proof):
             try:
                 path=owner.state/'publication.exec.intent'
                 ready=_wait_publication_intent(proof,cancel=cancel)
+                if _diagnostics is not None: _diagnostics.emit('intent',True)
                 deadline=ready['started']+2
                 if time.monotonic()>=deadline: raise TimeoutError('publication observation deadline')
                 while time.monotonic()<deadline:
@@ -419,6 +438,7 @@ def qualify_lost_publication_ack(proof):
                         marker=owner.watched/('.qualification-commit-'+item['nonce'])
                         if marker.exists():
                             if _regular(marker,128)!=(item['document_sha256']+'\n').encode('ascii'): raise ValueError('publication marker changed')
+                            if _diagnostics is not None: _diagnostics.emit('marker',True)
                             publisher.verify()
                             inspected=products._objects(['docker','inspect',publisher.cid]); exec_ids=inspected.get('ExecIDs')
                             if type(exec_ids) is not list or len(exec_ids)!=1 or not re.fullmatch('[0-9a-f]{64}',exec_ids[0]): raise ValueError('publication exec identity unavailable')
@@ -426,6 +446,7 @@ def qualify_lost_publication_ack(proof):
                             process=running.get('ProcessConfig') or {}
                             args=['-i','NODE_OPTIONS=','NODE_PATH=','/usr/local/bin/node','-e',proof.publisher_source().decode('utf-8'),'fixture-publisher',item['document_sha256'],item['nonce']]
                             if running.get('ContainerID')!=publisher.cid or running.get('Running') is not True or process.get('entrypoint')!='/usr/bin/env' or process.get('arguments')!=args: raise ValueError('publication exec identity changed')
+                            if _diagnostics is not None: _diagnostics.emit('exec',True)
                             if _regular(path,32768)!=raw or _source_guard()!=source: raise ValueError('publication identity changed')
                             if time.monotonic()>=deadline: raise TimeoutError('publication observation deadline')
                             observed.append((item['nonce'],item['document_sha256']))
@@ -433,7 +454,9 @@ def qualify_lost_publication_ack(proof):
                     time.sleep(.01)
                 raise TimeoutError('publication marker deadline')
             except BaseException as error: observer_errors.append(error)
-        proof.arm_ack_loss(); watcher_context=contextvars.copy_context(); watcher=threading.Thread(target=lambda:watcher_context.run(observe),daemon=False)
+        proof.arm_ack_loss()
+        if _diagnostics is not None: _diagnostics.emit('arm',True)
+        watcher_context=contextvars.copy_context(); watcher=threading.Thread(target=lambda:watcher_context.run(observe),daemon=False)
         retained=(owner,watcher); _RETAINED.append(retained); started=False
         failures=[]
         try:
@@ -450,6 +473,7 @@ def qualify_lost_publication_ack(proof):
             try:
                 watcher.join(45)
                 terminated=not watcher.is_alive()
+                if _diagnostics is not None: _diagnostics.emit('join',terminated)
             except BaseException as error: failures.append(error)
         if terminated:
             _RETAINED.remove(retained); failures.extend(observer_errors)
@@ -464,7 +488,9 @@ def qualify_lost_publication_ack(proof):
         if state.get('Running') is not False or state.get('Pid')!=0 or state.get('Restarting') is not False or state.get('StartedAt')!=publisher.started: raise ValueError('publisher stop unproven')
         if _source_guard()!=source: raise ValueError('qualification source changed')
         from deploy.local import origin21_managed_cleanup
+        if _diagnostics is not None: _diagnostics.emit('cleanup-start',True)
         origin21_managed_cleanup.dispose_after_lost_ack(proof,owner)
+        if _diagnostics is not None: _diagnostics.emit('cleanup-end',True)
     return {'remote_commit_before_lost_ack':True,'publisher_stopped':True,'publication_intent_retained':True,'owned_topology_removed':True}
 
 
@@ -570,8 +596,9 @@ def main(argv):
     global _PHASE
     if len(argv)<4: raise ValueError('build evidence required')
     flags=argv[4:]
-    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--fresh-source') for flag in flags): raise ValueError('invalid qualification flags')
-    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--profile-lost-ack','--fresh-source') for flag in flags): raise ValueError('invalid qualification flags')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags; profile_lost_ack='--profile-lost-ack' in flags
+    if profile_readiness and profile_lost_ack: raise ValueError('diagnostic modes conflict')
     image,head,receipt,digest=argv[:4]
     _set_phase('source-check')
     source=_source_guard()
@@ -599,6 +626,14 @@ def main(argv):
                 disposal.dispose_synthetic_volume(proof)
                 if _source_guard()!=source: raise ValueError('qualification source changed')
                 return {'scope':'single-full-readiness-diagnostic','component':True}
+            if profile_lost_ack:
+                _set_phase('lost-ack')
+                result=qualify_lost_publication_ack(proof,_diagnostics=_LostAckDiagnostics())
+                if result!={'remote_commit_before_lost_ack':True,'publisher_stopped':True,'publication_intent_retained':True,'owned_topology_removed':True}: raise ValueError('lost ack diagnostic result')
+                _set_phase('volume-disposal')
+                disposal.dispose_synthetic_volume(proof)
+                if _source_guard()!=source: raise ValueError('qualification source changed')
+                return {'scope':'single-lost-ack-diagnostic','component':True}
             _set_phase('positive-streams')
             positive=qualify_positive_streams(transport,proof)
             _set_phase('negative-cases')
@@ -623,6 +658,7 @@ if __name__=='__main__':
     try:
         result=main(sys.argv[1:])
         if result.get('scope')=='single-full-readiness-diagnostic': print('managed-component scope=single-full-readiness-diagnostic result=pass')
+        elif result.get('scope')=='single-lost-ack-diagnostic': print('managed-component scope=single-lost-ack-diagnostic result=pass')
         else: print('managed Origin qualification passed')
     except BaseException as error:
         for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)

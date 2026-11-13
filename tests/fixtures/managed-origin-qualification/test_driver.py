@@ -163,6 +163,40 @@ class QualificationDriverTests(unittest.TestCase):
         finally:
             driver._RETAINED[:]=[item for item in driver._RETAINED if item[0] is not owner and item[0] is not proof]
 
+    def test_lost_ack_component_preserves_setup_and_never_runs_full_cases(self):
+        from deploy.local import origin21_managed_qualification as q,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_qualification_cleanup as disposal
+        proof=mock.MagicMock(); order=[]
+        def record(name,result=None,fail=False):
+            def invoke(*args,**kwargs):
+                order.append(name)
+                if name=='lost': self.assertIsInstance(kwargs.get('_diagnostics'),driver._LostAckDiagnostics)
+                if fail: raise RuntimeError('synthetic failure')
+                return result
+            return invoke
+        for fail in (False,True):
+            order.clear()
+            with ExitStack() as stack:
+                for obj,name,fn in ((driver,'_source_guard',record('source','fixed')),(q,'begin',record('begin',proof)),(init,'initialize',record('init',(Path('/private/receipt'),'digest'))),(cli,'main',record('up')),(driver.origin21_transport,'managed_transport',record('transport',object())),(driver,'qualify_positive_streams',record('streams')),(driver,'qualify_wrong_name_and_pending',record('negative')),(driver,'qualify_lost_publication_ack',record('lost',{'remote_commit_before_lost_ack':True,'publisher_stopped':True,'publication_intent_retained':True,'owned_topology_removed':True},fail=fail)),(disposal,'dispose_synthetic_volume',record('volume'))):
+                    stack.enter_context(mock.patch.object(obj,name,side_effect=fn))
+                if fail:
+                    with self.assertRaises(RuntimeError): driver.main(['image','head','/receipt','digest','--profile-lost-ack'])
+                else:
+                    self.assertEqual(driver.main(['image','head','/receipt','digest','--profile-lost-ack']),{'scope':'single-lost-ack-diagnostic','component':True})
+            self.assertEqual(order,['source','begin','init','up','transport','lost']+([] if fail else ['volume','source']))
+        with mock.patch.object(q,'begin') as begin:
+            with self.assertRaises(ValueError): driver.main(['image','head','/receipt','digest','--profile-readiness','--profile-lost-ack'])
+            begin.assert_not_called()
+
+    def test_lost_ack_diagnostics_have_closed_bounded_output(self):
+        import io
+        sink=io.StringIO()
+        with mock.patch.object(driver.sys,'stderr',sink):
+            d=driver._LostAckDiagnostics(); d.emit('secret',True); d.emit('arm','secret')
+            for _ in range(25): d.emit('join',False)
+        lines=sink.getvalue().splitlines(); self.assertEqual(len(lines),16)
+        self.assertTrue(all(__import__('re').fullmatch(r'managed-lost-ack phase=join ms=(?:0|[1-9][0-9]{0,8}) ok=0',line) for line in lines))
+        self.assertNotIn('secret',sink.getvalue())
+
     def test_main_orders_real_boundaries_and_stops_before_cleanup_on_unknown_failure(self):
         from deploy.local import origin21_managed_qualification as q,origin21_managed_init as init,origin21_managed_cli as cli,origin21_managed_cleanup as cleanup,origin21_managed_qualification_cleanup as disposal
         proof=mock.MagicMock(); context=proof; order=[]

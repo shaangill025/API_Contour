@@ -78,7 +78,9 @@ def child_failure_lines(owner):
     labels='|'.join(_PROFILE_LABELS)
     profiler=re.compile(('managed-profile name=(?:'+labels+r') calls=(?:0|[1-9][0-9]{0,5}) inclusive_ms=(?:0|[1-9][0-9]{0,8}) max_ms=(?:0|[1-9][0-9]{0,8})').encode())
     profiles=[line.decode('ascii') for line in raw.splitlines() if profiler.fullmatch(line)][:len(_PROFILE_LABELS)]
-    return failures+timings+streams+profiles
+    lost_ack=re.compile(rb'managed-lost-ack phase=(?:arm|intent|marker|exec|join|cleanup-start|cleanup-end) ms=(?:0|[1-9][0-9]{0,8}) ok=[01]')
+    lost=[line.decode('ascii') for line in raw.splitlines() if lost_ack.fullmatch(line)][:16]
+    return failures+timings+streams+profiles+lost
 
 
 def helper():
@@ -170,8 +172,9 @@ def cleanup_private(run,child,owner,head,*,profile_readiness=False):
     if os.path.lexists(base): raise RuntimeError('private state remains')
 
 
-def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,fresh_source=False):
+def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,profile_lost_ack=False,fresh_source=False):
     global _PHASE
+    if profile_readiness and profile_lost_ack: raise ValueError('diagnostic modes conflict')
     _PHASE="worktree"
     head,source=h['snapshot'](run,ROOT); child=owner.path/'worktree'; tag='apicontour-origin21-build:'+token
     if os.path.lexists(child): raise ValueError('worktree path exists')
@@ -191,9 +194,12 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,fre
     inner=[sys.executable,'scripts/test-managed-origin-qualification.py',image,head,str(path),digest]
     if fresh_metadata: inner.append('--fresh-metadata')
     if profile_readiness: inner.append('--profile-readiness')
+    if profile_lost_ack: inner.append('--profile-lost-ack')
     if fresh_source: inner.append('--fresh-source')
     inner_output=run(inner,cwd=child,timeout=QUALIFY_SECONDS,log=owner.path/'qualification.log')
     profile_output=profile_lines(inner_output) if profile_readiness else ()
+    if profile_lost_ack and inner_output.strip()!=b'managed-component scope=single-lost-ack-diagnostic result=pass': raise ValueError('lost ack diagnostic output')
+    lost_output=tuple(line for line in child_failure_lines(owner) if line.startswith('managed-lost-ack ')) if profile_lost_ack else ()
     if h['snapshot'](run,ROOT)!=(head,source) or h['snapshot'](run,child)!=(head,source): raise ValueError('source changed after qualification')
     if h['image_identity'](run,child,tag,token,head)!=image: raise ValueError('build image changed')
     h['require_registration'](run,ROOT,child,head)
@@ -209,13 +215,15 @@ def qualify(run,owner,token,h,*,fresh_metadata=False,profile_readiness=False,fre
     h['require_registration'](run,ROOT,child,head,expected=False)
     if os.path.lexists(child) or h['snapshot'](run,ROOT)!=(head,source): raise RuntimeError('worktree cleanup uncertain')
     for line in profile_output: print(line)
+    for line in lost_output: print(line,file=sys.stderr,flush=True)
 
 
 def main():
     global _PHASE
     flags=sys.argv[1:]
-    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--fresh-source') for flag in flags): raise ValueError('invalid arguments')
-    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags
+    if len(flags)!=len(set(flags)) or any(flag not in ('--fresh-metadata','--profile-readiness','--profile-lost-ack','--fresh-source') for flag in flags): raise ValueError('invalid arguments')
+    fresh_metadata='--fresh-metadata' in flags; profile_readiness='--profile-readiness' in flags; fresh_source='--fresh-source' in flags; profile_lost_ack='--profile-lost-ack' in flags
+    if profile_readiness and profile_lost_ack: raise ValueError('diagnostic modes conflict')
     if not callable(getattr(os,'waitid',None)) or any(not hasattr(os,name) for name in ('P_PID','WEXITED','WNOHANG','WNOWAIT')):
         print('qualification requires configured Python 3.13 with POSIX waitid/WNOWAIT',file=sys.stderr)
         raise RuntimeError('qualification runtime unavailable')
@@ -229,6 +237,7 @@ def main():
         options={}
         if fresh_metadata: options['fresh_metadata']=True
         if profile_readiness: options['profile_readiness']=True
+        if profile_lost_ack: options['profile_lost_ack']=True
         if fresh_source: options['fresh_source']=True
         qualify(run,owner,uuid.uuid4().hex,h,**options)
         owner.remove()
@@ -251,6 +260,7 @@ if __name__=='__main__':
     try:
         main()
         if '--profile-readiness' in sys.argv[1:]: print('managed-component scope=single-full-readiness-diagnostic result=pass')
+        elif '--profile-lost-ack' in sys.argv[1:]: print('managed-component scope=single-lost-ack-diagnostic result=pass')
         else: print('managed Origin qualification passed')
     except BaseException as error:
         for line in failure_lines(error,_PHASE): print(line,file=sys.stderr,flush=True)
