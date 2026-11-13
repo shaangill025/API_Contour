@@ -91,6 +91,35 @@ class Driver(unittest.TestCase):
             target=root/'target'; target.write_text('x'); link=root/'link'; link.symlink_to(target)
             with self.assertRaises(ValueError): d.safe(link)
 
+    def test_postcommit_context_requires_exact_committed_nonce_and_resets_role(self):
+        from types import SimpleNamespace
+        for mode in ('pass','not_committed','unexpected_success','probe_failure'):
+            with self.subTest(mode=mode):
+                calls=[]; counts=iter(['0','0' if mode=='not_committed' else '1'])
+                def execute(sql):
+                    calls.append(sql)
+                    if sql.startswith('SELECT count(*) FROM contour.causal_sessions'): return next(counts)
+                    return ''
+                def run(args,**kwargs):
+                    self.assertEqual(args[-1],'issue_context_unknown')
+                    if mode=='probe_failure': raise RuntimeError('failure')
+                    return SimpleNamespace(returncode=0,stderr=b'',stdout=b'CONTEXT_UNEXPECTED_SUCCESS\n' if mode=='unexpected_success' else b'CONTEXT_OUTCOME_UNKNOWN\n')
+                bridge={'IDS':['tenant','runtime'],'run_process':run}
+                import contextlib,io
+                sink=io.StringIO()
+                with contextlib.redirect_stdout(sink):
+                    if mode=='pass': d.issue_context_unknown(['probe']*24,{},execute,bridge)
+                    else:
+                        with self.assertRaises((AssertionError,RuntimeError)): d.issue_context_unknown(['probe']*24,{},execute,bridge)
+                wanted={'pass':'unknown','unexpected_success':'unexpected-success','probe_failure':'wrong'}
+                self.assertEqual(sink.getvalue(),'' if mode=='not_committed' else 'issue-context committed=1 outcome='+wanted[mode]+'\n')
+                self.assertNotIn('tenant',sink.getvalue()); self.assertNotIn('runtime',sink.getvalue())
+                self.assertEqual(calls[-1],'ALTER ROLE causal_issuer_login RESET apicontour.tenant_id;')
+                self.assertTrue(any('ALTER ROLE causal_issuer_login SET apicontour.tenant_id' in sql for sql in calls))
+                if mode in ('pass','not_committed','unexpected_success','probe_failure'):
+                    queries=[sql for sql in calls if sql.startswith('SELECT count(*)')]
+                    self.assertEqual(len(queries),2); self.assertEqual(queries[0],queries[1])
+
     def test_deferred_sequence_privilege_checked_before_either_probe(self):
         for function,login,sequence in ((d.issue_unknown,'causal_issuer_login','fixture_issue_entered'),
                                         (d.marker_unknown,'causal_provisioner_login','fixture_marker_commit_entered')):

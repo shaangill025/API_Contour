@@ -21,7 +21,7 @@ SOURCE_ONLY_MIGRATIONS=('0025_historical_origin','0026_causal_evidence_enrollmen
 EXAMPLE=ROOT/'crates/contour-postgres/examples/causal_live_profile_probe.rs'
 REQUIRED_STAGES=('profile_pre','legacy_pre','profile_post','legacy_post','negative_grants',
                  'issue_unknown','clock_guard','quota_guard','weak','wrong_role','positive',
-                 'expired','cancel','marker_unknown','revoked','artifact_unchanged')
+                 'expired','cancel','marker_unknown','issue_context_unknown','revoked','artifact_unchanged')
 
 def qualification_pass(primary,failures,stages,probe_hash):
     return primary is None and not failures and tuple(stages)==REQUIRED_STAGES and bool(probe_hash)
@@ -352,11 +352,33 @@ def marker_unknown(base,env,execute,bridge):
     return int(count)
 
 
+def issue_context_unknown(base,env,execute,bridge):
+    """Prove the real issued nonce committed before context cleanup failed."""
+    args=list(base); args[-1]=str(uuid.uuid4())
+    tenant,runtime=bridge['IDS'][:2]
+    query=f"SELECT count(*) FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND nonce='{args[-1]}';"
+    if execute(query)!='0': raise AssertionError('context fixture nonce exists')
+    try:
+        execute("ALTER ROLE causal_issuer_login SET apicontour.tenant_id TO 'f0000000-0000-4000-8000-000000000002';")
+        result=None; probe_error=None
+        try: result=bridge['run_process'](args+['issue_context_unknown'],timeout=20,env=env,limit=4096)
+        except Exception as error: probe_error=error
+        committed=execute(query)
+        if committed!='1': raise AssertionError('context failure did not commit exact nonce')
+        outcomes={b'CONTEXT_OUTCOME_UNKNOWN\n':'unknown',b'CONTEXT_UNEXPECTED_SUCCESS\n':'unexpected-success',b'CONTEXT_WRONG_OUTCOME\n':'wrong'}
+        outcome=outcomes.get(result.stdout,'wrong') if result is not None and result.returncode==0 and not result.stderr else 'wrong'
+        print('issue-context committed=1 outcome='+outcome,flush=True)
+        if probe_error is not None: raise probe_error
+        if outcome!='unknown': raise AssertionError('context failure protocol mismatch')
+    finally:
+        execute('ALTER ROLE causal_issuer_login RESET apicontour.tenant_id;')
+
+
 def exercise(base,env,execute,bridge,https,stages):
-    tenant=bridge['IDS'][0]; runtime=bridge['IDS'][1]
+    tenant=bridge['IDS'][0]; runtime=bridge['IDS'][1]; extra=0
     def state(sessions,rows,used):
         query=f"SELECT (SELECT count(*) FROM contour.causal_sessions WHERE tenant_id='{tenant}' AND runtime_id='{runtime}')||'|'||(SELECT count(*) FROM contour.causal_generation_claims WHERE tenant_id='{tenant}' AND runtime_id='{runtime}')||'|'||(SELECT count(*) FROM contour.causal_marker_bindings WHERE tenant_id='{tenant}' AND runtime_id='{runtime}')||'|'||coalesce((SELECT used_bytes FROM contour.origin_logical_usage WHERE tenant_id='{tenant}'),0);"
-        if execute(query)!=f'{sessions+2}|{sessions}|{rows}|{used}': raise AssertionError('durable marker state mismatch')
+        if execute(query)!=f'{sessions+2+extra}|{sessions}|{rows}|{used}': raise AssertionError('durable marker state mismatch')
     def arguments(mode,user=None):
         a=list(base); a[-1]=str(uuid.uuid4())
         if user: a[6]=user
@@ -411,10 +433,11 @@ def exercise(base,env,execute,bridge,https,stages):
     execute('DROP TRIGGER fixture_marker_delay ON contour.causal_marker_bindings; DROP FUNCTION contour.fixture_marker_delay(); DROP SEQUENCE contour.fixture_marker_entered;')
     committed=marker_unknown(base,env,execute,bridge)
     state(6,1+committed,824+272*committed); stages.append('marker_unknown')
+    issue_context_unknown(base,env,execute,bridge); extra=1; state(6,1+committed,824+272*committed); stages.append('issue_context_unknown')
     execute(f"BEGIN; SELECT set_config('apicontour.tenant_id','{tenant}',true); SET LOCAL ROLE contour_admin; SELECT contour.enroll_origin_credential('{tenant}','fa000000-0000-4000-8000-000000000011','{bridge['IDS'][9]}',decode(repeat('44',32),'hex')); COMMIT;")
     def revoke():
         execute(f"BEGIN; SELECT set_config('apicontour.tenant_id','{tenant}',true); SET LOCAL ROLE contour_admin; SELECT contour.end_origin('{tenant}','credential_revoked','fa000000-0000-4000-8000-000000000003'); COMMIT;")
-        check=execute(f"BEGIN; SELECT set_config('apicontour.tenant_id','{tenant}',true); SET LOCAL ROLE contour_causal_issuer; SELECT contour.check_causal_session('{tenant}','{runtime}',9); COMMIT;")
+        check=execute(f"BEGIN; SELECT set_config('apicontour.tenant_id','{tenant}',true); SET LOCAL ROLE contour_causal_issuer; SELECT contour.check_causal_session('{tenant}','{runtime}',10); COMMIT;")
         if check.splitlines()[-1]!='t': raise AssertionError('other credential did not keep session current')
     interactive('revoked',revoke); state(7,1+committed,916+272*committed); stages.append('revoked')
 

@@ -55,6 +55,7 @@ fn run() -> Result<(), String> {
                 | "expired"
                 | "cancel"
                 | "issue_unknown"
+                | "issue_context_unknown"
                 | "issue_retry"
                 | "quota"
                 | "marker_unknown"
@@ -126,6 +127,15 @@ fn run() -> Result<(), String> {
                     return Err("negative issue mismatch");
                 }
                 println!("REFUSED");
+                return Ok(());
+            }
+            if a[23] == "issue_context_unknown" {
+                let result = issuer.issue(&issue, &peer, &grants, &policies).await;
+                match result {
+                    Err(CausalError::OutcomeUnknown) => println!("CONTEXT_OUTCOME_UNKNOWN"),
+                    Ok(_) => println!("CONTEXT_UNEXPECTED_SUCCESS"),
+                    Err(_) => println!("CONTEXT_WRONG_OUTCOME"),
+                }
                 return Ok(());
             }
             if a[23] == "issue_unknown" {
