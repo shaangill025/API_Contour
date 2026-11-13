@@ -34,6 +34,16 @@ class PendingSnapshotTests(unittest.TestCase):
                     with self.assertRaises(FileNotFoundError): driver.read_pending_snapshot(path)
                 self.assertEqual(driver.read_pending_snapshot(path),b'{"new":true}')
 
+    def test_real_exclusive_create_before_write_is_retryable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'pending.json'
+            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            try:
+                with self.assertRaises(FileNotFoundError): driver.read_pending_snapshot(path)
+                os.write(fd,b'{"ready":true}')
+                self.assertEqual(driver.read_pending_snapshot(path),b'{"ready":true}')
+            finally: os.close(fd)
+
     def test_unsafe_file_shapes_remain_fatal(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); path=root/'pending.json'
@@ -47,15 +57,27 @@ class PendingSnapshotTests(unittest.TestCase):
             with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
             path.unlink(); path.write_bytes(b'x'*4097); path.chmod(0o600)
             with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
-            path.write_bytes(b'');
+            path.write_bytes(b''); path.chmod(0o644)
             with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
-            path.write_bytes(b'{}'); real_fstat=os.fstat
+            path.chmod(0o600); os.link(path,root/'empty-hardlink')
+            with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+            (root/'empty-hardlink').unlink()
+            path.write_bytes(b''); real_fstat=os.fstat
             def foreign(fd):
                 from types import SimpleNamespace
                 info=real_fstat(fd)
                 return SimpleNamespace(st_mode=info.st_mode,st_uid=os.getuid()+1,st_nlink=info.st_nlink,st_size=info.st_size)
             with mock.patch.object(driver.os,'fstat',side_effect=foreign):
                 with self.assertRaises(ValueError): driver.read_pending_snapshot(path)
+
+    def test_persistently_empty_record_times_out_without_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'pending.json'; path.write_bytes(b''); path.chmod(0o600)
+            execute=mock.Mock(); process=mock.Mock(); process.poll.return_value=None
+            with mock.patch.object(driver.time,'monotonic',side_effect=[0,0.1,0.2,1.0]), mock.patch.object(driver.time,'sleep'):
+                with self.assertRaisesRegex(TimeoutError,'private query entry deadline'):
+                    driver.wait_for_sleep(process,directory,{},execute,timeout=1)
+            execute.assert_not_called()
 
     def test_malformed_and_wrong_target_are_never_retried(self):
         with tempfile.TemporaryDirectory() as directory:

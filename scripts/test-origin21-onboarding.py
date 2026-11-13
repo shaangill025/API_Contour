@@ -438,9 +438,10 @@ def read_pending_snapshot(path):
         def check():
             info=os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or
-                info.st_mode & 0o077 or info.st_nlink not in (0,1) or not 1<=info.st_size<=4096):
+                info.st_mode & 0o077 or info.st_nlink not in (0,1) or not 0<=info.st_size<=4096):
                 raise ValueError('unsafe private file')
             if info.st_nlink==0: raise FileNotFoundError('pending snapshot replaced')
+            if info.st_size==0: raise FileNotFoundError('pending snapshot not ready')
         check()
         chunks=[]; left=4097
         while left:
@@ -448,8 +449,8 @@ def read_pending_snapshot(path):
             if not part: break
             chunks.append(part); left-=len(part)
         data=b''.join(chunks)
-        if not 1<=len(data)<=4096: raise ValueError('private file size')
         check()
+        if not 1<=len(data)<=4096: raise ValueError('private file size')
         return data
     finally: os.close(fd)
 
