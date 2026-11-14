@@ -20,6 +20,7 @@ mod causal_permit;
 #[cfg(unix)]
 mod causal_receiver_deploy;
 mod causal_receiver_metadata;
+mod causal_receiver_protocol504;
 mod causal_service;
 pub mod gateway;
 mod pool;
@@ -76,6 +77,9 @@ pub use causal_receiver_material_checked::{
     check_receiver_material,
 };
 pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_metadata};
+pub use causal_receiver_protocol504::{
+    ReceiverProtocolError504, ReceiverRelayCodec504, ReceiverRelayEvent504,
+};
 #[cfg(unix)]
 pub use causal_receiver_sources::{ReceiverCandidateSources, ReceiverSourcesError};
 pub use causal_service::{CausalRegistry, CausalServer};
