@@ -301,6 +301,23 @@ class HttpsDriverTests(unittest.TestCase):
                 target.write_bytes(b'original');target.unlink();target.symlink_to(root/'Cargo.toml')
                 with self.assertRaisesRegex(ValueError,'symlink'):bg['snapshot']()
 
+    def test_installed_scenario_runs_only_https_protocol_and_propagates_failures(self):
+        bridge=runpy.run_path(str(ROOT/'scripts/test-postgres-causal-bridge.py'))
+        bg=bridge['main'].__globals__; calls=[]
+        base=['https-probe']; work=Path('/synthetic'); env={}; counts=object(); state={'stages':[]}; execute=object()
+        def cases(*args): calls.append(args)
+        with mock.patch.dict(G,{'run_https_cases':cases}), mock.patch.dict(bg,{'inbox_context_unknown':mock.Mock(side_effect=AssertionError('foreign protocol'))}):
+            context=M['install_helpers'](bridge,{'source_snapshot':lambda:{}})
+            context.update(work=work,tls_ready=True,peer='ab'*32)
+            bg['run_scenario'](base,work,env,counts,state,execute)
+            self.assertEqual(calls,[(base,work,env,counts,state)])
+            self.assertEqual(state['_https_peer'],'ab'*32)
+            self.assertIn('synthetic HTTPS',state['boundary'])
+            self.assertFalse(bg['inbox_context_unknown'].called)
+            with mock.patch.dict(G,{'run_https_cases':mock.Mock(side_effect=RuntimeError('HTTPS scenario failure'))}):
+                with self.assertRaisesRegex(RuntimeError,'HTTPS scenario failure'):
+                    bg['run_scenario'](base,work,env,counts,state,execute)
+
     def test_readiness_timeout_cannot_pass(self):
         sleeper="import time;time.sleep(10)"
         process=M['ProbeProcess']([sys.executable,'-c',sleeper],os.environ.copy())

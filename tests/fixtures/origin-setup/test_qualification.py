@@ -64,5 +64,53 @@ class Qualification(unittest.TestCase):
             with self.assertRaises(ValueError): qualification.main()
             image.assert_not_called()
 
+    def test_failure_diagnostic_uses_only_fixed_types_phases_and_owned_frames(self):
+        known=str(ROOT/'deploy/pilot/origin_credentials.py')
+        try:
+            exec(compile('raise ValueError("private-secret /private/user/key SQL payload")',known,'exec'),{})
+        except ValueError as error:
+            line=qualification.failure_line(error,'credentials','primary')
+        self.assertEqual(line,'origin-setup-failure phase=credentials role=primary type=ValueError '
+                              'location=deploy/pilot/origin_credentials.py:1')
+        self.assertNotIn('private',line)
+        try:
+            exec(compile('raise RuntimeError("secret")','/outside/deploy/pilot/origin_credentials.py','exec'),{})
+        except RuntimeError as error:
+            self.assertTrue(qualification.failure_line(error,'setup','primary').endswith('location=unavailable'))
+            self.assertIsNone(qualification.failure_line(error,'secret-phase','primary'))
+            self.assertIsNone(qualification.failure_line(error,'setup','private-role'))
+        class SecretType(Exception): pass
+        self.assertIn('type=OtherError',qualification.failure_line(SecretType('secret'),'setup','cleanup'))
+        oversized='x'*2100+'.py'
+        try:
+            exec(compile('raise ValueError("secret")',str(ROOT/oversized),'exec'),{})
+        except ValueError as error:
+            with mock.patch.object(qualification,'_FRAMES',{oversized}):
+                self.assertIsNone(qualification.failure_line(error,'setup','primary'))
+
+    def test_failure_diagnostic_limits_frames_and_keeps_primary_and_cleanup(self):
+        path=str(ROOT/'deploy/pilot/origin_credentials.py')
+        code=compile('def f(n):\n if n: return f(n-1)\n raise ValueError("secret")\nf(20)',path,'exec')
+        try: exec(code,{})
+        except ValueError as primary:
+            line=qualification.failure_line(primary,'credentials','primary')
+            self.assertEqual(line.count('deploy/pilot/origin_credentials.py:'),6)
+            self.assertLessEqual(len(line.encode()),2048)
+            cleanup=RuntimeError('cleanup secret')
+            with mock.patch.object(qualification,'_FAILURES',[(primary,'credentials','primary')]), \
+                 mock.patch.object(qualification,'_PHASE','cleanup'):
+                lines=qualification.failure_lines(cleanup)
+            self.assertEqual(len(lines),2)
+            self.assertIn('role=primary',lines[0]); self.assertIn('role=cleanup',lines[1])
+            self.assertNotIn('secret',' '.join(lines))
+
+    def test_invalid_arguments_still_fail_without_secret_output(self):
+        result=subprocess.run([sys.executable,'-B',str(ROOT/'scripts/test-origin-pilot-setup.py'),'secret-argument'],
+                              capture_output=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn(b'origin-setup-failure phase=arguments role=primary type=ValueError',result.stderr)
+        self.assertNotIn(b'secret-argument',result.stderr)
+        self.assertIn(b'Synthetic internal origin setup qualification failed',result.stderr)
+
 
 if __name__=='__main__': unittest.main()

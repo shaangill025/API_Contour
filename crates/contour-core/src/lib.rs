@@ -1,5 +1,8 @@
 //! Value-free structural nodes. Checked syntax and limits do not authorize names.
 
+mod gateway_enrollment;
+pub use gateway_enrollment::{GatewayEnrollment, GatewayEnrollmentError};
+
 use std::fmt;
 mod authority_reply;
 pub use authority_reply::{
@@ -14,6 +17,10 @@ mod batch;
 pub use batch::{AuthorityRequest, Batch, BatchError, CheckedRecord, RecordDraft, RecordMetadata};
 mod batch_v2;
 pub use batch_v2::{BatchV2, BatchV2Record, OriginWitness};
+mod receiver_enrollment;
+pub use receiver_enrollment::{
+    MAX_RECEIVER_ENROLLMENT_BYTES, ReceiverEnrollment, ReceiverEnrollmentError,
+};
 mod causal_marker;
 pub use causal_marker::{
     CausalMarkerClaim, CausalMarkerError, CausalMarkerScope, CausalMarkerVerifier,
@@ -22,6 +29,11 @@ pub use causal_marker::{
 mod causal_grant;
 pub use causal_grant::{
     CausalGrantError, CausalGrantEventKind, CausalGrantKeys, VerifiedCausalGrant,
+};
+mod causal_evidence;
+pub use causal_evidence::{
+    CausalEvidenceBinding, CausalEvidenceObserver, CausalEvidenceReceiver,
+    MAX_CAUSAL_BINDING_BYTES, MAX_CAUSAL_EVIDENCE_BYTES,
 };
 mod causal_event;
 pub use causal_event::{

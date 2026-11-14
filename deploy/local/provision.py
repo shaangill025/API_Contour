@@ -50,6 +50,40 @@ def apply_migrations(installed, versions):
     if [int(v) for v in psql('SELECT version FROM contour.schema_migrations ORDER BY version;').splitlines()] != expected:
         raise RuntimeError('migration ledger did not reach expected version')
 
+def _human_statements(subjects, actor_count, *, selected=None):
+    """Build fixed membership SQL from verified subjects for one closed profile."""
+    if selected is None:
+        issuer_value = ISSUER
+    else:
+        from deploy.local import origin21_profile
+        if selected is not origin21_profile.HUMAN: raise ValueError('unsupported human profile')
+        issuer_value = 'https://idp.mvp.localhost:18444/realms/apicontour-mvp'
+    if (type(subjects) is not dict or set(subjects) != {'owner','viewer'} or
+        any(type(value) is not str or not 1 <= len(value) <= 255 or any(ord(c)<32 or ord(c)>126 for c in value) for value in subjects.values()) or
+        subjects['owner'] == subjects['viewer'] or type(actor_count) is not int or actor_count not in (0,2)):
+        raise ValueError('invalid verified subjects')
+    if selected is not None and any('$$' in value for value in subjects.values()):
+        raise ValueError('invalid verified subjects')
+    tenant, project, service, environment = map(sql_quote, IDS)
+    statements = [f"INSERT INTO contour.tenants VALUES ({tenant}) ON CONFLICT DO NOTHING;",
+                  f"INSERT INTO contour.projects VALUES ({tenant},{project}) ON CONFLICT DO NOTHING;",
+                  f"INSERT INTO contour.services VALUES ({tenant},{service},{project}) ON CONFLICT DO NOTHING;",
+                  f"INSERT INTO contour.environments VALUES ({tenant},{environment},{project}) ON CONFLICT DO NOTHING;",
+                  f"INSERT INTO contour.service_import_defaults VALUES ({tenant},{project},{service},{environment}) ON CONFLICT DO NOTHING;",
+                  'SET LOCAL ROLE contour_human_provisioner;']
+    for name, actor, role in zip(['owner','viewer'], ACTORS, ['service_owner','viewer']):
+        actor, subject, issuer, role = map(sql_quote, [actor,subjects[name],issuer_value,role])
+        inserts = [f"INSERT INTO contour.human_actors VALUES ({actor},true) ON CONFLICT DO NOTHING;",
+          f"INSERT INTO contour.human_identities VALUES ({issuer},{subject},{actor},true) ON CONFLICT DO NOTHING;",
+          f"INSERT INTO contour.human_tenant_memberships VALUES ({tenant},{actor},true) ON CONFLICT DO NOTHING;",
+          f"INSERT INTO contour.human_project_memberships VALUES ({tenant},{project},{actor},true) ON CONFLICT DO NOTHING;",
+          f"INSERT INTO contour.human_service_roles VALUES ({tenant},{project},{service},{actor},{role},true) ON CONFLICT DO NOTHING;"]
+        if actor_count == 0: statements += inserts
+        statements += [f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.human_actors a JOIN contour.human_identities i USING(actor_id) JOIN contour.human_tenant_memberships t USING(actor_id) JOIN contour.human_project_memberships p USING(tenant_id,actor_id) JOIN contour.human_service_roles r USING(tenant_id,project_id,actor_id) WHERE a.actor_id={actor} AND a.enabled AND i.issuer={issuer} AND i.subject={subject} AND i.enabled AND t.tenant_id={tenant} AND t.enabled AND p.project_id={project} AND p.enabled AND r.service_id={service} AND r.role={role} AND r.enabled) OR (SELECT count(*) FROM contour.human_identities WHERE actor_id={actor}) <> 1 OR (SELECT count(*) FROM contour.human_service_roles WHERE actor_id={actor}) <> 1 THEN RAISE EXCEPTION 'identity drift'; END IF; END $$;"]
+    # Reset role to inspect the fixed default, including a pre-existing conflicting default.
+    statements += ['RESET ROLE;', f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.service_import_defaults WHERE tenant_id={tenant} AND project_id={project} AND service_id={service} AND environment_id={environment}) THEN RAISE EXCEPTION 'default drift'; END IF; END $$;"]
+    return 'BEGIN; ' + '\n'.join(statements) + ' COMMIT;'
+
 def main():
     os.umask(0o077)
     subjects = json.loads(private_file(STATE / 'subjects.json'))
@@ -100,24 +134,7 @@ def main():
     tenant, project, service, environment = map(sql_quote, IDS)
     actor_count = int(psql('SELECT count(*) FROM contour.human_actors WHERE actor_id IN (' + ','.join(map(sql_quote, ACTORS)) + ');'))
     if actor_count not in (0, 2): raise RuntimeError('partial human identity provisioning')
-    statements = [f"INSERT INTO contour.tenants VALUES ({tenant}) ON CONFLICT DO NOTHING;",
-                  f"INSERT INTO contour.projects VALUES ({tenant},{project}) ON CONFLICT DO NOTHING;",
-                  f"INSERT INTO contour.services VALUES ({tenant},{service},{project}) ON CONFLICT DO NOTHING;",
-                  f"INSERT INTO contour.environments VALUES ({tenant},{environment},{project}) ON CONFLICT DO NOTHING;",
-                  f"INSERT INTO contour.service_import_defaults VALUES ({tenant},{project},{service},{environment}) ON CONFLICT DO NOTHING;",
-                  'SET LOCAL ROLE contour_human_provisioner;']
-    for name, actor, role in zip(['owner','viewer'], ACTORS, ['service_owner','viewer']):
-        actor, subject, issuer, role = map(sql_quote, [actor,subjects[name],ISSUER,role])
-        inserts = [f"INSERT INTO contour.human_actors VALUES ({actor},true) ON CONFLICT DO NOTHING;",
-          f"INSERT INTO contour.human_identities VALUES ({issuer},{subject},{actor},true) ON CONFLICT DO NOTHING;",
-          f"INSERT INTO contour.human_tenant_memberships VALUES ({tenant},{actor},true) ON CONFLICT DO NOTHING;",
-          f"INSERT INTO contour.human_project_memberships VALUES ({tenant},{project},{actor},true) ON CONFLICT DO NOTHING;",
-          f"INSERT INTO contour.human_service_roles VALUES ({tenant},{project},{service},{actor},{role},true) ON CONFLICT DO NOTHING;"]
-        if actor_count == 0: statements += inserts
-        statements += [f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.human_actors a JOIN contour.human_identities i USING(actor_id) JOIN contour.human_tenant_memberships t USING(actor_id) JOIN contour.human_project_memberships p USING(tenant_id,actor_id) JOIN contour.human_service_roles r USING(tenant_id,project_id,actor_id) WHERE a.actor_id={actor} AND a.enabled AND i.issuer={issuer} AND i.subject={subject} AND i.enabled AND t.tenant_id={tenant} AND t.enabled AND p.project_id={project} AND p.enabled AND r.service_id={service} AND r.role={role} AND r.enabled) OR (SELECT count(*) FROM contour.human_identities WHERE actor_id={actor}) <> 1 OR (SELECT count(*) FROM contour.human_service_roles WHERE actor_id={actor}) <> 1 THEN RAISE EXCEPTION 'identity drift'; END IF; END $$;"]
-    # Reset role to inspect the fixed default, including a pre-existing conflicting default.
-    statements += ['RESET ROLE;', f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM contour.service_import_defaults WHERE tenant_id={tenant} AND project_id={project} AND service_id={service} AND environment_id={environment}) THEN RAISE EXCEPTION 'default drift'; END IF; END $$;"]
-    psql('BEGIN; ' + '\n'.join(statements) + ' COMMIT;')
+    psql(_human_statements(subjects, actor_count))
     business = dict(database_host='localhost', database_port=5544, database_name='contour_local', database_user='contour_app',
                     database_password_file=str(STATE / 'database-password'), database_ca_file=str(STATE / 'ca.crt'),
                     tenant_id=IDS[0], project_id=IDS[1], service_id=IDS[2], environment_id=IDS[3],

@@ -13,6 +13,51 @@ G=MODULE['main'].__globals__
 
 
 class DriverTests(unittest.TestCase):
+    def test_inbox_context_checks_exact_commit_before_protocol_and_always_cleans(self):
+        import contextlib,io
+        for output, expected_error in ((b'CONTEXT_OUTCOME_UNKNOWN\n',False),(b'CONTEXT_UNEXPECTED_SUCCESS\n',True),(b'private-canary',True)):
+            calls=[]; captured=io.StringIO()
+            def execute(sql):
+                if sql.startswith('SELECT count(*)'):
+                    calls.append('count');return '0' if calls.count('count')==1 else '1'
+                if sql.startswith('BEGIN; CREATE FUNCTION'):
+                    self.assertIn('DEFERRABLE INITIALLY DEFERRED',sql);calls.append('setup');return ''
+                if sql.startswith('DROP TRIGGER'):
+                    calls.append('cleanup');return ''
+                raise AssertionError('unexpected query')
+            def runner(args,**kwargs):
+                calls.append('probe');self.assertEqual(args[-1],'inbox_context_unknown')
+                return subprocess.CompletedProcess(args,0,output,b'')
+            with tempfile.TemporaryDirectory() as temp, mock.patch.dict(G,{'run_process':runner}), contextlib.redirect_stdout(captured):
+                if expected_error:
+                    with self.assertRaises(AssertionError): MODULE['inbox_context_unknown'](['probe']*24,Path(temp),{},execute)
+                else: MODULE['inbox_context_unknown'](['probe']*24,Path(temp),{},execute)
+            self.assertEqual(calls,['count','setup','probe','count','cleanup'])
+            self.assertNotIn('private-canary',captured.getvalue())
+            self.assertIn('inbox-context committed=1 outcome=',captured.getvalue())
+
+    def test_default_scenario_requires_context_and_propagates_failure(self):
+        base=['probe']; work=Path('/synthetic'); env={}; counts=object(); execute=object()
+        for fail in (False,True):
+            calls=[]; state={'stages':[]}
+            def cases(*args):
+                calls.append(('cases',args)); state['status']='passed'
+            def context(*args):
+                calls.append(('context',args)); self.assertEqual(state['status'],'failed')
+                self.assertEqual(state['current_case'],'inbox_context_unknown')
+                if fail: raise RuntimeError('context control failed')
+            with mock.patch.dict(G,{'run_probe_cases':cases,'inbox_context_unknown':context}):
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError,'context control failed'):
+                        G['run_scenario'](base,work,env,counts,state,execute)
+                else: G['run_scenario'](base,work,env,counts,state,execute)
+            self.assertEqual(calls,[('cases',(base,work,env,counts,state)),('context',(base,work,env,execute))])
+            if fail:
+                self.assertEqual(state['status'],'failed'); self.assertNotIn('inbox_context_unknown',state['stages'])
+            else:
+                self.assertEqual(state['status'],'passed'); self.assertEqual(state['stages'],['inbox_context_unknown'])
+                self.assertNotIn('current_case',state)
+
     def test_all_probe_cases_and_persisted_effects(self):
         calls=[]; state={'stages':[]}; work=Path('/synthetic'); base=['probe']+['original']*23
         expected=[('untrusted_tls_ca',4,'/synthetic/untrusted.crt','fixture issuer TLS failed'),
@@ -323,7 +368,43 @@ class DriverTests(unittest.TestCase):
                 for path in MODULE['source_paths']():
                     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
                 before=MODULE['snapshot']()
+                fixture=root/'crates/contour-postgres/tests/fixtures/causal_candidate_504.json'
+                self.assertIn(str(fixture),before)
+                fixture.write_bytes(b'changed')
+                self.assertNotEqual(before[str(fixture)],MODULE['snapshot']()[str(fixture)])
+                fixture.unlink()
+                with self.assertRaisesRegex(ValueError,'source file unavailable'): MODULE['snapshot']()
+                fixture.write_bytes(b'original')
                 target=root/'db/opt-in-migrations/0021_origin_admission.sql';target.write_bytes(b'mutated')
+                self.assertNotEqual(before,MODULE['snapshot']())
+                target.unlink()
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
+                target.write_bytes(b'original')
+                extra=target.parent/'0099_unknown.sql'; extra.write_bytes(b'extra')
+                with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
+                extra.unlink()
+                moved=root/'db/moved';parent=target.parent;parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
+                with self.assertRaisesRegex(ValueError,'symlink'): MODULE['snapshot']()
+
+    def test_migration_22_is_hashed_without_being_applied(self):
+        path=MODULE['ROOT']/'db/opt-in-migrations/0022_causal_generation.sql'
+        self.assertEqual(MODULE['snapshot']()[str(path)],MODULE['digest_file'](path))
+        self.assertNotIn('0022_causal_generation',MODULE['OPT'])
+
+    def test_migration_23_is_hashed_without_being_applied(self):
+        path=MODULE['ROOT']/'db/opt-in-migrations/0023_causal_marker_bindings.sql'
+        self.assertEqual(MODULE['snapshot']()[str(path)],MODULE['digest_file'](path))
+        self.assertNotIn('0023_causal_marker_bindings',MODULE['OPT'])
+
+    def test_source_guard_22_missing_mutated_and_symlink(self):
+        with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
+            root=Path(temp)/'repo';root.mkdir()
+            for crate in ('contour-postgres','contour-core','contour-auth'): (root/'crates'/crate/'src').mkdir(parents=True)
+            with mock.patch.dict(G,{'ROOT':root}):
+                for path in MODULE['source_paths']():
+                    path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+                before=MODULE['snapshot']()
+                target=root/'db/opt-in-migrations/0022_causal_generation.sql';target.write_bytes(b'mutated')
                 self.assertNotEqual(before,MODULE['snapshot']())
                 target.unlink()
                 with self.assertRaisesRegex(ValueError,'source list changed'): MODULE['snapshot']()
@@ -351,6 +432,77 @@ class DriverTests(unittest.TestCase):
         secret='SYNTHETIC_PASSWORD_NEVER_LOG'
         self.assertEqual(MODULE['failure_category'](subprocess.TimeoutExpired(['--password='+secret],1)),'subprocess_timeout')
         self.assertNotIn(secret,MODULE['failure_category'](RuntimeError(secret)))
+
+
+
+
+
+class HistoricalSourceInventoryTests(unittest.TestCase):
+    def test_all_old_profiles_hash_25_through_28_without_applying_them(self):
+        import hashlib
+        root_repo=Path(__file__).resolve().parents[3]
+        cases=(('bridge',19),('sessions',19),('inbox',20),('generation',22),
+               ('permits',22),('marker-binding',23),('marker-bridge',23),('live-profile',24))
+        for name,last in cases:
+            with self.subTest(driver=name), tempfile.TemporaryDirectory() as temporary:
+                module=runpy.run_path(str(root_repo/('scripts/test-postgres-causal-'+name+'.py')))
+                root=Path(temporary).resolve(); root.mkdir(exist_ok=True)
+                fn=module.get('source_snapshot',module.get('snapshot')); g=fn.__globals__
+                patches={'ROOT':root}
+                if name=='bridge':
+                    for crate in ('contour-postgres','contour-core','contour-auth'):
+                        (root/'crates'/crate/'src').mkdir(parents=True)
+                    with mock.patch.dict(g,patches): paths=module['source_paths']()
+                elif name in ('sessions','inbox','generation','marker-binding'):
+                    names=module.get('SOURCE_PATHS',module.get('SOURCES'))
+                    paths=[root/path for path in names]
+                    if name=='inbox':
+                        extra=root/'crates/fixture/source.rs'; paths.append(extra)
+                else:
+                    folder=root/'db/opt-in-migrations'
+                    extra=module.get('EXTRA_SOURCE_MIGRATIONS',module.get('SOURCE_ONLY_MIGRATIONS',()))
+                    paths=[folder/(item+'.sql') for item in module['OPT']+extra]
+                    for key in ('EXAMPLE','NODE','MARKER'):
+                        if key in module:
+                            original=module[key]; mapped=root/original.relative_to(root_repo)
+                            patches[key]=mapped;paths.append(mapped)
+                    paths += [root/('scripts/test-postgres-causal-'+name+'.py'),root/('tests/fixtures/causal-'+name+'/test_driver.py'),root/'scripts/test-postgres-causal-https.py',root/'tests/fixtures/causal-https/test_https_driver.py']
+                    if name=='permits':
+                        paths.append(root/'crates/contour-ingress/Cargo.toml')
+                        for crate in ('contour-ingress','contour-delivery','contour-platform','contour-abi','contour-wasm'):
+                            (root/'crates'/crate/'src').mkdir(parents=True,exist_ok=True)
+                paths.append(root/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql')
+                paths.append(root/'db/opt-in-migrations/0027_causal_observer_inbox.sql')
+                paths.append(root/'db/opt-in-migrations/0028_causal_receiver_enrollment.sql')
+                paths.append(root/'db/opt-in-migrations/0029_causal_receiver_inbox.sql')
+                paths.append(root/'db/opt-in-migrations/0030_causal_gateway_reader.sql')
+                for path in paths:
+                    path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'original')
+                bridge={'source_paths':lambda:[], 'digest_file':lambda path:hashlib.sha256(path.read_bytes()).hexdigest()}
+                with mock.patch.dict(g,patches):
+                    def snapshot(): return fn(bridge) if name in ('permits','marker-bridge','live-profile') else fn()
+                    before=snapshot()
+                    for filename in ('0025_historical_origin.sql','0026_causal_evidence_enrollment.sql','0027_causal_observer_inbox.sql','0028_causal_receiver_enrollment.sql','0029_causal_receiver_inbox.sql','0030_causal_gateway_reader.sql'):
+                        target=root/'db/opt-in-migrations'/filename
+                        key=str(target) if name in ('bridge','permits','marker-bridge','live-profile') else str(target.relative_to(root))
+                        self.assertEqual(before[key],hashlib.sha256(b'original').hexdigest())
+                        target.write_bytes(b'changed');self.assertNotEqual(before[key],snapshot()[key]);target.unlink()
+                        with self.assertRaises(ValueError): snapshot()
+                        target.write_bytes(b'original');target.unlink();target.symlink_to(root/'elsewhere')
+                        with self.assertRaises(ValueError): snapshot()
+                        target.unlink();target.write_bytes(b'original')
+                    unexpected=root/'db/opt-in-migrations/0099_unexpected.sql';unexpected.write_bytes(b'x')
+                    with self.assertRaises(ValueError): snapshot()
+
+                applied=module.get('OPT',module.get('OPT_INS'))
+                if name=='marker-binding': applied=module['GEN']['OPT_INS']+('0023_causal_marker_bindings',)
+                self.assertEqual([int(item[:4]) for item in applied],list(range(15,last+1)))
+                self.assertNotIn('0025_historical_origin',applied)
+                self.assertNotIn('0026_causal_evidence_enrollment',applied)
+                self.assertNotIn('0027_causal_observer_inbox',applied)
+                self.assertNotIn('0028_causal_receiver_enrollment',applied)
+                self.assertNotIn('0029_causal_receiver_inbox',applied)
+                self.assertNotIn('0030_causal_gateway_reader',applied)
 
 
 if __name__=='__main__': unittest.main()

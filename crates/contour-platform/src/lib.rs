@@ -66,13 +66,51 @@ pub enum TransportProfile {
     #[default]
     Host,
     Docker,
+    ManagedDocker,
 }
 
 impl TransportProfile {
+    fn origin(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => ORIGIN,
+            Self::ManagedDocker => "https://mvp.localhost:19443",
+        }
+    }
+    fn authority(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => AUTHORITY,
+            Self::ManagedDocker => "mvp.localhost:19443",
+        }
+    }
+    fn provider_origin(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => PROVIDER,
+            Self::ManagedDocker => "https://idp.mvp.localhost:18444",
+        }
+    }
+    fn provider_host(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => "localhost:8444",
+            Self::ManagedDocker => "idp.mvp.localhost:18444",
+        }
+    }
+    fn provider_sni(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => "localhost",
+            Self::ManagedDocker => "idp.mvp.localhost",
+        }
+    }
+    fn client_id(self) -> &'static str {
+        match self {
+            Self::Host | Self::Docker => "apicontour-local",
+            Self::ManagedDocker => "apicontour-mvp",
+        }
+    }
+
     fn listen_address(self) -> &'static str {
         match self {
             Self::Host => "127.0.0.1:9443",
-            Self::Docker => "0.0.0.0:9443",
+            Self::Docker | Self::ManagedDocker => "0.0.0.0:9443",
         }
     }
 
@@ -80,6 +118,7 @@ impl TransportProfile {
         match self {
             Self::Host => "127.0.0.1:8444",
             Self::Docker => "keycloak:8443",
+            Self::ManagedDocker => "mvp-keycloak:8443",
         }
     }
 }
@@ -103,12 +142,17 @@ pub struct Config {
 impl Config {
     fn validate(&self) -> Result<(), PlatformError> {
         // This profile intentionally has no general remote/network destination support.
-        if self.issuer != format!("{PROVIDER}/realms/apicontour-local")
+        if self.issuer
+            != format!(
+                "{}/realms/{}",
+                self.transport.provider_origin(),
+                self.transport.client_id()
+            )
             || self.authorization_endpoint
                 != format!("{}/protocol/openid-connect/auth", self.issuer)
             || self.token_endpoint != format!("{}/protocol/openid-connect/token", self.issuer)
-            || self.client_id != "apicontour-local"
-            || self.callback != format!("{ORIGIN}/auth/callback")
+            || self.client_id != self.transport.client_id()
+            || self.callback != format!("{}/auth/callback", self.transport.origin())
         {
             return Err(PlatformError::Configuration);
         }
@@ -294,7 +338,7 @@ impl Platform {
         H: Fn(BusinessRequest, VerifiedIdentity) -> F,
         F: Future<Output = PlatformResponse>,
     {
-        let request = match bounded_request(request).await {
+        let request = match bounded_request(request, self.config.transport).await {
             Ok(request) => request,
             Err(error) => return error_response(error),
         };
@@ -332,14 +376,24 @@ impl Platform {
             ("GET", "/app.js") => Ok(response(200, "text/javascript; charset=utf-8", SCRIPT)),
             ("GET", "/auth/login") => self.login(),
             ("GET", "/auth/callback") => self.callback(&request).await,
-            ("GET", "/auth/session") => self
-                .identity(request.headers())
-                .map(|_| response(200, "application/json", r#"{"authenticated":true}"#)),
+            ("GET", "/auth/session") => self.session_view(request.headers()),
             ("POST", "/auth/logout") => self.logout(&request),
-            (_, path) if path.starts_with("/v1/") => match self.identity(request.headers()) {
-                Ok(identity) => Ok(business(request, identity).await),
-                Err(error) => Err(error),
-            },
+            (_, path) if path.starts_with("/v1/") => {
+                match self.identity_with_view(request.headers()) {
+                    Ok((identity, view)) => {
+                        let mut result = business(request, identity).await;
+                        view.parse()
+                            .map_err(|_| PlatformError::Unavailable)
+                            .map(|header| {
+                                result
+                                    .headers_mut()
+                                    .insert("x-contour-session-view", header);
+                                result
+                            })
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             _ => Ok(response(
                 404,
                 "application/json",
@@ -429,12 +483,14 @@ impl Platform {
             .verify(&token, &login.nonce, unix_now()?)
             .map_err(|_| PlatformError::Unauthenticated)?;
         let session_id = random()?;
+        let session_view = format!("sv1_{}", random()?);
         let now = Instant::now();
         let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
         memory.insert_session(
             session_id.clone(),
             Session {
                 token,
+                view: session_view,
                 nonce: login.nonce,
                 expires: now + SESSION_LIFETIME,
             },
@@ -472,6 +528,35 @@ impl Platform {
         memory.verified_session(session_id, &self.verifier, unix_now()?, Instant::now())
     }
 
+    fn identity_with_view(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Result<(VerifiedIdentity, String), PlatformError> {
+        let cookies = wire::cookies(headers)?;
+        let session_id = cookies
+            .get(SESSION_COOKIE)
+            .filter(|id| wire::opaque(id))
+            .ok_or(PlatformError::Unauthenticated)?;
+        let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
+        memory.verified_session_with_view(session_id, &self.verifier, unix_now()?, Instant::now())
+    }
+
+    fn session_view(&self, headers: &hyper::HeaderMap) -> Result<PlatformResponse, PlatformError> {
+        let cookies = wire::cookies(headers)?;
+        let id = cookies
+            .get(SESSION_COOKIE)
+            .filter(|id| wire::opaque(id))
+            .ok_or(PlatformError::Unauthenticated)?;
+        let mut memory = self.memory.lock().map_err(|_| PlatformError::Unavailable)?;
+        let view = memory.verified_session_view(id, &self.verifier, unix_now()?, Instant::now())?;
+        let mut result = response(200, "application/json", r#"{"authenticated":true}"#);
+        result.headers_mut().insert(
+            "x-contour-session-view",
+            view.parse().map_err(|_| PlatformError::Unavailable)?,
+        );
+        Ok(result)
+    }
+
     fn logout(&self, request: &BusinessRequest) -> Result<PlatformResponse, PlatformError> {
         if request.body().as_ref() != b"{}" {
             return Err(PlatformError::InvalidRequest);
@@ -496,13 +581,13 @@ impl Platform {
     async fn exchange(&self, code: &str, verifier: &str) -> Result<String, PlatformError> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let socket = TcpStream::connect(self.config.transport.provider_address()).await.map_err(|_| PlatformError::Unavailable)?;
-            let tls = self.provider.connect(ServerName::try_from("localhost").map_err(|_| PlatformError::Configuration)?, socket).await.map_err(|_| PlatformError::Unavailable)?;
+            let tls = self.provider.connect(ServerName::try_from(self.config.transport.provider_sni()).map_err(|_| PlatformError::Configuration)?, socket).await.map_err(|_| PlatformError::Unavailable)?;
             let (mut sender, connection) = hyper::client::conn::http1::Builder::new().max_headers(32).max_header_size(16384).max_buf_size(16384)
                 .handshake(TokioIo::new(tls)).await.map_err(|_| PlatformError::Unavailable)?;
             let _driver = AbortDriver(tokio::spawn(async move { let _ = connection.await; }));
             let form = format!("grant_type=authorization_code&client_id={}&redirect_uri={}&code={}&code_verifier={}", wire::encode(&self.config.client_id), wire::encode(&self.config.callback), wire::encode(code), wire::encode(verifier));
-            let path = self.config.token_endpoint.strip_prefix(PROVIDER).ok_or(PlatformError::Configuration)?;
-            let request = Request::post(path).header("host", "localhost:8444").header("content-type", "application/x-www-form-urlencoded").header("connection", "close")
+            let path = self.config.token_endpoint.strip_prefix(self.config.transport.provider_origin()).ok_or(PlatformError::Configuration)?;
+            let request = Request::post(path).header("host", self.config.transport.provider_host()).header("content-type", "application/x-www-form-urlencoded").header("connection", "close")
                 .body(Full::new(Bytes::from(form))).map_err(|_| PlatformError::Configuration)?;
             let response = sender.send_request(request).await.map_err(|_| PlatformError::Unavailable)?;
             if response.status() != 200 || response.headers().contains_key("content-encoding")
@@ -585,8 +670,11 @@ fn cookie(name: &str, value: &str, age: u32) -> String {
     format!("{name}={value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={age}")
 }
 
-async fn bounded_request(request: Request<Incoming>) -> Result<BusinessRequest, PlatformError> {
-    wire::validate_request(&request)?;
+async fn bounded_request(
+    request: Request<Incoming>,
+    transport: TransportProfile,
+) -> Result<BusinessRequest, PlatformError> {
+    wire::validate_request(&request, transport)?;
     let limit = if matches!(request.method().as_str(), "GET" | "HEAD") {
         0
     } else {
@@ -662,6 +750,40 @@ const SCRIPT: &str = r#"async function check(){const r=await fetch('/auth/sessio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_profile_accepts_only_its_closed_configuration() {
+        let mut config = Config {
+            transport: serde_json::from_str("\"managed_docker\"").unwrap(),
+            issuer: "https://idp.mvp.localhost:18444/realms/apicontour-mvp".into(),
+            authorization_endpoint: "https://idp.mvp.localhost:18444/realms/apicontour-mvp/protocol/openid-connect/auth".into(),
+            token_endpoint: "https://idp.mvp.localhost:18444/realms/apicontour-mvp/protocol/openid-connect/token".into(),
+            client_id: "apicontour-mvp".into(),
+            callback: "https://mvp.localhost:19443/auth/callback".into(),
+            tls_certificate: PathBuf::new(), tls_private_key: PathBuf::new(),
+            provider_ca: PathBuf::new(), jwks: PathBuf::new(),
+        };
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(config.transport.listen_address(), "0.0.0.0:9443");
+        assert_eq!(config.transport.provider_address(), "mvp-keycloak:8443");
+        assert_eq!(config.transport.provider_sni(), "idp.mvp.localhost");
+        assert_eq!(config.transport.provider_host(), "idp.mvp.localhost:18444");
+        let original = config.token_endpoint.clone();
+        config.token_endpoint = "https://elsewhere.invalid/token".into();
+        assert_eq!(config.validate(), Err(PlatformError::Configuration));
+        config.token_endpoint = original;
+        config.client_id = "apicontour-local".into();
+        assert_eq!(config.validate(), Err(PlatformError::Configuration));
+        config.client_id = "apicontour-mvp".into();
+        config.issuer = "https://localhost:8444/realms/apicontour-local".into();
+        assert_eq!(config.validate(), Err(PlatformError::Configuration));
+        config.issuer = "https://idp.mvp.localhost:18444/realms/apicontour-mvp".into();
+        config.authorization_endpoint = "https://elsewhere.invalid/auth".into();
+        assert_eq!(config.validate(), Err(PlatformError::Configuration));
+        config.authorization_endpoint = format!("{}/protocol/openid-connect/auth", config.issuer);
+        config.callback = "https://localhost:9443/auth/callback".into();
+        assert_eq!(config.validate(), Err(PlatformError::Configuration));
+    }
+
     #[test]
     fn fixed_transport_profiles() {
         assert_eq!(
@@ -821,6 +943,11 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(values.len(), 100);
         assert!(values.iter().all(|value| wire::opaque(value)));
+        assert!(
+            values
+                .iter()
+                .all(|value| !wire::opaque(&format!("sv1_{value}")))
+        );
     }
     #[test]
     fn host_cookie_attributes_and_explicit_deletion() {
@@ -834,3 +961,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod session_integration_tests;

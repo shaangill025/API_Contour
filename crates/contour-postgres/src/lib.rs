@@ -7,9 +7,15 @@ mod authority;
 mod catalog;
 mod catalog_reader;
 mod causal;
+mod causal_gateway_reader;
+mod causal_receiver_reader;
 mod comparison_store;
 mod declared_store;
 mod human_authorization;
+mod human_causal_connections;
+pub use human_causal_connections::{HumanCausalConnectionPage, HumanCausalConnectionQuery};
+mod human_observations;
+pub use human_observations::{HumanObservationError, HumanObservationPage};
 mod human_catalog;
 pub use human_catalog::{
     HumanCatalogError, HumanCatalogOperation, HumanCatalogPage, HumanCatalogResource, HumanOrigin,
@@ -35,8 +41,20 @@ mod transport;
 pub use authority::AuthorityError;
 pub use catalog::{CatalogError, CatalogStatus};
 pub use causal::{
-    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalReceipt,
-    CausalSession,
+    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, CausalMarkerBinder,
+    CausalMarkerBinding, CausalReceipt, CausalReceiverEventInbox504, CausalReceiverMarkerInputs504,
+    CausalReceiverProfile504, CausalReceiverSession504, CausalSession, CausalWireProfile503,
+    ReceiverEnrollmentInputs504, ReceiverEnrollmentProvisioner504, ReceiverEnrollmentReceipt504,
+    ReceiverEvidenceConnection, ReceiverEvidenceIo, ReceiverEvidencePeer, ReceiverEvidenceTls,
+    ReceiverFactInbox, ReceiverFactReceipt, ReceiverFactRequest, ReceiverFactSelectors,
+    ReceiverTlsError,
+};
+pub use causal_gateway_reader::{
+    CausalGatewayObservation, CausalGatewayReadError, CausalGatewayReader, CausalGatewaySelector,
+};
+pub use causal_receiver_reader::{
+    CausalReceiverObservation, CausalReceiverReadError, CausalReceiverReader,
+    CausalReceiverSelector,
 };
 pub use refresh::{AuthorityRead, AuthorityReadRequest, AuthoritySource};
 pub use submit::{DurableReceipt, OriginIngress, ReceiptStatus, SubmitError, V2Ingress};

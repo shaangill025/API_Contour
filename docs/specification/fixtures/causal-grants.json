@@ -869,5 +869,63 @@
       "queue_bytes": 268435456,
       "queue_ttl_seconds": 86400
     }
+  },
+  {
+    "id": "wire_exact_profile",
+    "expected": "accept",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_wire_v1",
+      "profile_sha256": "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
+  },
+  {
+    "id": "wire_wrong_profile",
+    "expected": "reject",
+    "body": {
+      "grant_version": 1,
+      "tenant_id": "00000000-0000-4000-8000-000000000001",
+      "collector_id": "00000000-0000-4000-8000-000000000001",
+      "runtime_id": "00000000-0000-4000-8000-000000000001",
+      "source_id": "00000000-0000-4000-8000-000000000001",
+      "lifecycle_id": "00000000-0000-4000-8000-000000000001",
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "causal_profile": "nodered_5_0_9_wire_v1",
+      "profile_sha256": "abababababababababababababababababababababababababababababababab",
+      "revision": 1,
+      "issued_at": "2026-10-07T12:00:00Z",
+      "expires_at": "2026-10-07T12:15:00Z",
+      "enabled": true,
+      "event_kinds": [
+        "root",
+        "delivery",
+        "attempt",
+        "loss"
+      ],
+      "max_batch_events": 500,
+      "max_batch_bytes": 1048576,
+      "queue_bytes": 268435456,
+      "queue_ttl_seconds": 86400
+    }
   }
 ]

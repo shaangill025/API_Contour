@@ -342,3 +342,22 @@ fn signed_nanosecond_and_offset_lease_boundaries() {
     assert_eq!(grant.issued_at(), now());
     assert_eq!(grant.expires_at(), now() + time::Duration::minutes(15));
 }
+
+#[test]
+fn candidate_profile_requires_its_exact_hash_and_preserves_legacy() {
+    const CANDIDATE: &str = "a4d698a75a25589aeee3cccde89c1d3abbff8ec0f70304ca33b205e5e7b69c0e";
+    let mut p = payload();
+    assert!(verify(&p).is_ok()); // Existing 501 accepts a well-formed non-registry hash.
+    p["causal_profile"] = json!("nodered_5_0_9_wire_v1");
+    assert_eq!(verify(&p).unwrap_err(), E::Semantic);
+    p["profile_sha256"] = json!(CANDIDATE);
+    assert!(verify(&p).is_ok());
+    p["profile_sha256"] = json!("b0bcc91455463d2dd48c438292abe1063ed7d3430459ead5ec48423c9ba1b510");
+    assert_eq!(verify(&p).unwrap_err(), E::Semantic);
+    p["causal_profile"] = json!("nodered_5_0_9_v2");
+    p["profile_sha256"] = json!(CANDIDATE);
+    assert_eq!(verify(&p).unwrap_err(), E::Semantic);
+    p["causal_profile"] = json!("nodered_5_0_9_wire_v1");
+    p["profile_sha256"] = json!(CANDIDATE.to_uppercase());
+    assert_eq!(verify(&p).unwrap_err(), E::Semantic);
+}

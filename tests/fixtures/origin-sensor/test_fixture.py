@@ -46,7 +46,7 @@ class Fixture(unittest.TestCase):
         shapes={'request':{'kind':'object','fields':{'probe':{'kind':'boolean'}},'additional':None},
                 'response':{'kind':'object','fields':{'id':{'kind':'integer'}},'additional':None}}
         def row(record,direction):
-            r=[None]*22; r[0]='a'; r[13]=record; r[14]=direction; r[16]='200' if direction=='response' else None; r[21]=shapes[direction]; return r
+            r=[None]*36; r[30:36]=[1,1,1,'structure','/pilot','http']; r[0]='a'; r[13]=record; r[14]=direction; r[16]='200' if direction=='response' else None; r[20]='verified_origin_v1'; r[21]=shapes[direction]; r[27]='complete'; r[28]=[]; r[29]={'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':'a'}; return r
         request=row('request','request'); response=row('response','response')
         fixture.assert_discovery_case([request,response],set(),'a',('request','response'))
         fixture.assert_discovery_case([request],set(),'a',('request',))
@@ -67,6 +67,82 @@ class Fixture(unittest.TestCase):
         self.assertEqual(len(fixture.DISCOVERY_CASES),15)
         for name in ('request-progress','response-progress'):
             self.assertIn((name,('request','response')),fixture.DISCOVERY_CASES)
+
+    def test_typed_unknown_cases_expect_both_directions(self):
+        cases = dict(fixture.DISCOVERY_CASES)
+        for case in ('request-malformed','response-malformed','request-oversized','response-oversized'):
+            with self.subTest(case=case):
+                self.assertEqual(cases[case], ('request','response'))
+
+    def test_typed_unknown_success_drain_has_no_loss(self):
+        for case in ('request-malformed','response-malformed','request-oversized','response-oversized'):
+            with self.subTest(case=case):
+                expected_loss = fixture.matrix_expected_loss(case)
+                fixture.parse_matrix_drain('MATRIX 0 2', 0, expected_loss, 2)
+
+    def test_typed_unknown_rows_require_exact_shape_proof_and_catalog(self):
+        fingerprint='a'*64
+        proof=('instance','lifecycle','credential','grant')
+        source='source'
+        def make_row(record,direction,unknown=None):
+            r=[None]*36
+            r[30:36]=[1,1,1,'structure','/pilot','http']
+            r[0]=fingerprint; r[1:5]=proof; r[5:9]=[fixture.ITEM]*4
+            r[9:13]=[fixture.ITEM,'origin-service',fixture.ITEM,'origin-deployment']
+            r[13:20]=[record,direction,'POST','200' if direction=='response' else None,source,'http_json_v1',2]
+            r[20]='verified_origin_v1'
+            field,kind=('probe','boolean') if direction=='request' else ('id','integer')
+            r[21]={'kind':'object','fields':{field:{'kind':kind}},'additional':None}
+            r[22:27]=['batch-'+record,'first','last','queued','expires']
+            r[27:29]=['complete',[]]
+            r[29]={'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':fingerprint}
+            if unknown:
+                r[21]={'kind':'unknown','reason':unknown}
+                r[27]='unavailable' if unknown=='malformed' else 'partial'
+                r[28]=[unknown]
+            return r
+        def catalog(rows):
+            result=[]
+            for r in rows:
+                key=['tenant',*r[5:8],'http',r[14],'POST','/pilot']
+                result.append([r[13],r[27],'structure',int(r[16]) if r[16] else None,
+                    r[21],r[17],*r[5:9],r[18],r[19],False,r[28],key,r[22],1,1,1,*r[23:27]])
+            return result
+        for case in ('request-malformed','response-malformed','request-oversized','response-oversized'):
+            with self.subTest(case=case):
+                direction,kind=case.split('-')
+                reason='malformed' if kind=='malformed' else 'limit'
+                rows=[make_row('request','request',reason if direction=='request' else None),
+                      make_row('response','response',reason if direction=='response' else None)]
+                fixture.assert_proofs(rows,{fingerprint:proof},'origin-service','origin-deployment',source)
+                fixture.assert_discovery_case(rows,set(),fingerprint,('request','response'),case=case,history=[])
+                fixture.assert_discovery_catalog(catalog(rows),rows,'tenant')
+                fixture.parse_matrix_drain('MATRIX 0 2',0,fixture.matrix_expected_loss(case),2)
+                bad_cases=[]
+                for index,value in [(0,'b'*64),(20,'unattributed'),
+                    (21,{'kind':'unknown','reason':'limit' if reason=='malformed' else 'malformed'}),
+                    (21,{'kind':'object','fields':{},'additional':None}),
+                    (27,'complete'),(28,[]),(30,2),(31,2),(32,2),(33,'body'),(34,'/other'),(35,'udp'),
+                    (29,{'kind':'downstream_mtls_leaf_sha256_v1','leaf_sha256':'b'*64})]:
+                    bad=fixture.copy.deepcopy(rows); bad[0 if direction=='request' else 1][index]=value; bad_cases.append(bad)
+                bad_cases.extend([rows[:1],rows+[rows[0]]])
+                for bad in bad_cases:
+                    with self.assertRaises(AssertionError):
+                        fixture.assert_discovery_case(bad,set(),fingerprint,('request','response'),case=case,history=[])
+                wrong_scope=fixture.copy.deepcopy(rows); wrong_scope[0][5]='another-project'
+                with self.assertRaises(AssertionError):
+                    fixture.assert_proofs(wrong_scope,{fingerprint:proof},'origin-service','origin-deployment',source)
+                wrong_proof=fixture.copy.deepcopy(rows); wrong_proof[0][1]='another-instance'
+                with self.assertRaises(AssertionError):
+                    fixture.assert_proofs(wrong_proof,{fingerprint:proof},'origin-service','origin-deployment',source)
+                for index,value in [(1,'complete'),(4,{'kind':'unknown','reason':'wrong'}),(13,[])]:
+                    bad=catalog(rows); bad[0 if direction=='request' else 1][index]=value
+                    with self.assertRaises(AssertionError): fixture.assert_discovery_catalog(bad,rows,'tenant')
+                with self.assertRaises(AssertionError): fixture.parse_matrix_drain('MATRIX 1 2',0,fixture.matrix_expected_loss(case),2)
+                with self.assertRaises(AssertionError): fixture.parse_matrix_drain('MATRIX 0 0',0,fixture.matrix_expected_loss(case),2)
+        old=make_row('old','request'); changed=fixture.copy.deepcopy(old); changed[21]={'kind':'unknown','reason':'malformed'}
+        with self.assertRaises(AssertionError):
+            fixture.assert_discovery_case([changed],{'old'},fingerprint,(),history=[old])
 
     def test_progress_barriers_reject_missing_prefix_and_clean_up(self):
         script = r"""
@@ -140,7 +216,7 @@ const {EventEmitter}=require('events');
         self.assertNotIn('request-compressed',seen)
 
     def test_discovery_catalog_requires_full_provenance(self):
-        row=[None]*27; row[22:27]=['batch','first','last','queued','expires']; row[5:9]=['p','s','e','d']; row[13:20]=['id','response','POST','200','source','http_json_v1',2]; row[21]={'kind':'boolean'}
+        row=[None]*30; row[22:27]=['batch','first','last','queued','expires']; row[27]='complete'; row[28]=[]; row[5:9]=['p','s','e','d']; row[13:20]=['id','response','POST','200','source','http_json_v1',2]; row[21]={'kind':'boolean'}
         item=['id','complete','structure',200,{'kind':'boolean'},'source','p','s','e','d','http_json_v1',2,False,[],['tenant','p','s','e','http','response','POST','/pilot'],'batch',1,1,1,'first','last','queued','expires']
         fixture.assert_discovery_catalog([item],[row],'tenant')
         for index in range(1,len(item)):

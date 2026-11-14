@@ -515,14 +515,14 @@ def install_helpers(bridge,inbox,loaded_hashes=None):
                      'crates/contour-postgres/tests/fixtures/causal_bridge.json'):
             result['https:'+path]=bridge['digest_file'](safe_source(path))
         return result
-    def cases(base,work,env,counts,state):
+    def scenario(base,work,env,counts,state,execute):
         if context.get('work')!=work or not context.get('tls_ready'): raise RuntimeError('fixture TLS state unavailable')
         state['_https_peer']=context['peer']
         state['boundary']='synthetic HTTPS mTLS and PostgreSQL TLS; no producer attestation or production activation'
         run_https_cases(base,work,env,counts,state)
     bg.update({'command':command_proxy,'checked':checked_proxy,'signed_payload':sign_proxy,
                'snapshot':snapshot,'build_probe':lambda target:original_build(target,'contour-ingress','causal_https_probe'),
-               'run_probe_cases':cases})
+               'run_scenario':scenario})
     return context
 
 

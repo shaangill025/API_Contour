@@ -28,6 +28,9 @@ pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 
 const LOCK: &CStr = c"lock";
 const RECORD: &CStr = c"issue";
+const GENERATION: &CStr = c"generation";
+const LAUNCH: &CStr = c"launch";
+const INERT_CREATE: &CStr = c"inert-create";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CausalJournalError {
@@ -98,6 +101,35 @@ fn sync_checked(file: &File) -> Result<(), CausalJournalError> {
         return Err(CausalJournalError::Io);
     }
     file.sync_all().map_err(|_| CausalJournalError::Io)
+}
+
+/// Opaque bound-launch journal input. No public constructor exists: a future
+/// reviewed 503 checked-launch transition must mint it only after binding.
+pub struct BoundLaunchRecord {
+    slot: [u8; 32],
+    launcher: [u8; 32],
+    identity: [u8; 32],
+    record: Vec<u8>,
+}
+impl BoundLaunchRecord {
+    pub(crate) fn checked(
+        slot: [u8; 32],
+        launcher: [u8; 32],
+        identity: [u8; 32],
+        record: Vec<u8>,
+    ) -> Self {
+        Self {
+            slot,
+            launcher,
+            identity,
+            record,
+        }
+    }
+}
+impl fmt::Debug for BoundLaunchRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BoundLaunchRecord")
+    }
 }
 
 /// Holds an exclusive advisory lock until dropped, including across issue futures.
@@ -227,6 +259,162 @@ impl CausalIssueOwner {
             request,
         })
     }
+    pub(crate) fn signature_preflight_503(
+        &self,
+        peer: &[u8; 32],
+        grants: &CausalGrantKeys,
+        policies: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        self.request.signature_preflight_503(peer, grants, policies)
+    }
+    pub(crate) fn signature_preflight_504(
+        &self,
+        peer: &[u8; 32],
+        grants: &CausalGrantKeys,
+        policies: &PolicyKeys,
+    ) -> Result<(), CausalError> {
+        self.request.signature_preflight_504(peer, grants, policies)
+    }
+    pub(crate) fn original_commitment(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut original = self.request.original_bytes();
+        let mut hash = Sha256::new();
+        hash.update(b"apicontour/original-causal-issue/1\n");
+        hash.update(&original);
+        let result = hash.finalize().into();
+        original.fill(0);
+        result
+    }
+    /// Permanently consumes the same-original inert-create slot before Docker
+    /// mutation. An uncertain fsync or create cannot be replayed by selecting a
+    /// different external create-intent directory.
+    pub(crate) fn consume_inert_create(
+        &mut self,
+        token: [u8; 32],
+        plan: [u8; 32],
+    ) -> Result<(), CausalJournalError> {
+        if token == [0; 32] || plan == [0; 32] {
+            return Err(CausalJournalError::Unsafe);
+        }
+        let mut file = open_at(
+            &self._dir,
+            INERT_CREATE,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COI1")
+            .and_then(|_| file.write_all(&token))
+            .and_then(|_| file.write_all(&plan))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
+    }
+    // A generation is consumed even when the caller crashes before launch.
+    pub(crate) fn claim_generation(&mut self) -> Result<[u8; 32], CausalJournalError> {
+        use ring::rand::SecureRandom;
+        let mut generation = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut generation)
+            .map_err(|_| CausalJournalError::Io)?;
+        if generation == [0; 32] {
+            return Err(CausalJournalError::Io);
+        }
+        let mut file = open_at(
+            &self._dir,
+            GENERATION,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COG1")
+            .and_then(|_| file.write_all(&generation))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)?;
+        Ok(generation)
+    }
+    pub(crate) fn consume_launch(&mut self) -> Result<(), CausalJournalError> {
+        let mut file = open_at(
+            &self._dir,
+            LAUNCH,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COL1")
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
+    }
+    // COL2 shares the exclusive launch name with COL1: either form consumes
+    // the one-shot launch permanently, including after an uncertain fsync.
+    pub fn consume_bound_launch(
+        &mut self,
+        input: &BoundLaunchRecord,
+    ) -> Result<(), CausalJournalError> {
+        let BoundLaunchRecord {
+            slot,
+            launcher,
+            identity,
+            record,
+        } = input;
+        use sha2::{Digest, Sha256};
+        if *slot == [0; 32]
+            || *launcher == [0; 32]
+            || *identity == [0; 32]
+            || record.is_empty()
+            || record.len() > 8192
+        {
+            return Err(CausalJournalError::Unsafe);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"apicontour/causal-launcher/1\n");
+        digest.update(record);
+        if digest.finalize().as_slice() != launcher {
+            return Err(CausalJournalError::Mismatch);
+        }
+        let mut file = open_at(
+            &self._dir,
+            LAUNCH,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CausalJournalError::Mismatch
+            } else {
+                CausalJournalError::Io
+            }
+        })?;
+        checked(&file, false)?;
+        file.write_all(b"COL2")
+            .and_then(|_| file.write_all(slot))
+            .and_then(|_| file.write_all(launcher))
+            .and_then(|_| file.write_all(identity))
+            .and_then(|_| file.write_all(&(record.len() as u32).to_be_bytes()))
+            .and_then(|_| file.write_all(record))
+            .map_err(|_| CausalJournalError::Io)?;
+        sync_checked(&file)?;
+        sync_checked(&self._dir)
+    }
     /// One checked issue attempt. OutcomeUnknown is returned unchanged; caller decides
     /// whether to attempt the same original request again under current validation.
     pub async fn issue(
@@ -238,6 +426,30 @@ impl CausalIssueOwner {
     ) -> Result<CausalSession, CausalError> {
         issuer
             .issue(&self.request, peer, grant_keys, policy_keys)
+            .await
+    }
+    pub(crate) async fn issue_receiver_504_until(
+        &mut self,
+        issuer: &mut CausalIssuer,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: tokio::time::Instant,
+    ) -> Result<contour_postgres::CausalReceiverSession504, CausalError> {
+        issuer
+            .issue_receiver_504_until(&self.request, peer, grant_keys, policy_keys, deadline)
+            .await
+    }
+    pub(crate) async fn issue_until(
+        &mut self,
+        issuer: &mut CausalIssuer,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: tokio::time::Instant,
+    ) -> Result<CausalSession, CausalError> {
+        issuer
+            .issue_until(&self.request, peer, grant_keys, policy_keys, deadline)
             .await
     }
 }
@@ -351,6 +563,144 @@ mod tests {
         assert!(status.success());
     }
     #[test]
+    fn generation_claim_is_single_use_across_owner_reopen() {
+        let t = Temp::new();
+        let mut owner = prepare(&t.path).unwrap();
+        owner.claim_generation().unwrap();
+        assert_eq!(owner.claim_generation(), Err(CausalJournalError::Mismatch));
+        drop(owner);
+        let mut reopened = prepare(&t.path).unwrap();
+        assert_eq!(
+            reopened.claim_generation(),
+            Err(CausalJournalError::Mismatch)
+        );
+    }
+    #[test]
+    fn launch_consumption_is_single_use_even_on_sync_failure() {
+        for step in 0..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            let generation = owner.claim_generation().unwrap();
+            assert_ne!(generation, [0; 32]);
+            if step == 0 {
+                owner.consume_launch().unwrap();
+            } else {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(owner.consume_launch(), Err(CausalJournalError::Io));
+            }
+            assert_eq!(owner.consume_launch(), Err(CausalJournalError::Mismatch));
+            drop(owner);
+            assert_eq!(
+                prepare(&t.path).unwrap().claim_generation(),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
+    }
+    #[test]
+    fn bound_launch_is_exact_exclusive_and_never_reusable_after_sync_failure() {
+        use sha2::{Digest, Sha256};
+        let record = b"{\"version\":1}";
+        let mut h = Sha256::new();
+        h.update(b"apicontour/causal-launcher/1\n");
+        h.update(record);
+        let hash: [u8; 32] = h.finalize().into();
+        for step in 0..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            owner.claim_generation().unwrap();
+            assert_eq!(
+                owner.consume_bound_launch(&BoundLaunchRecord {
+                    slot: [1; 32],
+                    launcher: [9; 32],
+                    identity: [2; 32],
+                    record: record.to_vec()
+                }),
+                Err(CausalJournalError::Mismatch)
+            );
+            assert!(!t.path.join("launch").exists());
+            if step == 0 {
+                owner
+                    .consume_bound_launch(&BoundLaunchRecord {
+                        slot: [1; 32],
+                        launcher: hash,
+                        identity: [2; 32],
+                        record: record.to_vec(),
+                    })
+                    .unwrap();
+            } else {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(
+                    owner.consume_bound_launch(&BoundLaunchRecord {
+                        slot: [1; 32],
+                        launcher: hash,
+                        identity: [2; 32],
+                        record: record.to_vec()
+                    }),
+                    Err(CausalJournalError::Io)
+                );
+            }
+            let stored = std::fs::read(t.path.join("launch")).unwrap();
+            assert_eq!(&stored[..4], b"COL2");
+            assert_eq!(&stored[4..36], &[1; 32]);
+            assert_eq!(&stored[36..68], &hash);
+            assert_eq!(&stored[68..100], &[2; 32]);
+            assert_eq!(
+                u32::from_be_bytes(stored[100..104].try_into().unwrap()) as usize,
+                record.len()
+            );
+            assert_eq!(&stored[104..], record);
+            assert_eq!(
+                owner.consume_bound_launch(&BoundLaunchRecord {
+                    slot: [1; 32],
+                    launcher: hash,
+                    identity: [2; 32],
+                    record: record.to_vec()
+                }),
+                Err(CausalJournalError::Mismatch)
+            );
+            assert_eq!(owner.consume_launch(), Err(CausalJournalError::Mismatch));
+        }
+    }
+    #[test]
+    fn old_launch_blocks_bound_launch_without_replacement() {
+        use sha2::{Digest, Sha256};
+        let t = Temp::new();
+        let mut owner = prepare(&t.path).unwrap();
+        owner.claim_generation().unwrap();
+        owner.consume_launch().unwrap();
+        let mut h = Sha256::new();
+        h.update(b"apicontour/causal-launcher/1\n");
+        h.update(b"x");
+        let hash: [u8; 32] = h.finalize().into();
+        assert_eq!(
+            owner.consume_bound_launch(&BoundLaunchRecord {
+                slot: [1; 32],
+                launcher: hash,
+                identity: [2; 32],
+                record: b"x".to_vec()
+            }),
+            Err(CausalJournalError::Mismatch)
+        );
+        assert_eq!(std::fs::read(t.path.join("launch")).unwrap(), b"COL1");
+    }
+
+    #[test]
+    fn uncertain_generation_sync_still_blocks_reuse() {
+        for step in 1..=2 {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            {
+                let _fail = SyncFailure::at(step);
+                assert_eq!(owner.claim_generation(), Err(CausalJournalError::Io));
+            }
+            drop(owner);
+            assert_eq!(
+                prepare(&t.path).unwrap().claim_generation(),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
+    }
+    #[test]
     fn torn_or_unsafe_files_fail_closed() {
         let t = Temp::new();
         drop(prepare(&t.path).unwrap());
@@ -449,5 +799,26 @@ mod tests {
         std::fs::set_permissions(&t.path, std::fs::Permissions::from_mode(0o700)).unwrap();
         symlink("missing", t.path.join("lock")).unwrap();
         assert!(prepare(&t.path).is_err());
+    }
+    #[test]
+    fn inert_create_slot_never_replays_after_reopen_or_sync_failure() {
+        for fail in [None, Some(1), Some(2)] {
+            let t = Temp::new();
+            let mut owner = prepare(&t.path).unwrap();
+            FAIL_SYNC.with(|c| c.set(fail));
+            let result = owner.consume_inert_create([3; 32], [4; 32]);
+            FAIL_SYNC.with(|c| c.set(None));
+            if fail.is_some() {
+                assert_eq!(result, Err(CausalJournalError::Io));
+            } else {
+                assert_eq!(result, Ok(()));
+            }
+            drop(owner);
+            let mut reopened = prepare(&t.path).unwrap();
+            assert_eq!(
+                reopened.consume_inert_create([5; 32], [6; 32]),
+                Err(CausalJournalError::Mismatch)
+            );
+        }
     }
 }

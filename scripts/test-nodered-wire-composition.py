@@ -26,6 +26,41 @@ MODES = {
     'wire-composition-hook': ['synthetic composition hook held ACK invalidation; forwarding unmarked'],
     'wire-composition-cache': ['synthetic composition cache held ACK invalidation; forwarding unmarked'],
 }
+_PHASES={'arguments','source','image','certificates','mode-setup','container-create','container-identity','container-start','container-wait','container-logs','container-result','container-cleanup','final-cleanup','complete'}
+_PHASE='arguments'; _MODE='none'; _ERROR_PHASE={}
+class FixtureFailed(RuntimeError): pass
+class FixtureDeadline(RuntimeError): pass
+class FixtureOutputMismatch(RuntimeError): pass
+class FixtureStatusFailed(RuntimeError): pass
+_TYPES={ValueError,RuntimeError,TimeoutError,AssertionError,PermissionError,FileNotFoundError,OSError,KeyError,IndexError,TypeError,AttributeError,FixtureFailed,FixtureDeadline,FixtureOutputMismatch,FixtureStatusFailed}
+
+def _phase(value):
+    global _PHASE
+    if value not in _PHASES: raise ValueError('invalid diagnostic phase')
+    _PHASE=value
+
+def _remember(error):
+    _ERROR_PHASE[id(error)]=(_PHASE,_MODE)
+
+def failure_lines(error,phase,mode):
+    if phase not in _PHASES or mode not in (*MODES,'none'): raise ValueError('invalid diagnostic context')
+    lines=[]
+    def visit(exc,role,depth):
+        if len(lines)>=16 or depth>=8: return
+        if isinstance(exc,BaseExceptionGroup):
+            for index,child in enumerate(exc.exceptions[:8]): visit(child,role if index==0 else 'cleanup',depth+1)
+            return
+        item_phase,item_mode=_ERROR_PHASE.get(id(exc),(phase,mode))
+        kind=type(exc).__name__ if type(exc) in _TYPES else 'OtherError'
+        frames=[]; tb=exc.__traceback__; count=0
+        while tb is not None and count<128:
+            if tb.tb_frame.f_code.co_filename==str(ROOT/'scripts/test-nodered-wire-composition.py') and 0<tb.tb_lineno<10000000:
+                frames.append('scripts/test-nodered-wire-composition.py:'+str(tb.tb_lineno))
+            tb=tb.tb_next; count+=1
+        location=','.join(frames[-6:]) if frames else 'unavailable'
+        lines.append('wire-failure phase='+item_phase+' mode='+item_mode+' role='+role+' type='+kind+' location='+location)
+    visit(error,'primary',0)
+    return lines
 
 
 def command(args, timeout=30, limit=1_048_576, cwd=ROOT):
@@ -49,23 +84,31 @@ def command(args, timeout=30, limit=1_048_576, cwd=ROOT):
         complete = True
         return code, bytes(data)
     finally:
-        sel.close()
+        primary=sys.exc_info()[1]
+        cleanup=[]
+        try: sel.close()
+        except BaseException as error: cleanup.append(error)
         signal_error = None
         if not complete:
             try: os.killpg(p.pid, signal.SIGKILL)
             except ProcessLookupError: pass
-            except OSError as error: signal_error = error
+            except BaseException as error: signal_error = error
         wait_error = None
         try:
             if p.poll() is None: p.wait(timeout=5)
-        except subprocess.TimeoutExpired as error:
+        except BaseException as error:
             wait_error = error
         finally:
-            p.stdout.close()
-        if signal_error is not None:
-            raise RuntimeError('process group signal denied') from signal_error
-        if wait_error is not None:
-            raise RuntimeError('process cleanup timeout') from wait_error
+            try: p.stdout.close()
+            except BaseException as error: cleanup.append(error)
+        cleanup.extend(error for error in (signal_error,wait_error) if error is not None)
+        if cleanup:
+            for error in cleanup: _remember(error)
+            if primary is not None:
+                _remember(primary)
+                raise BaseExceptionGroup('command and cleanup failed',[primary,*cleanup]) from None
+            if len(cleanup)==1: raise cleanup[0]
+            raise BaseExceptionGroup('command cleanup failed',cleanup) from None
 
 
 def checked(args, timeout=30, limit=1_048_576):
@@ -143,10 +186,14 @@ WIRE_WARNING = (b'(node:1) ExperimentalWarning: vm.USE_MAIN_CONTEXT_DEFAULT_LOAD
                 b'(Use `node --trace-warnings ...` to show where the warning was created)\n')
 
 def validate_mode(mode, output, status):
-    if mode not in MODES or status != '0': raise RuntimeError('qualification failed')
+    if mode not in MODES: raise RuntimeError('qualification failed')
+    if status != '0':
+        if output==WIRE_WARNING+b'FAIL: wire fixture assertion or runtime error\n': raise FixtureFailed()
+        if output==WIRE_WARNING+b'FAIL: fixture deadline\n': raise FixtureDeadline()
+        raise FixtureStatusFailed()
     expected = (b'' if mode == 'exporter' else WIRE_WARNING)
     expected += b''.join(b'PASS: '+stage.encode()+b'\n' for stage in MODES[mode])
-    if output != expected: raise RuntimeError('qualification output mismatch')
+    if output != expected: raise FixtureOutputMismatch()
 
 
 def validate_owned(obj, name, token, cid, image_id):
@@ -203,7 +250,9 @@ def make_certificates(certs):
 
 
 def run_mode(mode, folder, certs, image_id):
+    global _MODE
     if mode not in MODES: raise ValueError('unsupported mode')
+    _MODE=mode; _phase('mode-setup')
     token=uuid.uuid4().hex; name='contour-node-component-'+token
     view=ROOT/'tests/fixtures/nodered-causal'
     entry=['/fixture/image-private-causal-exporter.js'] if mode=='exporter' else ['--require','/adapter/error-integration/wire-v2-bootstrap.js','/fixture/image-wire-v2-fixture.js']
@@ -224,17 +273,24 @@ def run_mode(mode, folder, certs, image_id):
           *mounts,'--entrypoint','node',IMAGE,*entry]
     cid=None; ambiguous=True; failure=None
     try:
+        _phase('container-create')
         raw=checked(args,30,1024).strip().decode('ascii')
         if not re.fullmatch(r'[0-9a-f]{64}',raw): raise RuntimeError('container id invalid')
+        _phase('container-identity')
         cid=raw; owned(cid,name,token,image_id); ambiguous=False
+        _phase('container-start')
         checked(['docker','start',cid],30,1024)
+        _phase('container-wait')
         status=checked(['docker','wait',cid],60,1024).strip().decode('ascii')
+        _phase('container-logs')
         output=checked(['docker','logs',cid],10,1_048_576)
+        _phase('container-result')
         validate_mode(mode,output,status)
     except BaseException as exc:
-        failure=exc
+        _remember(exc); failure=exc
     finally:
         try:
+            _phase('container-cleanup')
             if ambiguous and cid is None:
                 # Name reconciliation can permit cleanup, never acceptance.
                 for _ in range(3):
@@ -249,16 +305,22 @@ def run_mode(mode, folder, certs, image_id):
                 if checked(['docker','ps','-aq','--no-trunc','--filter','name=^/'+name+'$'],10,1024).strip(): raise RuntimeError('container name still present')
             if ambiguous: raise RuntimeError('ambiguous container creation')
         except BaseException as exc:
-            if failure is not None: raise RuntimeError('qualification and cleanup failed') from exc
+            _remember(exc)
+            if failure is not None: raise BaseExceptionGroup('qualification and cleanup failed',[failure,exc]) from None
             raise
     if failure is not None: raise failure
 
 
 def main():
-    if len(sys.argv)!=1: raise ValueError('no arguments accepted')
+    global _MODE
+    _phase('arguments'); _MODE='none'; _ERROR_PHASE.clear()
+    if len(sys.argv)==1: modes=list(MODES)
+    elif sys.argv[1:]==['--mode','wire-composition']: modes=['wire-composition']
+    else: raise ValueError('unsupported mode')
     if os.getuid()==0: raise RuntimeError('nonroot required')
     os.umask(0o077)
-    head=head_and_clean(); before=snapshot(); verify_profile(before)
+    _phase('source'); head=head_and_clean(); before=snapshot(); verify_profile(before)
+    _phase('image')
     image=json.loads(checked(['docker','image','inspect',IMAGE],20,262144))
     if not isinstance(image,list) or len(image)!=1: raise RuntimeError('image inspection invalid')
     validate_image_platform(image[0], before)
@@ -272,29 +334,36 @@ def main():
     certs=folder/'tls'; certs.mkdir(mode=0o700)
     passed=[]; failure=None
     try:
+        _phase('certificates')
         make_certificates(certs)
-        for index,mode in enumerate(MODES):
+        for index,mode in enumerate(modes):
+            _MODE=mode; _phase('source')
             if head_and_clean()!=head or snapshot()!=before: raise RuntimeError('source changed')
             mode_dir=folder/('%02d-%s'%(index,mode)); mode_dir.mkdir(mode=0o700)
             sync_directory(folder)
             run_mode(mode,mode_dir,certs,image_id)
             passed.append(mode); print('PASS: '+mode,flush=True)
-    except BaseException as exc: failure=exc
+    except BaseException as exc: _ERROR_PHASE.setdefault(id(exc),(_PHASE,_MODE)); failure=exc
     finally:
         try:
+            _phase('final-cleanup')
             shutil.rmtree(certs)
             if certs.exists(): raise RuntimeError('certificate cleanup failed')
             if head_and_clean()!=head or snapshot()!=before: raise RuntimeError('source changed')
         except BaseException as exc:
-            if failure is not None: raise RuntimeError('qualification and cleanup failed') from exc
+            _remember(exc)
+            if failure is not None: raise BaseExceptionGroup('qualification and cleanup failed',[failure,exc]) from None
             raise
     if failure is not None: raise failure
-    if passed != list(MODES): raise RuntimeError('qualification incomplete')
-    print('PASS: seven synthetic inactive Node modes; no production authority',flush=True)
+    if passed != modes: raise RuntimeError('qualification incomplete')
+    _phase('complete')
+    if modes==list(MODES): print('PASS: seven synthetic inactive Node modes; no production authority',flush=True)
+    else: print('PASS: single synthetic wire-composition mode; no production authority',flush=True)
 
 
 if __name__=='__main__':
     try: main()
     except BaseException as exc:
-        print('FAIL: '+type(exc).__name__,file=sys.stderr)
+        for line in failure_lines(exc,_PHASE,_MODE): print(line,file=sys.stderr)
+        print('FAIL: qualification',file=sys.stderr)
         raise SystemExit(1) from None

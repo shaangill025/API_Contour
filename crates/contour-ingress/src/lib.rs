@@ -1,15 +1,93 @@
 //! Operator-configured mTLS ingestion. Enrollment and credential lifecycle are separate.
 mod authority;
 #[cfg(unix)]
+mod causal_launch_bound;
+#[cfg(unix)]
+mod causal_launch_docker;
+#[cfg(unix)]
+mod causal_launch_files;
+#[cfg(unix)]
+mod causal_launch_inspect;
+mod causal_launch_material;
+mod causal_launch_metadata;
+#[cfg(unix)]
+mod causal_launch_process;
+mod causal_launch_protocol;
+#[cfg(unix)]
 mod causal_owner;
+#[cfg(unix)]
+mod causal_permit;
+#[cfg(unix)]
+mod causal_receiver_deploy;
+mod causal_receiver_metadata;
+mod causal_receiver_protocol504;
 mod causal_service;
 pub mod gateway;
 mod pool;
+mod receiver_causal_pool504;
+mod receiver_causal_service504;
+mod receiver_preauth504;
+pub mod runtime_capture;
 mod service;
 #[cfg(unix)]
-pub use causal_owner::{CausalIssueOwner, CausalJournalError};
+pub use causal_launch_bound::{BoundLaunchError, BoundLaunchInputs, BoundTransfer};
+#[cfg(unix)]
+pub use causal_launch_docker::{
+    BindProgress, BindStage, BoundLauncher, InertCreated, InertStarted, LaunchConfig,
+    LaunchObserveError, OwnerLabel, Prelaunch503, VerifiedImage, VerifiedNetwork, VerifiedPeer,
+};
+#[cfg(unix)]
+pub use causal_launch_files::{FileSnapshot, SnapshotError, snapshot_file};
+#[cfg(unix)]
+pub use causal_launch_inspect::{CandidateSources, InspectError, InspectedDeployment};
+pub use causal_launch_material::{MaterialError, MaterialIdentity, check_material};
+#[cfg(unix)]
+mod causal_receiver_image;
+#[cfg(unix)]
+pub use causal_receiver_image::{
+    ReceiverImageEvidence, ReceiverImageRequest, StageError as ReceiverImageError,
+    observe_receiver_image,
+};
+mod causal_receiver_material;
+#[cfg(unix)]
+mod causal_receiver_material_checked;
+#[cfg(unix)]
+mod causal_receiver_sources;
+pub use causal_launch_metadata::{MetadataError, MetadataInputs, canonical_metadata};
+#[cfg(unix)]
+pub use causal_launch_process::{
+    DockerInspect, DockerPolicy, LocalCleanup, LocalProcess, OwnedCreateIntent, ProcessError,
+};
+pub use causal_launch_protocol::{ProtocolError, RelayCodec, RelayEvent};
+#[cfg(unix)]
+pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
+#[cfg(unix)]
+pub use causal_permit::CausalPermitOwner;
+#[cfg(unix)]
+pub use causal_receiver_deploy::{
+    Prelaunch504, ReceiverInertCreated, ReceiverInertStarted, ReceiverIssued504,
+    ReceiverMarkerBound504, ReceiverNetwork504, ReceiverPeer504, ReceiverPreauthenticated504,
+};
+pub use causal_receiver_material::{
+    LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
+};
+#[cfg(unix)]
+pub use causal_receiver_material_checked::{
+    CheckedReceiverMaterial, ReceiverMaterialCheckError, ReceiverMaterialPaths,
+    check_receiver_material,
+};
+pub use causal_receiver_metadata::{ReceiverMetadataInputs, canonical_receiver_metadata};
+pub use causal_receiver_protocol504::{
+    ReceiverProtocolError504, ReceiverRelayCodec504, ReceiverRelayEvent504,
+};
+#[cfg(unix)]
+pub use causal_receiver_sources::{ReceiverCandidateSources, ReceiverSourcesError};
 pub use causal_service::{CausalRegistry, CausalServer};
 pub use pool::DatabaseCapacity;
+pub use receiver_causal_service504::{
+    ReceiverBinding504, ReceiverCausalConfig504, ReceiverCausalServer504, ReceiverRegistry504,
+};
+pub use receiver_preauth504::{ReceiverPossession504, ReceiverPreauth504};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},

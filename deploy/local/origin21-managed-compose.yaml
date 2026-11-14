@@ -1,0 +1,144 @@
+# Explicit separate local origin21 pilot; no host ports, no production enrollment.
+name: apicontour-origin21-managed
+services:
+  destination:
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+    image: docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["node", "/pilot/destination.js"]
+    environment: {PILOT_DESTINATION_MODE: "normal"}
+    volumes:
+      - ../pilot/destination.js:/pilot/destination.js:ro
+      - ../../.local-mvp-managed/ca.crt:/pilot/ca.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/destination/server.crt:/pilot/tls/server.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/destination/server.key:/pilot/tls/server.key:ro
+    networks:
+      default: {aliases: [pilot-destination]}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 192m
+    cpus: 1
+    restart: "no"
+  replica1: &replica
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+    image: docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["node", "/usr/src/node-red/node_modules/node-red/red.js", "--userDir", "/data", "--settings", "/pilot/settings.js"]
+    environment: {PILOT_TARGET: "https://pilot-gateway:9443/pilot", PILOT_TLS_TEST: "normal"}
+    volumes:
+      - ../pilot/settings.js:/pilot/settings.js:ro
+      - ../pilot/flows.json:/pilot/flows.json:ro
+      - ../pilot/check_tls.js:/pilot/check_tls.js:ro
+      - ../pilot/probe.js:/pilot/probe.js:ro
+      - ../pilot/flows-wrong-name.json:/pilot/flows-wrong-name.json:ro
+      - ../pilot/flows-wrong-ca.json:/pilot/flows-wrong-ca.json:ro
+      - ../pilot/native_edge_probe.js:/pilot/native_edge_probe.js:ro
+      - ../../.local-mvp-managed/ca.crt:/pilot/ca.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica1/client.crt:/pilot/tls/client.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica1/client.key:/pilot/tls/client.key:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica1/server.crt:/pilot/tls/server.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica1/server.key:/pilot/tls/server.key:ro
+    depends_on: {native-envoy: {condition: service_started}}
+    read_only: true
+    tmpfs: ["/data:rw,nosuid,nodev,noexec,size=16m,mode=1777", "/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  replica2:
+    <<: *replica
+    volumes:
+      - ../pilot/settings.js:/pilot/settings.js:ro
+      - ../pilot/flows.json:/pilot/flows.json:ro
+      - ../pilot/check_tls.js:/pilot/check_tls.js:ro
+      - ../pilot/probe.js:/pilot/probe.js:ro
+      - ../pilot/flows-wrong-name.json:/pilot/flows-wrong-name.json:ro
+      - ../pilot/flows-wrong-ca.json:/pilot/flows-wrong-ca.json:ro
+      - ../pilot/native_edge_probe.js:/pilot/native_edge_probe.js:ro
+      - ../../.local-mvp-managed/ca.crt:/pilot/ca.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica2/client.crt:/pilot/tls/client.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica2/client.key:/pilot/tls/client.key:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica2/server.crt:/pilot/tls/server.crt:ro
+      - ../../.local-mvp-managed/origin21-pilot/replica2/server.key:/pilot/tls/server.key:ro
+  origin21-capture-ingress:
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+    image: "${ORIGIN21_APP_IMAGE:?required}"
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["/usr/local/bin/local_capture", "ingress", "/run/capture/ingress.json"]
+    volumes:
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/ingress.json:/run/capture/ingress.json:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/ingress.password:/run/capture/ingress.password:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/server.crt.der:/run/capture/server.crt.der:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/server.key.der:/run/capture/server.key.der:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/collector.crt.der:/run/capture/collector.crt.der:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/ca.der:/run/capture/ca.der:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/policy.raw:/run/capture/policy.raw:ro
+      - ../../.local-mvp-managed/ca.crt:/run/capture/database-ca.crt:ro
+    networks: [capture]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  origin21-capture-worker:
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+    image: "${ORIGIN21_APP_IMAGE:?required}"
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["/usr/local/bin/local_capture", "worker", "/run/capture/worker.json"]
+    volumes:
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/worker.json:/run/capture/worker.json:ro
+      - ../../.local-mvp-managed/origin21-pilot/capture/runtime/worker.password:/run/capture/worker.password:ro
+      - ../../.local-mvp-managed/ca.crt:/run/capture/database-ca.crt:ro
+    networks: [capture]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  native-gateway:
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+    image: "${ORIGIN21_APP_IMAGE:?required}"
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    entrypoint: ["/usr/local/bin/local_gateway", "/run/native/gateway.json"]
+    volumes: ["../../.local-mvp-managed/origin21-pilot/native/gateway:/run/native:ro"]
+    depends_on: {destination: {condition: service_started}, origin21-capture-ingress: {condition: service_started}}
+    networks: [default, capture]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+  native-envoy:
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}", org.apicontour.managed-edge-owner: "${ORIGIN21_EDGE_TOKEN:?required}"}
+    image: envoyproxy/envoy:v1.37.11@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4
+    user: "${LOCAL_UID:-65534}:${LOCAL_GID:-65534}"
+    command: ["-c", "/run/forwarder/envoy.json", "--log-level", "error"]
+    volumes:
+      - ../../.local-mvp-managed/origin21-pilot/native/forwarder:/run/forwarder:ro
+      - ../../.local-mvp-managed/managed-edge/published:/certs:ro
+      - ../../.local-mvp-managed/managed-edge/watched:/run/watch:ro
+    depends_on: {native-gateway: {condition: service_started}}
+    networks:
+      default: {aliases: [pilot-gateway]}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+networks:
+  default:
+    internal: true
+    labels: {org.apicontour.origin21.owner: "${ORIGIN21_OWNER_TOKEN:?required}"}
+  capture: {external: true, name: "${ORIGIN21_CAPTURE_NETWORK:?managed capture network required}"}

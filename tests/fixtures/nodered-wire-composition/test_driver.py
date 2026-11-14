@@ -13,6 +13,37 @@ q=importlib.util.module_from_spec(spec); spec.loader.exec_module(q)
 
 
 class DriverTests(unittest.TestCase):
+    def test_diagnostics_are_closed_and_preserve_primary_and_cleanup(self):
+        primary=ValueError('secret-primary'); cleanup=OSError('secret-cleanup')
+        errors=BaseExceptionGroup('secret-group',[primary,cleanup])
+        lines=q.failure_lines(errors,'container-cleanup','wire-composition')
+        self.assertEqual(len(lines),2)
+        self.assertIn('role=primary type=ValueError',lines[0])
+        self.assertIn('role=cleanup type=OSError',lines[1])
+        self.assertNotIn('secret',' '.join(lines))
+        with self.assertRaises(ValueError): q.failure_lines(errors,'secret-phase','wire-composition')
+
+    def test_fixture_failure_categories_do_not_expose_output(self):
+        for output,kind in ((q.WIRE_WARNING+b'FAIL: wire fixture assertion or runtime error\n',q.FixtureFailed),(q.WIRE_WARNING+b'FAIL: fixture deadline\n',q.FixtureDeadline),(b'private payload',q.FixtureStatusFailed)):
+            with self.assertRaises(kind) as caught: q.validate_mode('wire-composition',output,'1')
+            self.assertNotIn('private',' '.join(q.failure_lines(caught.exception,'container-result','wire-composition')))
+        with self.assertRaises(q.FixtureOutputMismatch): q.validate_mode('wire-composition',b'private payload','0')
+
+    def test_run_mode_retains_both_execution_and_cleanup_errors(self):
+        cid='a'*64; primary=ValueError('private-primary'); cleanup=OSError('private-cleanup')
+        def checked(args,*_):
+            if args[1]=='create': return cid.encode()
+            if args[1]=='start': raise primary
+            if args[1]=='rm': raise cleanup
+            return b''
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(q,'checked',side_effect=checked),mock.patch.object(q,'owned'):
+            with self.assertRaises(BaseExceptionGroup) as caught: q.run_mode('wire-positive',Path(tmp),Path(tmp),'sha256:'+'b'*64)
+        self.assertEqual(caught.exception.exceptions,(primary,cleanup))
+        lines=q.failure_lines(caught.exception,'final-cleanup','wire-positive')
+        self.assertIn('phase=container-start mode=wire-positive role=primary',lines[0])
+        self.assertIn('phase=container-cleanup mode=wire-positive role=cleanup',lines[1])
+        self.assertNotIn('private',' '.join(lines))
+
     def test_seven_exact_stage_lists_and_exit_status(self):
         self.assertEqual(len(q.MODES),7)
         for mode,stages in q.MODES.items():
@@ -90,7 +121,7 @@ class DriverTests(unittest.TestCase):
             token=name.removeprefix('contour-node-component-')
             return {'Id':cid,'Name':'/'+name,'Image':'sha256:'+'b'*64,'Config':{'Image':q.IMAGE,'Labels':{q.LABEL:token}},'HostConfig':{'NetworkMode':'none'}}
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(q,'checked',side_effect=checked), mock.patch.object(q,'inspect',side_effect=inspect), mock.patch.object(q,'owned'):
-            with self.assertRaises(RuntimeError): q.run_mode('wire-positive',Path(tmp),Path(tmp),'sha256:'+'b'*64)
+            with self.assertRaises(BaseExceptionGroup): q.run_mode('wire-positive',Path(tmp),Path(tmp),'sha256:'+'b'*64)
         self.assertEqual(removed,[cid])
 
     def test_foreign_ambiguous_object_is_never_removed(self):
@@ -100,7 +131,7 @@ class DriverTests(unittest.TestCase):
             if args[1]=='rm': removed.append(args)
             return b''
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(q,'checked',side_effect=checked), mock.patch.object(q,'inspect',return_value={'Id':'a'*64}):
-            with self.assertRaises(RuntimeError): q.run_mode('wire-positive',Path(tmp),Path(tmp),'sha256:'+'b'*64)
+            with self.assertRaises(BaseExceptionGroup): q.run_mode('wire-positive',Path(tmp),Path(tmp),'sha256:'+'b'*64)
         self.assertEqual(removed,[])
 
     def test_failed_stage_still_requires_cleanup_and_fails(self):
@@ -131,8 +162,19 @@ class DriverTests(unittest.TestCase):
             real_kill(pid,sig)
             raise PermissionError('simulated denial')
         with mock.patch.object(q.os,'killpg',side_effect=denied_after_cleanup):
-            with self.assertRaisesRegex(RuntimeError,'signal denied'):
+            with self.assertRaises(BaseExceptionGroup) as caught:
                 q.command([sys.executable,'-c','import time; time.sleep(10)'],timeout=.1,limit=1024)
+            self.assertIsInstance(caught.exception.exceptions[0],TimeoutError)
+            self.assertIsInstance(caught.exception.exceptions[1],PermissionError)
+
+    def test_interrupted_signal_retains_timeout_and_attempts_wait_and_close(self):
+        process=mock.Mock(); process.stdout=mock.Mock(); process.stdout.fileno.return_value=123
+        process.poll.return_value=None; selector=mock.MagicMock(); selector.get_map.return_value={123:True}; selector.select.return_value=[]
+        with mock.patch.object(q.subprocess,'Popen',return_value=process),mock.patch.object(q.selectors,'DefaultSelector',return_value=selector),mock.patch.object(q.time,'monotonic',side_effect=[0,2]),mock.patch.object(q.os,'killpg',side_effect=KeyboardInterrupt('private')):
+            with self.assertRaises(BaseExceptionGroup) as caught: q.command(['unused'],timeout=1)
+        self.assertIsInstance(caught.exception.exceptions[0],TimeoutError)
+        self.assertIsInstance(caught.exception.exceptions[1],KeyboardInterrupt)
+        process.wait.assert_called_once_with(timeout=5); process.stdout.close.assert_called_once(); selector.close.assert_called_once()
 
     def test_directory_sync_before_create(self):
         # Each mode's intent file and its directory are synced before create.
@@ -162,6 +204,20 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(sync.call_count,8)
         self.assertEqual(sync.call_args_list[0].args[0],Path(tmp).resolve())
         self.assertTrue(all(call.args[0].parent==Path(tmp).resolve() for call in sync.call_args_list[1:]))
+
+    def test_explicit_single_mode_runs_only_requested_component(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(q.sys,'argv',['driver','--mode','wire-composition']), \
+             mock.patch.object(q.os,'getuid',return_value=1000), mock.patch.object(q.os,'umask'), \
+             mock.patch.object(q.tempfile,'gettempdir',return_value=tmp), \
+             mock.patch.object(q,'head_and_clean',return_value='head'), mock.patch.object(q,'snapshot',return_value={}), \
+             mock.patch.object(q,'verify_profile'), mock.patch.object(q,'validate_image_platform'), mock.patch.object(q,'make_certificates'), \
+             mock.patch.object(q,'run_mode') as run, mock.patch.object(q,'sync_directory'), \
+             mock.patch.object(q,'checked',return_value=b'[{"Id":"sha256:' + b'b'*64 + b'","Architecture":"amd64","Os":"linux"}]'), \
+             mock.patch('builtins.print') as printed:
+            q.main()
+        self.assertEqual(run.call_count,1);self.assertEqual(run.call_args.args[0],'wire-composition')
+        output=' '.join(str(call.args) for call in printed.call_args_list)
+        self.assertIn('single synthetic wire-composition mode',output);self.assertNotIn('seven synthetic inactive',output)
 
     def test_cli_rejects_arguments_before_external_commands(self):
         with mock.patch.object(q.sys,'argv',['driver','--unknown']), mock.patch.object(q,'head_and_clean') as head:

@@ -24,7 +24,9 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_rustls::TlsConnector;
+mod adapter;
 mod authority;
+pub use adapter::{AdapterCapture, AdapterDescriptor, StructuralAdapter};
 mod owner;
 pub use owner::{CaptureId, CollectorOwner, CollectorPool, OwnerError, PoolCapture, SendOutcome};
 mod retry;
@@ -125,6 +127,18 @@ impl fmt::Debug for DeliveryClient {
     }
 }
 impl DeliveryClient {
+    // Private copy of immutable operator transport configuration. Each request
+    // still owns its connection and mutable protocol state independently.
+    fn duplicate(&self) -> Self {
+        Self {
+            host: self.host.clone(),
+            address: self.address,
+            identity: self.identity.clone(),
+            tls: self.tls.clone(),
+            deadline: self.deadline,
+            wire_mode: self.wire_mode,
+        }
+    }
     /// Fixed operator-resolved socket and verified TLS name, no URI/options; each DER bundle 1–8 certs/64KiB,
     /// DER key 1–16KiB; cooperative attempt deadline 1ms–30s. No system roots.
     pub fn from_der(

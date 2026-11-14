@@ -8,7 +8,7 @@
 //! CONTOUR_CAUSAL_INBOX_PASSWORD; neither is printed.
 use contour_core::{CausalEventBatch, CausalGrantKeys, PolicyKeys};
 use contour_postgres::{
-    CausalBinding, CausalInbox, CausalIssue, CausalIssuer, DatabaseSettings, TrustedCa,
+    CausalBinding, CausalError, CausalInbox, CausalIssue, CausalIssuer, DatabaseSettings, TrustedCa,
 };
 use std::{env, fs::File, io::Read, time::Duration};
 
@@ -20,7 +20,7 @@ fn main() {
 }
 fn run() -> Result<(), String> {
     let a: Vec<String> = env::args().skip(1).collect();
-    if a.len() != 23 {
+    if !(a.len() == 23 || (a.len() == 24 && a[23] == "inbox_context_unknown")) {
         return Err("fixture arguments invalid".into());
     }
     let read = |p: &str| {
@@ -112,6 +112,17 @@ fn run() -> Result<(), String> {
                 .await
                 .map_err(|_| "fixture inbox TLS failed")?;
             let mut inbox = CausalInbox::new(connection);
+            if a.len() == 24 {
+                match inbox
+                    .accept(&session, &peer, &canonical, &grants, &policies)
+                    .await
+                {
+                    Err(CausalError::OutcomeUnknown) => println!("CONTEXT_OUTCOME_UNKNOWN"),
+                    Ok(_) => println!("CONTEXT_UNEXPECTED_SUCCESS"),
+                    Err(_) => println!("CONTEXT_WRONG_OUTCOME"),
+                }
+                return Ok(());
+            }
             let first = inbox
                 .accept(&session, &peer, &canonical, &grants, &policies)
                 .await

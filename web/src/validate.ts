@@ -1,5 +1,5 @@
-import type {Comparison, Contract, Operation, Page, Review} from './domain.ts';
-import {validUuid} from './domain.ts';
+import type {Comparison, Contract, HistoricalConnection, HistoricalOrigin, Observation, Operation, Page, Review, Shape} from './domain.ts';
+import {validConnectionCursor, validUuid} from './domain.ts';
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid response');
@@ -24,6 +24,86 @@ function revision(value: unknown) {
 const directions = ['request','response','publish','consume','operation','connection'];
 const kinds = ['declared','approved','observed'];
 const assessments = ['compatible','incompatible','inconclusive'];
+function exact(o: ObjectValue, keys: string[]) {
+  if (Object.keys(o).length !== keys.length || keys.some(key => !Object.hasOwn(o,key))) throw new Error('Invalid response');
+}
+function boundedText(value: unknown, max: number) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > max) throw new Error('Invalid response');
+}
+function shape(value: unknown, depth = 1, budget = {nodes: 0}): Shape {
+  if (depth > 32 || ++budget.nodes > 65536) throw new Error('Invalid response');
+  const o = object(value);
+  member(o.kind,['null','boolean','integer','number','string','binary','unknown','object','array','union']);
+  if (o.kind === 'unknown') { exact(o,['kind','reason']); member(o.reason,['empty','unsupported','limit','malformed','encrypted']); }
+  else if (o.kind === 'object') {
+    exact(o,['kind','fields','additional']); const fields = object(o.fields); const names = Object.keys(fields);
+    if (names.length > 256) throw new Error('Invalid response');
+    for (const name of names) { if (!name || [...name].length > 64) throw new Error('Invalid response'); shape(fields[name],depth+1,budget); }
+    if (o.additional !== null) shape(o.additional,depth+1,budget);
+  } else if (o.kind === 'array') { exact(o,['kind','items']); shape(o.items,depth+1,budget); }
+  else if (o.kind === 'union') {
+    exact(o,['kind','alternatives']); if (!Array.isArray(o.alternatives) || o.alternatives.length < 2 || o.alternatives.length > 64) throw new Error('Invalid response');
+    o.alternatives.forEach(item => shape(item,depth+1,budget));
+  } else exact(o,['kind']);
+  return value as Shape;
+}
+export function historicalOrigin(value: unknown, operationId: string, observationId: string): HistoricalOrigin {
+  const o=object(value); exact(o,['observation_id','operation_id','status','origin']);
+  ids(o,['observation_id','operation_id']);
+  if (o.observation_id!==observationId || o.operation_id!==operationId) throw new Error('Invalid response');
+  if (o.status==='unavailable') { if (o.origin!==null) throw new Error('Invalid response'); }
+  else if (o.status==='verified') {
+    const origin=object(o.origin);
+    const keys=['project_id','service_id','environment_id','deployment_id','instance_id','lifecycle_id','credential_id','grant_id'];
+    exact(origin,keys); ids(origin,keys);
+  } else throw new Error('Invalid response');
+  return value as HistoricalOrigin;
+}
+function canonicalTimestamp(value: unknown) {
+  if (typeof value !== 'string' || value.startsWith('0000-') || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) throw new Error('Invalid response');
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value.slice(0,23)+'Z') throw new Error('Invalid response');
+  return parsed.getTime();
+}
+export function connections(value: unknown): Page<HistoricalConnection> {
+  const o=object(value); exact(o,['items','next_cursor']);
+  if (o.next_cursor !== null && (typeof o.next_cursor !== 'string' || !validConnectionCursor(o.next_cursor))) throw new Error('Invalid response');
+  if (!Array.isArray(o.items) || o.items.length>50 || (o.next_cursor!==null && o.items.length===0)) throw new Error('Invalid response');
+  const keys=['project_id','service_id','environment_id','deployment_id','instance_id','batch_id','event_id','receipt_id'];
+  for (const value of o.items) {
+    const item=object(value); exact(item,['resolved_at','expires_at','producer','receiver']);
+    const resolved=canonicalTimestamp(item.resolved_at), expires=canonicalTimestamp(item.expires_at);
+    if (expires-resolved!==30*24*60*60*1000 || (item.resolved_at as string).slice(23,26)!==(item.expires_at as string).slice(23,26)) throw new Error('Invalid response');
+    for (const side of ['producer','receiver']) {
+      const endpoint=object(item[side]); exact(endpoint,keys); ids(endpoint,keys.filter(key=>key!=='event_id'));
+      if (typeof endpoint.event_id!=='string' || !/^[0-9a-f]{32}$/.test(endpoint.event_id)) throw new Error('Invalid response');
+    }
+  }
+  return value as Page<HistoricalConnection>;
+}
+export function observation(value: unknown): Observation {
+  const o=object(value);
+  exact(o,['id','operation_id','structure','visibility','completeness','reasons','route_uncertain','first_seen','last_seen','queued_at','expires_at','sample_numerator','sample_denominator','count','parser_profile','status_code','structure_fingerprint','policy_revision','protocol','direction','operation','route_template','canonicalization_version','origin_evidence']);
+  ids(o,['id','operation_id']); shape(o.structure);
+  if (new TextEncoder().encode(JSON.stringify(o.structure)).length>65536) throw new Error('Invalid response');
+  if (typeof o.structure_fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(o.structure_fingerprint) || o.canonicalization_version !== 1 || o.origin_evidence !== 'unavailable' || typeof o.route_uncertain !== 'boolean') throw new Error('Invalid response');
+  if (typeof o.policy_revision !== 'string' || !/^[1-9][0-9]{0,19}$/.test(o.policy_revision) || BigInt(o.policy_revision)>18446744073709551615n) throw new Error('Invalid response');
+  for (const key of ['first_seen','last_seen','queued_at','expires_at']) { boundedText(o[key],35); if ((o[key] as string).length<20) throw new Error('Invalid response'); }
+  boundedText(o.parser_profile,64); boundedText(o.protocol,32); boundedText(o.direction,32); boundedText(o.operation,2048); boundedText(o.route_template,2048);
+  member(o.direction,directions); member(o.visibility,['structure','operation','connection']); member(o.completeness,['complete','partial','unavailable']);
+  if (!Array.isArray(o.reasons) || o.reasons.length>8 || new Set(o.reasons).size!==o.reasons.length) throw new Error('Invalid response');
+  o.reasons.forEach(reason=>member(reason,['permission','encrypted','unsupported','sampled','limit','malformed','source_gap','clock_skew']));
+  for (const [key,max] of [['count',1000000000],['sample_numerator',1000000],['sample_denominator',1000000]] as const) if (!Number.isSafeInteger(o[key]) || (o[key] as number)<1 || (o[key] as number)>max) throw new Error('Invalid response');
+  if ((o.sample_numerator as number) > (o.sample_denominator as number) || (o.status_code !== null && (!Number.isInteger(o.status_code) || (o.status_code as number)<100 || (o.status_code as number)>599))) throw new Error('Invalid response');
+  return value as Observation;
+}
+export function observations(value: unknown, operationId: string): Page<Observation> {
+  const o=object(value); exact(o,['items','next_cursor']); nullableId(o.next_cursor);
+  if (!Array.isArray(o.items) || o.items.length>50) throw new Error('Invalid response');
+  const items=o.items.map(observation); if (items.some(item=>item.operation_id!==operationId) || new Set(items.map(item=>item.id)).size!==items.length) throw new Error('Invalid response');
+  if (o.next_cursor !== null && (!items.length || items[items.length-1].id !== o.next_cursor)) throw new Error('Invalid response');
+  return value as Page<Observation>;
+}
 export function operation(value: unknown): Operation {
   const o = object(value); ids(o,['id','project_id','service_id','environment_id']);
   strings(o,['protocol','operation','route_template']); nullableId(o.approved_contract_id);

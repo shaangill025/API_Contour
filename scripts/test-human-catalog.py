@@ -108,7 +108,7 @@ def run_cases(execute, port, directory, environment, normal_token, unknown_token
 
 
 def run_origin_cases(execute, port, directory, environment, normal_token, unknown_token,
-                     target_scope, actor, origins, expected_operations):
+                     target_scope, actor, origins, expected_operations, token_factory=None):
     """Run after 17 and projected origin admission, with a fully authorized actor.
 
     `origins` contains two dicts with project_id/service_id/environment_id/
@@ -136,6 +136,75 @@ def run_origin_cases(execute, port, directory, environment, normal_token, unknow
             ('true' if enabled else 'false',actor,target_scope[0],origin['project_id'],origin['service_id']))
     first = [origins[0][k] for k in fields]
     second = [origins[1][k] for k in fields]
+    if environment.get('CONTOUR_HISTORICAL_ORIGIN_FIXTURE') == '1':
+        def historical(origin, credential=normal_token, scope=target_scope, mode='historical-origin'):
+            observation=execute("SELECT observation_id::text FROM contour.observation_windows WHERE tenant_id='%s' AND collector_id='%s' AND batch_id='%s' AND record_id='%s';" % (target_scope[0],origin['collector_id'],origin['batch_id'],origin['record_id']))
+            args=[str(probe),str(port),str(directory/'ca.crt'),*scope,mode,'1',origin['operation_id']]
+            env=dict(environment,CONTOUR_FIXTURE_ID_TOKEN=str(credential),CONTOUR_FIXTURE_REUSE_TOKEN=str(normal_token),CONTOUR_FIXTURE_OBSERVATION=observation)
+            if mode not in ('historical-cancel','historical-repeat','historical-expiry-reuse'):
+                proc=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30,check=True)
+                return json.loads(proc.stdout)
+            proc=subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            try:
+                deadline=time.monotonic()+(1.8 if mode=='historical-cancel' else 4)
+                table='human_service_roles' if mode=='historical-repeat' else 'human_actors'
+                while time.monotonic()<deadline:
+                    query="SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename='contour_human_reader_tls' AND wait_event_type='Lock' AND query LIKE '%FROM contour."+table+"%';"
+                    if execute(query)=='1': break
+                    if proc.poll() is not None: raise RuntimeError('historical probe ended before lock wait')
+                    time.sleep(.03)
+                else: raise TimeoutError('historical probe did not reach lock wait')
+                out,err=proc.communicate(timeout=15)
+                if proc.returncode or err: raise RuntimeError('historical probe failed')
+                return json.loads(out)
+            finally:
+                if proc.poll() is None: proc.kill(); proc.communicate(timeout=5)
+        for origin in origins:
+            result=historical(origin)
+            assert result['outcome']=='Read' and result['item']['status']=='verified'
+            assert result['item']['operation_id']==origin['operation_id']
+            assert all(result['item']['origin'][key]==origin[key] for key in fields)
+        assert historical(origins[0],credential=unknown_token)['outcome']=='Forbidden'
+        wrong_scope=list(target_scope); wrong_scope[0]=OTHER
+        assert historical(origins[0],scope=wrong_scope)['outcome']=='Forbidden'
+        role(origins[0],False)
+        try:
+            denied=historical(origins[0])
+            assert denied['outcome']=='Read' and denied['item']['status']=='unavailable' and denied['item']['origin'] is None
+        finally: role(origins[0],True)
+        if not callable(token_factory): raise RuntimeError('historical token factory unavailable')
+        def held_case(statement, marker, action):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                held=pool.submit(execute,statement)
+                try:
+                    deadline=time.monotonic()+5
+                    while time.monotonic()<deadline:
+                        if execute("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE wait_event='PgSleep' AND query LIKE '%"+marker+"%';")=='1': break
+                        if held.done(): raise RuntimeError('historical lock holder ended early')
+                        time.sleep(.05)
+                    else: raise TimeoutError('historical lock holder unavailable')
+                    return action()
+                finally:
+                    held.result(timeout=10)
+        item=origins[0]
+        update=("BEGIN; SET LOCAL ROLE contour_human_provisioner; UPDATE contour.human_service_roles SET enabled=false "
+                "WHERE actor_id='%s' AND tenant_id='%s' AND project_id='%s' AND service_id='%s'; "
+                "SELECT pg_sleep(5) /* historical_revoke_barrier */; COMMIT;" % (actor,target_scope[0],item['project_id'],item['service_id']))
+        try:
+            denied=held_case(update,'historical_revoke_barrier',lambda:historical(item,mode='historical-repeat'))
+            assert denied=={'outcome':'unavailable','reuse':'unavailable'}
+        finally: role(item,True)
+        hold=("BEGIN; SELECT 1 FROM contour.human_actors WHERE actor_id='%s' FOR UPDATE; "
+              "SELECT pg_sleep(5) /* historical_expiry_barrier */; COMMIT;" % actor)
+        def expired_during_wait():
+            short=token_factory('synthetic-user',3)
+            return historical(item,credential=short,mode='historical-expiry-reuse')
+        assert held_case(hold,'historical_expiry_barrier',expired_during_wait)=={'outcome':'Forbidden','reuse':'verified'}
+        cancel_hold=("BEGIN; SELECT 1 FROM contour.human_actors WHERE actor_id='%s' FOR UPDATE; "
+                     "SELECT pg_sleep(5) /* historical_cancel_barrier */; COMMIT;" % actor)
+        cancelled=held_case(cancel_hold,'historical_cancel_barrier',lambda:historical(item,mode='historical-cancel'))
+        assert cancelled=={'outcome':'Cancelled','reuse':'Invalidated'}
+        assert historical(item)['item']['status']=='verified'
     assert check(mode='origin',origin=first,credential=unknown_token)['outcome'] == 'Forbidden'
     wrong_tenant = list(target_scope); wrong_tenant[0] = OTHER
     assert check(mode='origin',origin=first,scope=wrong_tenant)['outcome'] == 'Forbidden'

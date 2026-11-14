@@ -49,6 +49,21 @@ class NativeEnvoyTests(unittest.TestCase):
         endpoint = cluster['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['socket_address']
         self.assertEqual((endpoint['address'], endpoint['port_value']), ('native-gateway', 9443))
 
+class ManagedNativeEnvoyTests(unittest.TestCase):
+    def test_managed_edge_is_opt_in_and_keeps_mtls_and_forwarder(self):
+        plain=config(); managed=config(managed_edge=True)
+        p=plain['static_resources']['listeners'][0]['filter_chains'][0]['transport_socket']['typed_config']
+        m=managed['static_resources']['listeners'][0]['filter_chains'][0]['transport_socket']['typed_config']
+        self.assertTrue(m['require_client_certificate'])
+        self.assertEqual(m['common_tls_context']['validation_context'],p['common_tls_context']['validation_context'])
+        self.assertNotIn('tls_certificates',m['common_tls_context'])
+        sds=m['common_tls_context']['tls_certificate_sds_secret_configs'][0]
+        self.assertEqual(sds['name'],'gateway')
+        self.assertEqual(sds['sds_config']['path_config_source']['path'],'/run/watch/sds.json')
+        self.assertEqual(managed['static_resources']['clusters'],plain['static_resources']['clusters'])
+        self.assertEqual(managed['static_resources']['listeners'][0]['filter_chains'][0]['filters'],plain['static_resources']['listeners'][0]['filter_chains'][0]['filters'])
+        with self.assertRaises(ValueError): config(managed_edge='true')
+
 
 if __name__ == '__main__':
     unittest.main()

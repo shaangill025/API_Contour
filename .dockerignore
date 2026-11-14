@@ -3,6 +3,17 @@
 !Cargo.lock
 !crates/
 !crates/**
+!collectors/
+collectors/**
+!collectors/nodered/
+collectors/nodered/**
+!collectors/nodered/live-integration/
+collectors/nodered/live-integration/**
+!collectors/nodered/live-integration/manifest.json
+!collectors/nodered/receiver-integration/
+collectors/nodered/receiver-integration/**
+!collectors/nodered/receiver-integration/manifest-504.json
+!collectors/nodered/receiver-integration/artifact-504.json
 !web/
 !web/package.json
 !web/package-lock.json

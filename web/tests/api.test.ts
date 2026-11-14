@@ -1,3 +1,5 @@
+// Include history cases in the existing configured API test command.
+import './history.cases.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {api, ApiError, request} from '../src/api.ts';
@@ -48,7 +50,7 @@ test('deadline ends stalled headers and stalled JSON body without retry', async 
         return {ok:true,json:stalled} as unknown as Response;
       };
       const outcome = await Promise.race([
-        request('contracts/import',{content:'private'},20).then(()=>'resolved',e=>e),
+        request('operations',undefined,20).then(()=>'resolved',e=>e),
         new Promise(resolve=>setTimeout(()=>resolve('still busy'),100)),
       ]);
       assert.ok(outcome instanceof ApiError, `${phase}: request remained busy past its deadline`);
@@ -239,4 +241,83 @@ test('origin filtering sends all five scope fields with the page cursor', async 
     assert.equal(query.get('include_origin'),'true');
     assert.equal([...query].length,8);
   } finally { globalThis.fetch = previous; }
+});
+
+test('deadline cancels delayed create digest before transmission or pending-state mutation', async () => {
+  const previousFetch=globalThis.fetch, previousStorage=globalThis.sessionStorage;
+  const cryptoDescriptor=Object.getOwnPropertyDescriptor(globalThis,'crypto')!;
+  const originalCrypto=globalThis.crypto; const storage=new FakeStorage(); let writes=0, calls=0;
+  const save=storage.setItem.bind(storage); storage.setItem=(key,value)=>{writes++; save(key,value);};
+  let release!: (value:ArrayBuffer)=>void;
+  const digest=new Promise<ArrayBuffer>(resolve=>{release=resolve;});
+  Object.defineProperty(globalThis,'sessionStorage',{value:storage,configurable:true});
+  Object.defineProperty(globalThis,'crypto',{value:{subtle:{digest:()=>digest},randomUUID:()=>originalCrypto.randomUUID()},configurable:true});
+  globalThis.fetch=async ()=>{calls++; throw new Error('unexpected transmission');};
+  try {
+    const fresh=await import('../src/api.ts?delayed-digest');
+    const operation=fresh.request('reviews',{operation_id:'delayed'},20);
+    const outcome=await Promise.race([operation.then(()=>'resolved',error=>error),new Promise(resolve=>setTimeout(()=>resolve('still busy'),100))]);
+    assert.ok(outcome instanceof fresh.ApiError,'preflight remained busy past the deadline');
+    assert.equal(outcome.status,0); assert.equal(calls,0); assert.equal(writes,0);
+    release(new Uint8Array(32).buffer);
+    await new Promise(resolve=>setTimeout(resolve,0));
+    assert.equal(calls,0); assert.equal(writes,0); assert.deepEqual(fresh.pendingRecovery(),[]);
+  } finally {
+    release(new Uint8Array(32).buffer);
+    globalThis.fetch=previousFetch;
+    Object.defineProperty(globalThis,'sessionStorage',{value:previousStorage,configurable:true});
+    Object.defineProperty(globalThis,'crypto',cryptoDescriptor);
+  }
+});
+
+test('pre-aborted and externally canceled creates never send or persist a late digest', async () => {
+  const previousFetch=globalThis.fetch, previousStorage=globalThis.sessionStorage;
+  const cryptoDescriptor=Object.getOwnPropertyDescriptor(globalThis,'crypto')!;
+  const originalCrypto=globalThis.crypto, storage=new FakeStorage(); let calls=0, digests=0, writes=0;
+  const save=storage.setItem.bind(storage); storage.setItem=(key,value)=>{writes++;save(key,value);};
+  let release!: (value:ArrayBuffer)=>void; const digest=new Promise<ArrayBuffer>(resolve=>{release=resolve;});
+  Object.defineProperty(globalThis,'sessionStorage',{value:storage,configurable:true});
+  Object.defineProperty(globalThis,'crypto',{value:{subtle:{digest:()=>{digests++;return digest;}},randomUUID:()=>originalCrypto.randomUUID()},configurable:true});
+  globalThis.fetch=async ()=>{calls++;throw new Error('unexpected transmission');};
+  try {
+    const fresh=await import('../src/api.ts?abort-digest'); const pre=new AbortController(); pre.abort();
+    await assert.rejects(fresh.request('reviews',{value:'pre'},30_000,undefined,undefined,pre.signal),fresh.ApiError);
+    assert.equal(digests,0);
+    const ctrl=new AbortController(); const pending=fresh.request('reviews',{value:'pending'},30_000,undefined,undefined,ctrl.signal);
+    assert.equal(digests,1); ctrl.abort();
+    await assert.rejects(pending,fresh.ApiError);
+    release(new Uint8Array(32).buffer); await new Promise(resolve=>setTimeout(resolve,0));
+    assert.equal(calls,0); assert.equal(writes,0); assert.deepEqual(fresh.pendingRecovery(),[]);
+  } finally {
+    release(new Uint8Array(32).buffer); globalThis.fetch=previousFetch;
+    Object.defineProperty(globalThis,'sessionStorage',{value:previousStorage,configurable:true});
+    Object.defineProperty(globalThis,'crypto',cryptoDescriptor);
+  }
+});
+
+test('deadline cancels an uncooperative bounded response stream', async () => {
+  const previous=globalThis.fetch; let canceled=0, calls=0;
+  globalThis.fetch=async ()=>{
+    calls++;
+    const stream=new ReadableStream<Uint8Array>({pull(){return new Promise(()=>{});},cancel(){canceled++;}});
+    return new Response(stream,{status:200});
+  };
+  try {
+    const outcome=await Promise.race([
+      request('operations',undefined,20,undefined,1024).then(()=>'resolved',error=>error),
+      new Promise(resolve=>setTimeout(()=>resolve('still busy'),100)),
+    ]);
+    assert.ok(outcome instanceof ApiError); assert.equal(outcome.status,0); assert.equal(calls,1); assert.equal(canceled,1);
+  } finally {globalThis.fetch=previous;}
+});
+
+test('deadline cannot be bypassed by synchronous response validation', async () => {
+  const previous=globalThis.fetch;
+  globalThis.fetch=async ()=>Response.json({value:1});
+  try {
+    await assert.rejects(request('operations',undefined,20,value=>{
+      const until=performance.now()+30; while (performance.now()<until) { /* bounded busy validation */ }
+      return value;
+    }), (error:unknown)=>error instanceof ApiError && error.status===0);
+  } finally {globalThis.fetch=previous;}
 });

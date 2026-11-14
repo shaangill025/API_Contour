@@ -1,0 +1,394 @@
+[
+  {
+    "Config": {
+      "AttachStderr": false,
+      "AttachStdin": true,
+      "AttachStdout": true,
+      "Cmd": [
+        "/adapter/live-integration/private-launch-proxy.js"
+      ],
+      "Domainname": "",
+      "Entrypoint": [
+        "/usr/local/bin/node"
+      ],
+      "Env": [
+        "LANG=C.UTF-8",
+        "NODE_RED_VERSION=v5.0.9",
+        "PATH=/usr/src/node-red/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TZ=UTC",
+        "HOSTNAME=causal-live",
+        "NODE_PATH=/usr/src/node-red/node_modules",
+        "NODE_VERSION=24.22.1",
+        "YARN_VERSION=1.22.22",
+        "FLOWS=flows.json",
+        "HOME=/data"
+      ],
+      "ExposedPorts": {
+        "1880/tcp": {}
+      },
+      "Healthcheck": {
+        "Test": [
+          "CMD-SHELL",
+          "node /healthcheck.js"
+        ]
+      },
+      "Hostname": "causal-live",
+      "Image": "docker.io/nodered/node-red:5.0.9@sha256:e085d4a06591fd0aca2ea2a91364d27f1a0e31e885675f77935e10f95412a963",
+      "Labels": {
+        "authors": "Dave Conway-Jones, Nick O'Leary, James Thomas, Raymond Mouthaan",
+        "org.apicontour.causal.owner": "3333333333333333333333333333333333333333333333333333333333333333",
+        "org.label-schema.arch": "",
+        "org.label-schema.build-date": "2026-10-21T15:52:22Z",
+        "org.label-schema.description": "Low-code programming for event-driven applications.",
+        "org.label-schema.docker.dockerfile": ".docker/Dockerfile.alpine",
+        "org.label-schema.license": "Apache-2.0",
+        "org.label-schema.name": "Node-RED",
+        "org.label-schema.url": "https://nodered.org",
+        "org.label-schema.vcs-ref": "",
+        "org.label-schema.vcs-type": "Git",
+        "org.label-schema.vcs-url": "https://github.com/node-red/node-red-docker",
+        "org.label-schema.version": "5.0.9",
+        "org.opencontainers.image.source": "https://github.com/node-red/node-red-docker"
+      },
+      "OpenStdin": true,
+      "StdinOnce": true,
+      "Tty": false,
+      "User": "1000:1000",
+      "Volumes": null,
+      "WorkingDir": "/data"
+    },
+    "HostConfig": {
+      "AutoRemove": false,
+      "Binds": null,
+      "BlkioDeviceReadBps": [],
+      "BlkioDeviceReadIOps": [],
+      "BlkioDeviceWriteBps": [],
+      "BlkioDeviceWriteIOps": [],
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": [],
+      "CapAdd": null,
+      "CapDrop": [
+        "ALL"
+      ],
+      "Cgroup": "",
+      "CgroupParent": "",
+      "CgroupnsMode": "private",
+      "ConsoleSize": [
+        0,
+        0
+      ],
+      "ContainerIDFile": "",
+      "CpuCount": 0,
+      "CpuPercent": 0,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "CpuShares": 0,
+      "CpusetCpus": "",
+      "CpusetMems": "",
+      "DeviceCgroupRules": null,
+      "DeviceRequests": null,
+      "Devices": [],
+      "Dns": null,
+      "DnsOptions": [],
+      "DnsSearch": [],
+      "ExtraHosts": null,
+      "GroupAdd": null,
+      "IOMaximumBandwidth": 0,
+      "IOMaximumIOps": 0,
+      "Init": true,
+      "IpcMode": "private",
+      "Isolation": "",
+      "Links": null,
+      "LogConfig": {
+        "Config": {},
+        "Type": "none"
+      },
+      "MaskedPaths": [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware"
+      ],
+      "Memory": 536870912,
+      "MemoryReservation": 0,
+      "MemorySwap": 1073741824,
+      "MemorySwappiness": null,
+      "Mounts": [
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_0",
+          "Target": "/adapter/causal-codec.js",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_1",
+          "Target": "/adapter/error-integration",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_2",
+          "Target": "/adapter/live-integration",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_3",
+          "Target": "/data/flows.json",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_4",
+          "Target": "/run/apicontour/live/ca.pem",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_5",
+          "Target": "/run/apicontour/live/export.key",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_6",
+          "Target": "/run/apicontour/live/export.pem",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_7",
+          "Target": "/run/apicontour/live/product.key",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_8",
+          "Target": "/run/apicontour/live/product.pem",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_9",
+          "Target": "/run/apicontour/live/server.key",
+          "Type": "bind"
+        },
+        {
+          "BindOptions": {
+            "Propagation": "rprivate"
+          },
+          "ReadOnly": true,
+          "Source": "SOURCE_HOST_10",
+          "Target": "/run/apicontour/live/server.pem",
+          "Type": "bind"
+        }
+      ],
+      "NanoCpus": 1000000000,
+      "NetworkMode": "causal-net",
+      "OomKillDisable": false,
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "PidsLimit": 128,
+      "PortBindings": {},
+      "Privileged": false,
+      "PublishAllPorts": false,
+      "ReadonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger"
+      ],
+      "ReadonlyRootfs": true,
+      "RestartPolicy": {
+        "MaximumRetryCount": 0,
+        "Name": "no"
+      },
+      "Runtime": "runc",
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "ShmSize": 67108864,
+      "Tmpfs": {
+        "/data": "rw,nosuid,nodev,noexec,size=16m,mode=1777",
+        "/tmp": "rw,nosuid,nodev,noexec,size=16m,mode=1777"
+      },
+      "UTSMode": "",
+      "Ulimits": null,
+      "UsernsMode": "",
+      "VolumeDriver": "",
+      "VolumesFrom": null
+    },
+    "Id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "Image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "Mounts": [
+      {
+        "Destination": "/adapter/causal-codec.js",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_0",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/adapter/error-integration",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_1",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/adapter/live-integration",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_2",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/data/flows.json",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_3",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/ca.pem",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_4",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/export.key",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_5",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/export.pem",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_6",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/product.key",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_7",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/product.pem",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_8",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/server.key",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_9",
+        "Type": "bind"
+      },
+      {
+        "Destination": "/run/apicontour/live/server.pem",
+        "Mode": "",
+        "Propagation": "rprivate",
+        "RW": false,
+        "Source": "SOURCE_10",
+        "Type": "bind"
+      }
+    ],
+    "Name": "/contour-causal-3333333333333333333333333333333333333333333333333333333333333333",
+    "NetworkSettings": {
+      "Networks": {
+        "causal-net": {
+          "Aliases": [
+            "causal-node"
+          ],
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": ""
+        }
+      },
+      "Ports": {}
+    },
+    "State": {
+      "Dead": false,
+      "Error": "",
+      "ExitCode": 0,
+      "FinishedAt": "0001-01-01T00:00:00Z",
+      "OOMKilled": false,
+      "Paused": false,
+      "Pid": 0,
+      "Restarting": false,
+      "Running": false,
+      "StartedAt": "0001-01-01T00:00:00Z",
+      "Status": "created"
+    }
+  }
+]

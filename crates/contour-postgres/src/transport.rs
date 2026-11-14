@@ -195,6 +195,15 @@ impl ConnectedDatabase {
             _ => Err(TransportError::Query),
         }
     }
+    /// Consume a connection and confirm that its owned local driver has ended.
+    /// A successful return does not prove that the remote backend has disappeared.
+    /// Cancellation or expiry provides no termination proof to the caller.
+    pub async fn terminate_until(mut self, deadline: Instant) -> Result<(), TransportError> {
+        self.reusable = false;
+        self.client.take();
+        let driver = self.driver.as_mut().ok_or(TransportError::Shutdown)?;
+        terminate_driver_until(driver, deadline).await
+    }
     /// Drop the client and await driver shutdown within the configured deadline.
     pub async fn close(mut self) -> Result<(), TransportError> {
         self.reusable = false;
@@ -211,6 +220,20 @@ impl ConnectedDatabase {
                 Err(TransportError::Deadline)
             }
         }
+    }
+}
+async fn terminate_driver_until<T>(
+    driver: &mut JoinHandle<T>,
+    deadline: Instant,
+) -> Result<(), TransportError> {
+    // Abort first even if no time remains. Only a completed join is proof.
+    driver.abort();
+    if Instant::now() >= deadline {
+        return Err(TransportError::Deadline);
+    }
+    match timeout_at(deadline, driver).await {
+        Ok(_) if Instant::now() < deadline => Ok(()),
+        _ => Err(TransportError::Deadline),
     }
 }
 impl Drop for ConnectedDatabase {
@@ -271,6 +294,94 @@ mod tests {
                 drop(close);
                 tokio::task::yield_now().await;
                 assert!(abort.is_finished());
+            });
+    }
+    #[test]
+    fn termination_confirms_join_and_expired_deadline_gives_no_proof() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let driver =
+                    tokio::spawn(std::future::pending::<Result<(), tokio_postgres::Error>>());
+                let abort = driver.abort_handle();
+                let session = ConnectedDatabase {
+                    client: None,
+                    driver: Some(driver),
+                    deadline: Duration::from_secs(1),
+                    reusable: false,
+                };
+                assert_eq!(
+                    session
+                        .terminate_until(Instant::now() + Duration::from_secs(1))
+                        .await,
+                    Ok(())
+                );
+                assert!(abort.is_finished());
+
+                let driver =
+                    tokio::spawn(std::future::pending::<Result<(), tokio_postgres::Error>>());
+                let abort = driver.abort_handle();
+                let session = ConnectedDatabase {
+                    client: None,
+                    driver: Some(driver),
+                    deadline: Duration::from_secs(1),
+                    reusable: false,
+                };
+                assert_eq!(
+                    session.terminate_until(Instant::now()).await,
+                    Err(TransportError::Deadline)
+                );
+                tokio::task::yield_now().await;
+                assert!(abort.is_finished());
+            });
+    }
+    #[test]
+    fn cancelled_or_timed_out_termination_cannot_claim_a_running_driver() {
+        use std::{future::Future, sync::mpsc};
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for cancel in [true, false] {
+                    let (ready_tx, ready_rx) = mpsc::channel();
+                    let (release_tx, release_rx) = mpsc::channel();
+                    let driver = tokio::task::spawn_blocking(move || {
+                        ready_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        Ok::<(), tokio_postgres::Error>(())
+                    });
+                    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                    let abort = driver.abort_handle();
+                    let session = ConnectedDatabase {
+                        client: None,
+                        driver: Some(driver),
+                        deadline: Duration::from_secs(1),
+                        reusable: false,
+                    };
+                    if cancel {
+                        let mut termination = Box::pin(
+                            session.terminate_until(Instant::now() + Duration::from_secs(1)),
+                        );
+                        std::future::poll_fn(|cx| {
+                            assert!(termination.as_mut().poll(cx).is_pending());
+                            std::task::Poll::Ready(())
+                        })
+                        .await;
+                        drop(termination);
+                    } else {
+                        assert_eq!(
+                            session
+                                .terminate_until(Instant::now() + Duration::from_millis(10))
+                                .await,
+                            Err(TransportError::Deadline)
+                        );
+                    }
+                    assert!(!abort.is_finished());
+                    release_tx.send(()).unwrap();
+                }
             });
     }
     // Public certificate only, generated by OpenSSL; ephemeral private key discarded.

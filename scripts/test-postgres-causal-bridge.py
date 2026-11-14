@@ -54,11 +54,23 @@ def source_paths():
            ROOT/'crates/contour-core/src/causal_grant.rs',ROOT/'crates/contour-core/src/policy.rs',
            ROOT/'crates/contour-core/src/causal_event.rs',
            ROOT/'crates/contour-postgres/tests/fixtures/causal_bridge.json',
+           ROOT/'crates/contour-postgres/tests/fixtures/causal_candidate_504.json',
            ROOT/'db/bootstrap.sql',ROOT/'db/tests/causal_runtime_registry_pre.sql',
            ROOT/'db/tests/causal_session_setup.sql',ROOT/'scripts/test-postgres-causal-bridge.py',
            ROOT/'tests/fixtures/causal-bridge/test_bridge_driver.py',
            ROOT/'db/opt-in-migrations/0020_causal_inbox.sql',
-           ROOT/'db/opt-in-migrations/0021_origin_admission.sql']
+           ROOT/'db/opt-in-migrations/0021_origin_admission.sql',
+           ROOT/'db/opt-in-migrations/0022_causal_generation.sql',
+           ROOT/'db/opt-in-migrations/0023_causal_marker_bindings.sql',
+           ROOT/'db/opt-in-migrations/0024_causal_live_profile.sql',
+           ROOT/'db/opt-in-migrations/0025_historical_origin.sql',
+           ROOT/'db/opt-in-migrations/0026_causal_evidence_enrollment.sql',
+           ROOT/'db/opt-in-migrations/0027_causal_observer_inbox.sql',
+           ROOT/'db/opt-in-migrations/0028_causal_receiver_enrollment.sql',
+           ROOT/'db/opt-in-migrations/0029_causal_receiver_inbox.sql',
+           ROOT/'db/opt-in-migrations/0030_causal_gateway_reader.sql',
+           ROOT/'db/opt-in-migrations/0031_causal_edge_reconciliation.sql',
+           ROOT/'db/opt-in-migrations/0032_human_causal_reader.sql']
     fixed += [ROOT/('db/provision_'+name+'.sql') for name in PROVISIONS]
     fixed += [ROOT/('db/migrations/'+name+'.sql') for name in MIGRATIONS]
     fixed += [ROOT/('db/opt-in-migrations/'+name+'.sql') for name in OPT]
@@ -92,7 +104,7 @@ def digest_file(path):
 
 
 def snapshot():
-    expected = {ROOT / ('db/opt-in-migrations/' + name + '.sql') for name in (*OPT, '0020_causal_inbox', '0021_origin_admission')}
+    expected = {ROOT / ('db/opt-in-migrations/' + name + '.sql') for name in (*OPT, '0020_causal_inbox', '0021_origin_admission', '0022_causal_generation', '0023_causal_marker_bindings', '0024_causal_live_profile', '0025_historical_origin', '0026_causal_evidence_enrollment', '0027_causal_observer_inbox', '0028_causal_receiver_enrollment', '0029_causal_receiver_inbox', '0030_causal_gateway_reader', '0031_causal_edge_reconciliation', '0032_human_causal_reader')}
     if set((ROOT / 'db/opt-in-migrations').glob('*.sql')) != expected:
         raise ValueError('qualification source list changed')
     return {str(p):digest_file(p) for p in source_paths()}
@@ -357,6 +369,35 @@ def signed_payload(template,domain,key,directory,name):
     return json.dumps(envelope,separators=(',',':')).encode()
 
 
+def inbox_context_unknown(base,work,env,execute):
+    """Prove a post-commit context leak for one exact synthetic batch."""
+    batch_id=str(uuid.uuid4()); tenant,runtime=IDS[:2]
+    if any(not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',x) for x in (tenant,runtime,batch_id)): raise ValueError('context fixture identity')
+    query=f"SELECT count(*) FROM contour.causal_inbox_batches WHERE tenant_id='{tenant}' AND runtime_id='{runtime}' AND batch_id='{batch_id}';"
+    if execute(query)!='0': raise AssertionError('context batch already exists')
+    batch={'wire_version':1,'batch_id':batch_id,'tenant_id':tenant,'runtime_id':runtime,'session_epoch':1,'first_seq':2,'last_seq':2,'events':[{'kind':'root','event_id':'2'*32,'seq':2,'root':'b'*32}]}
+    path=work/'inbox-context-batch.json';path.write_text(json.dumps(batch,separators=(',',':')))
+    setup=("BEGIN; CREATE FUNCTION contour.fixture_inbox_context_leak() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+           "PERFORM set_config('apicontour.tenant_id','f0000000-0000-4000-8000-000000000002',false); RETURN NEW; END $$; "
+           "CREATE CONSTRAINT TRIGGER fixture_inbox_context_leak AFTER INSERT ON contour.causal_inbox_batches DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+           f"WHEN (NEW.tenant_id='{tenant}'::uuid AND NEW.runtime_id='{runtime}'::uuid AND NEW.batch_id='{batch_id}'::uuid) "
+           "EXECUTE FUNCTION contour.fixture_inbox_context_leak(); COMMIT;")
+    execute(setup)
+    try:
+        args=list(base);args[11]=str(path);result=None;probe_error=None
+        try: result=run_process(args+['inbox_context_unknown'],timeout=40,env=env,limit=4096)
+        except Exception as error: probe_error=error
+        committed=execute(query)
+        if committed!='1': raise AssertionError('context failure did not commit exact batch')
+        outcomes={b'CONTEXT_OUTCOME_UNKNOWN\n':'unknown',b'CONTEXT_UNEXPECTED_SUCCESS\n':'unexpected-success',b'CONTEXT_WRONG_OUTCOME\n':'wrong'}
+        outcome=outcomes.get(result.stdout,'wrong') if result is not None and result.returncode==0 and not result.stderr else 'wrong'
+        print('inbox-context committed=1 outcome='+outcome,flush=True)
+        if probe_error is not None: raise probe_error
+        if outcome!='unknown': raise AssertionError('context failure protocol mismatch')
+    finally:
+        execute('DROP TRIGGER fixture_inbox_context_leak ON contour.causal_inbox_batches; DROP FUNCTION contour.fixture_inbox_context_leak();')
+
+
 def run_probe_cases(base,work,env,counts,state):
     """Run all explicit negative and positive probe cases with checked effects."""
     def stage(name): state['stages'].append(name)
@@ -404,6 +445,14 @@ def run_probe_cases(base,work,env,counts,state):
     stage('positive_commit_and_exact_duplicate')
     state.pop('current_case',None)
     state['status']='passed'
+
+
+def run_scenario(base,work,env,counts,state,execute):
+    """Run the bridge protocol and its mandatory post-commit context control."""
+    run_probe_cases(base,work,env,counts,state)
+    state['status']='failed';state['current_case']='inbox_context_unknown'
+    inbox_context_unknown(base,work,env,execute)
+    state['stages'].append('inbox_context_unknown');state.pop('current_case',None);state['status']='passed'
 
 
 def main():
@@ -554,7 +603,7 @@ def main():
             nonce=str(uuid.uuid4()); base=[str(probe),'localhost',port,'contour_fixture',str(ca),'causal_issuer_login','causal_inbox_login',str(work/'grant.pub'),str(work/'policy.pub'),str(work/'grant.json'),str(work/'policy.json'),str(work/'batch.json'),'33'*32,*IDS,nonce]
             def counts():
                 return execute("SELECT (SELECT count(*) FROM contour.causal_sessions)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_batches)::text||'|'||(SELECT count(*) FROM contour.causal_inbox_events)::text||'|'||coalesce((SELECT used_bytes::text FROM contour.origin_logical_usage WHERE tenant_id='"+IDS[0]+"'),'0')||'|'||coalesce((SELECT sum(octet_length(canonical_batch))::text FROM contour.causal_inbox_batches),'0')||'|'||(SELECT count(DISTINCT receipt_id) FROM contour.causal_inbox_batches)::text;")
-            run_probe_cases(base,work,env,counts,state)
+            run_scenario(base,work,env,counts,state,execute)
     except Exception as error:
         state['failure_type']=type(error).__name__
         state['failure_category']=failure_category(error)
