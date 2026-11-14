@@ -213,6 +213,46 @@ pub struct ReceiverIssued504<'a> {
     _authenticated: ReceiverPreauthenticated504<'a>,
     _session: contour_postgres::CausalReceiverSession504,
 }
+/// A receiver-only session with its single-use generation and marker binding
+/// confirmed. It still carries no enrollment, bootstrap, or permit authority.
+/// ```compile_fail
+/// use contour_ingress::ReceiverMarkerBound504;
+/// fn forge<'a>() -> ReceiverMarkerBound504<'a> {
+///     ReceiverMarkerBound504 { _issued: todo!(), _generation: [0; 32], _product_credential: String::new() }
+/// }
+/// ```
+/// ```compile_fail
+/// use contour_ingress::{ReceiverMarkerBound504, CausalPermitOwner};
+/// fn legacy(value: ReceiverMarkerBound504<'_>) -> CausalPermitOwner { value.into() }
+/// ```
+pub struct ReceiverMarkerBound504<'a> {
+    _issued: ReceiverIssued504<'a>,
+    _generation: [u8; 32],
+    _product_credential: String,
+}
+
+fn valid_generation_material(
+    credential: &str,
+    peer: [u8; 32],
+    export_leaf: [u8; 32],
+    product_leaf: [u8; 32],
+    marker_public: [u8; 32],
+) -> bool {
+    credential.len() == 36
+        && credential.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
+        && peer != [0; 32]
+        && peer == export_leaf
+        && product_leaf != [0; 32]
+        && product_leaf != peer
+        && marker_public != [0; 32]
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -996,12 +1036,192 @@ impl<'a> ReceiverPreauthenticated504<'a> {
     }
 }
 
+impl ReceiverIssued504<'_> {
+    // Confirm the live target both before and after fixed process inspection;
+    // the caller retains this stage across each awaited database operation.
+    async fn verify_generation_target(&self) -> Result<(u64, String), LaunchObserveError> {
+        let authenticated = &self._authenticated;
+        let started = &authenticated._started;
+        let created = &started._created;
+        let pre = &created.prelaunch;
+        if !authenticated._broker.is_active()
+            || started._attached.cleanup().result().is_some()
+            || !self._session.matches_export_pin(&pre.peer)
+            || self._session.receiver_profile_504().is_none()
+            || created.material.identity().export_leaf() != pre.peer
+        {
+            return Err(LaunchObserveError::Invalid);
+        }
+        pre.revalidate().map_err(LaunchObserveError::Preflight)?;
+        created
+            .material
+            .revalidate()
+            .map_err(|_| LaunchObserveError::Invalid)?;
+        let first = created.inspect(&started._policy, true).await?;
+        if first.1 != started._started_at {
+            return Err(LaunchObserveError::Invalid);
+        }
+        started
+            ._policy
+            .verify_receiver_proxy_process(
+                created.cid,
+                started._pid,
+                started._process_start,
+                pre.deadline.into(),
+            )
+            .await
+            .map_err(LaunchObserveError::Process)?;
+        let second = created.inspect(&started._policy, true).await?;
+        if first != second
+            || !authenticated._broker.is_active()
+            || started._attached.cleanup().result().is_some()
+            || !self._session.matches_export_pin(&pre.peer)
+            || self._session.receiver_profile_504().is_none()
+        {
+            return Err(LaunchObserveError::Invalid);
+        }
+        pre.revalidate().map_err(LaunchObserveError::Preflight)?;
+        Ok(second)
+    }
+}
+
+impl<'a> ReceiverIssued504<'a> {
+    /// Claim one durable generation, then bind its retained product leaf and
+    /// retained-seed-derived marker public key through the checked SQL APIs.
+    /// `product_credential` selects a current SQL credential; it is not proof.
+    /// Any uncertain journal or database outcome consumes this transition.
+    pub async fn bind_generation(
+        mut self,
+        issuer: &mut contour_postgres::CausalIssuer,
+        binder: &mut contour_postgres::CausalMarkerBinder,
+        product_credential: &str,
+    ) -> Result<ReceiverMarkerBound504<'a>, LaunchObserveError> {
+        let started = &self._authenticated._started;
+        let pre = &started._created.prelaunch;
+        let material = started._created.material.identity();
+        if !valid_generation_material(
+            product_credential,
+            pre.peer,
+            material.export_leaf(),
+            material.product_leaf(),
+            material.marker_public(),
+        ) {
+            return Err(LaunchObserveError::Invalid);
+        }
+        let product_leaf = material.product_leaf();
+        let marker_public = material.marker_public();
+        let initial = self.verify_generation_target().await?;
+        let generation = self
+            ._authenticated
+            ._started
+            ._created
+            .prelaunch
+            .owner
+            .claim_generation()
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        if self
+            .verify_generation_target()
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?
+            != initial
+        {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        {
+            let pre = &self._authenticated._started._created.prelaunch;
+            issuer
+                .claim_receiver_generation_504_until(
+                    &mut self._session,
+                    &generation,
+                    &pre.peer,
+                    pre.grants,
+                    pre.policies,
+                    pre.deadline,
+                )
+                .await
+                .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        }
+        if self
+            .verify_generation_target()
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?
+            != initial
+        {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        let receipt = {
+            let pre = &self._authenticated._started._created.prelaunch;
+            binder
+                .bind_receiver_504_until(
+                    &mut self._session,
+                    contour_postgres::CausalReceiverMarkerInputs504 {
+                        generation: &generation,
+                        product_credential_id: product_credential,
+                        product_leaf: &product_leaf,
+                        public_key: &marker_public,
+                        peer: &pre.peer,
+                        grant_keys: pre.grants,
+                        policy_keys: pre.policies,
+                    },
+                    pre.deadline,
+                )
+                .await
+                .map_err(|_| LaunchObserveError::MutationUnknown)?
+        };
+        if receipt.public_key() != marker_public
+            || self
+                .verify_generation_target()
+                .await
+                .map_err(|_| LaunchObserveError::MutationUnknown)?
+                != initial
+        {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        Ok(ReceiverMarkerBound504 {
+            _issued: self,
+            _generation: generation,
+            _product_credential: product_credential.into(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        exact_mounts, matches_receiver_image, valid_namespace, valid_ports, valid_sysctls,
+        exact_mounts, matches_receiver_image, valid_generation_material, valid_namespace,
+        valid_ports, valid_sysctls,
     };
     use serde_json::json;
+    #[test]
+    fn generation_inputs_bind_actual_purpose_material_and_canonical_credential() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let peer = [1; 32];
+        let product = [2; 32];
+        let marker = [3; 32];
+        assert!(valid_generation_material(id, peer, peer, product, marker));
+        assert!(!valid_generation_material(
+            id, peer, [4; 32], product, marker
+        ));
+        assert!(!valid_generation_material(id, peer, peer, peer, marker));
+        assert!(!valid_generation_material(id, peer, peer, product, [0; 32]));
+        assert!(!valid_generation_material(
+            id, [0; 32], [0; 32], product, marker
+        ));
+        assert!(!valid_generation_material(
+            "00000000-0000-4000-8000-00000000000A",
+            peer,
+            peer,
+            product,
+            marker
+        ));
+        assert!(!valid_generation_material(
+            "00000000000040008000000000000001",
+            peer,
+            peer,
+            product,
+            marker
+        ));
+    }
     #[test]
     fn image_reference_and_exact_platform_descriptor_are_required() {
         let index = format!("sha256:{}", "11".repeat(32));

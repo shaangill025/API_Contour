@@ -65,7 +65,7 @@ pub use causal_permit::CausalPermitOwner;
 #[cfg(unix)]
 pub use causal_receiver_deploy::{
     Prelaunch504, ReceiverInertCreated, ReceiverInertStarted, ReceiverIssued504,
-    ReceiverNetwork504, ReceiverPeer504, ReceiverPreauthenticated504,
+    ReceiverMarkerBound504, ReceiverNetwork504, ReceiverPeer504, ReceiverPreauthenticated504,
 };
 pub use causal_receiver_material::{
     LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
