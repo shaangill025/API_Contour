@@ -6,6 +6,7 @@
 //! Database current-time observations have microsecond resolution. Canceling
 //! an in-flight operation can leave an unknown commit outcome; retry only the
 //! original issue or batch identity and exact content.
+mod receiver_enrollment504;
 mod receiver_fact;
 use crate::{
     AuthorityError, ConnectedDatabase,
@@ -17,6 +18,9 @@ use crate::{
 use contour_core::{
     AdmissionInputs, CaptureScope, CausalEventBatch, CausalGrantKeys, CausalMarkerScope,
     CausalMarkerVerifier, PolicyKeys, SourceAssignment, VerifiedCausalGrant, VerifiedPolicy,
+};
+pub use receiver_enrollment504::{
+    ReceiverEnrollmentInputs504, ReceiverEnrollmentProvisioner504, ReceiverEnrollmentReceipt504,
 };
 pub use receiver_fact::{
     ReceiverEvidenceConnection, ReceiverEvidenceIo, ReceiverEvidencePeer, ReceiverEvidenceTls,
