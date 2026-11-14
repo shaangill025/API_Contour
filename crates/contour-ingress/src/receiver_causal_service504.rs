@@ -304,12 +304,17 @@ fn check_request<B>(request: &Request<B>) -> Result<(), (StatusCode, &'static st
     {
         return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_encoding"));
     }
+    let preauth = request.uri().path() == "/v1/receiver-preauth";
     if request.headers().get_all("content-type").iter().count() != 1
         || !request.headers().get("content-type").is_some_and(|v| {
-            matches!(
-                v.to_str(),
-                Ok("application/json" | "application/json; charset=utf-8")
-            )
+            if preauth {
+                matches!(v.to_str(), Ok("application/octet-stream"))
+            } else {
+                matches!(
+                    v.to_str(),
+                    Ok("application/json" | "application/json; charset=utf-8")
+                )
+            }
         })
     {
         return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"));
@@ -558,12 +563,23 @@ mod tests {
             Request::builder()
                 .method(method)
                 .uri(path)
-                .header("content-type", "application/json")
+                .header("content-type", "application/octet-stream")
                 .header("content-length", length)
                 .body(())
                 .unwrap()
         };
         assert!(check_request(&request("POST", "/v1/receiver-preauth", "64")).is_ok());
+        let json_request = Request::builder()
+            .method("POST")
+            .uri("/v1/receiver-preauth")
+            .header("content-type", "application/json")
+            .header("content-length", "64")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            check_request(&json_request).unwrap_err().0,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
         assert_eq!(
             check_request(&request("POST", "/v1/receiver-preauth", "65"))
                 .unwrap_err()

@@ -297,3 +297,6 @@ mod tests {
         assert!(broker.0.lock().unwrap().pending.is_empty());
     }
 }
+
+#[cfg(test)]
+mod tls_tests;

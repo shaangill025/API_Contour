@@ -1469,7 +1469,7 @@ impl Drop for LocalAttached {
     }
 }
 // Fixed internal collector request; only the challenge arrives on private stdin.
-const RECEIVER_PREAUTH_SCRIPT: &str = r#"'use strict';const fs=require('node:fs'),https=require('node:https');const b=fs.readFileSync(0);if(b.length!==64||!/^[0-9a-f]{64}$/.test(b.toString('ascii')))process.exit(2);const dir='/run/apicontour/live/';const q=https.request({hostname:'causal-ingress',port:8443,path:'/v1/receiver-preauth',method:'POST',servername:'causal-ingress',ca:fs.readFileSync(dir+'ca.pem'),cert:fs.readFileSync(dir+'export.pem'),key:fs.readFileSync(dir+'export.key'),rejectUnauthorized:true,agent:false,headers:{'content-type':'application/json','content-length':'64'}},r=>{let n=0;r.on('data',x=>{n+=x.length;if(n>512)q.destroy()});r.on('end',()=>{if(r.statusCode!==200)process.exit(2);process.stdout.write('OK\n')})});q.setTimeout(5000,()=>q.destroy());q.on('error',()=>process.exit(2));q.end(b);"#;
+const RECEIVER_PREAUTH_SCRIPT: &str = r#"'use strict';const fs=require('node:fs'),https=require('node:https');const b=fs.readFileSync(0);if(b.length!==64||!/^[0-9a-f]{64}$/.test(b.toString('ascii')))process.exit(2);const dir='/run/apicontour/live/';const q=https.request({hostname:'causal-ingress',port:8443,path:'/v1/receiver-preauth',method:'POST',servername:'causal-ingress',ca:fs.readFileSync(dir+'ca.pem'),cert:fs.readFileSync(dir+'export.pem'),key:fs.readFileSync(dir+'export.key'),rejectUnauthorized:true,agent:false,headers:{'content-type':'application/octet-stream','content-length':'64'}},r=>{let n=0;r.on('data',x=>{n+=x.length;if(n>512)q.destroy()});r.on('end',()=>{if(r.statusCode!==200)process.exit(2);process.stdout.write('OK\n')})});q.setTimeout(5000,()=>q.destroy());q.on('error',()=>process.exit(2));q.end(b);"#;
 impl DockerPolicy {
     pub(crate) async fn receiver_preauth_exec(
         &self,
@@ -1498,6 +1498,8 @@ impl DockerPolicy {
                 "exec",
                 "-i",
                 &hex(&cid),
+                "/usr/bin/env",
+                "-i",
                 "/usr/local/bin/node",
                 "-e",
                 RECEIVER_PREAUTH_SCRIPT,
