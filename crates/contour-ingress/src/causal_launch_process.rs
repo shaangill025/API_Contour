@@ -1181,10 +1181,24 @@ impl Drop for SpawnGuard {
             });
     }
 }
-pub(crate) fn launch(mut cmd: Command, deadline: Instant) -> Result<LocalProcess, ProcessError> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+pub(crate) fn launch(cmd: Command, deadline: Instant) -> Result<LocalProcess, ProcessError> {
+    launch_input(cmd, deadline, None)
+}
+fn launch_input(
+    mut cmd: Command,
+    deadline: Instant,
+    input: Option<&[u8]>,
+) -> Result<LocalProcess, ProcessError> {
+    if input.is_some_and(|bytes| bytes.len() != 64) {
+        return Err(ProcessError::Unsafe);
+    }
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     // SAFETY: setsid is async-signal-safe and does not access parent memory.
     unsafe {
         cmd.pre_exec(|| {
@@ -1197,6 +1211,12 @@ pub(crate) fn launch(mut cmd: Command, deadline: Instant) -> Result<LocalProcess
     }
     let mut guard = SpawnGuard(Some(cmd.spawn().map_err(|_| ProcessError::Io)?));
     let child = guard.0.as_mut().ok_or(ProcessError::Io)?;
+    if let Some(bytes) = input {
+        let mut stdin = child.stdin.take().ok_or(ProcessError::Io)?;
+        stdin.write_all(bytes).map_err(|_| ProcessError::Io)?;
+        drop(stdin);
+        check_deadline(deadline)?;
+    }
     let stdout = child.stdout.take().ok_or(ProcessError::Io)?;
     let stderr = child.stderr.take().ok_or(ProcessError::Io)?;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1446,6 +1466,51 @@ impl LocalAttached {
 impl Drop for LocalAttached {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Release);
+    }
+}
+// Fixed internal collector request; only the challenge arrives on private stdin.
+const RECEIVER_PREAUTH_SCRIPT: &str = r#"'use strict';const fs=require('node:fs'),https=require('node:https');const b=fs.readFileSync(0);if(b.length!==64||!/^[0-9a-f]{64}$/.test(b.toString('ascii')))process.exit(2);const dir='/run/apicontour/live/';const q=https.request({hostname:'causal-ingress',port:8443,path:'/v1/receiver-preauth',method:'POST',servername:'causal-ingress',ca:fs.readFileSync(dir+'ca.pem'),cert:fs.readFileSync(dir+'export.pem'),key:fs.readFileSync(dir+'export.key'),rejectUnauthorized:true,agent:false,headers:{'content-type':'application/json','content-length':'64'}},r=>{let n=0;r.on('data',x=>{n+=x.length;if(n>512)q.destroy()});r.on('end',()=>{if(r.statusCode!==200)process.exit(2);process.stdout.write('OK\n')})});q.setTimeout(5000,()=>q.destroy());q.on('error',()=>process.exit(2));q.end(b);"#;
+impl DockerPolicy {
+    pub(crate) async fn receiver_preauth_exec(
+        &self,
+        cid: [u8; 32],
+        challenge: &str,
+        deadline: Instant,
+    ) -> Result<(), ProcessError> {
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        if cid == [0; 32]
+            || challenge.len() != 64
+            || !challenge
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(ProcessError::Unsafe);
+        }
+        let mut cmd = Command::new(&self.binary);
+        cmd.env_clear()
+            .env("LC_ALL", "C")
+            .arg("--host")
+            .arg(format!("unix://{}", self.socket.to_string_lossy()))
+            .arg("--config")
+            .arg(&self.config)
+            .args([
+                "exec",
+                "-i",
+                &hex(&cid),
+                "/usr/local/bin/node",
+                "-e",
+                RECEIVER_PREAUTH_SCRIPT,
+            ]);
+        let bytes = launch_input(cmd, deadline, Some(challenge.as_bytes()))?
+            .wait()
+            .await?;
+        if bytes != b"OK\n" {
+            return Err(ProcessError::Unsafe);
+        }
+        check_deadline(deadline)?;
+        self.revalidate()?;
+        check_deadline(deadline)
     }
 }
 impl DockerPolicy {

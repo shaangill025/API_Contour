@@ -1,6 +1,7 @@
 //! One-request 504 mTLS ingestion, with distinct export and evidence identities.
 use crate::{
     receiver_causal_pool504::{Job, Pool},
+    receiver_preauth504::ReceiverPreauth504,
     service::{HttpLimits, IngressError, Reply, error, reply, request_id},
 };
 use bytes::Bytes;
@@ -75,6 +76,10 @@ impl ReceiverRegistry504 {
                 .collect(),
         ))
     }
+    /// No business route is authorized until an issued binding is installed.
+    pub fn pending_only() -> Self {
+        Self(Vec::new())
+    }
     fn lookup(&self, peer: &ReceiverEvidencePeer) -> Option<(Arc<Entry>, Route)> {
         self.0.iter().find_map(|e| {
             if peer.matches_pin(&e.export) {
@@ -108,6 +113,7 @@ fn route_allowed(role: Route, route: Route) -> bool {
 struct State {
     tls: ReceiverEvidenceTls,
     registry: ReceiverRegistry504,
+    preauth: Option<ReceiverPreauth504>,
     events: Pool,
     facts: Pool,
     grants: Arc<CausalGrantKeys>,
@@ -132,6 +138,9 @@ pub struct ReceiverCausalServer504 {
 struct ServingGuard(Arc<State>);
 impl Drop for ServingGuard {
     fn drop(&mut self) {
+        if let Some(broker) = &self.0.preauth {
+            broker.seal();
+        }
         self.0.events.seal();
         self.0.facts.seal();
     }
@@ -139,6 +148,20 @@ impl Drop for ServingGuard {
 impl ReceiverCausalServer504 {
     /// Both pools have dedicated database credentials and at least one slot each.
     pub fn new(config: ReceiverCausalConfig504) -> Result<Self, IngressError> {
+        Self::new_inner(config, None)
+    }
+    /// Enable the internal, one-use preauthentication route on this listener.
+    pub fn new_with_preauth(
+        config: ReceiverCausalConfig504,
+    ) -> Result<(Self, ReceiverPreauth504), IngressError> {
+        let broker = ReceiverPreauth504::new();
+        let server = Self::new_inner(config, Some(broker.clone()))?;
+        Ok((server, broker))
+    }
+    fn new_inner(
+        config: ReceiverCausalConfig504,
+        preauth: Option<ReceiverPreauth504>,
+    ) -> Result<Self, IngressError> {
         let ReceiverCausalConfig504 {
             tls,
             registry,
@@ -166,6 +189,7 @@ impl ReceiverCausalServer504 {
             state: Arc::new(State {
                 tls,
                 registry,
+                preauth,
                 events,
                 facts,
                 grants: Arc::new(grant_keys),
@@ -185,6 +209,13 @@ impl ReceiverCausalServer504 {
         if self.state.facts.begin().is_err() {
             self.state.events.shutdown().await;
             return Err(IngressError::Configuration);
+        }
+        if let Some(broker) = &self.state.preauth {
+            if broker.activate().is_err() {
+                self.state.events.shutdown().await;
+                self.state.facts.shutdown().await;
+                return Err(IngressError::Configuration);
+            }
         }
         let _serving = ServingGuard(self.state.clone());
         tokio::pin!(shutdown);
@@ -252,7 +283,7 @@ async fn connection(state: Arc<State>, socket: TcpStream, duration: Duration, de
 fn check_request<B>(request: &Request<B>) -> Result<(), (StatusCode, &'static str)> {
     if !matches!(
         request.uri().path_and_query().map(|p| p.as_str()),
-        Some("/v1/causal-events" | "/v1/causal-evidence/receiver")
+        Some("/v1/causal-events" | "/v1/causal-evidence/receiver" | "/v1/receiver-preauth")
     ) || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
     {
@@ -288,6 +319,8 @@ fn check_request<B>(request: &Request<B>) -> Result<(), (StatusCode, &'static st
     }
     let limit = if request.uri().path() == "/v1/causal-events" {
         MAX_CAUSAL_EVENT_BATCH_BYTES
+    } else if request.uri().path() == "/v1/receiver-preauth" {
+        64
     } else {
         MAX_CAUSAL_EVIDENCE_BYTES
     };
@@ -347,6 +380,25 @@ async fn handle(
 ) -> Result<Reply, IngressError> {
     let id = request_id()?;
     let fail = |s, c, r| error(s, c, r, &id);
+    if request.uri().path_and_query().map(|p| p.as_str()) == Some("/v1/receiver-preauth") {
+        let Some(broker) = &state.preauth else {
+            return fail(StatusCode::FORBIDDEN, "not_authorized", false);
+        };
+        let Some(peer) = peer else {
+            return fail(StatusCode::FORBIDDEN, "not_authorized", false);
+        };
+        if let Err((status, code)) = check_request(&request) {
+            return fail(status, code, false);
+        }
+        let body = match read_body(request.into_body(), 64).await {
+            Ok(body) => body,
+            Err((s, c, r)) => return fail(s, c, r),
+        };
+        if !broker.accept(&body, &peer) {
+            return fail(StatusCode::FORBIDDEN, "not_authorized", false);
+        }
+        return reply(StatusCode::OK, json!({"status":"accepted"}));
+    }
     let Some((entry, role)) = principal else {
         return fail(StatusCode::FORBIDDEN, "not_authorized", false);
     };
@@ -497,6 +549,39 @@ mod tests {
             [([3; 32], [4; 32])].into_iter()
         ));
         assert!(ReceiverRegistry504::new(vec![]).is_err());
+    }
+    #[test]
+    fn pending_registry_is_empty_and_preauth_request_is_bounded() {
+        let registry = ReceiverRegistry504::pending_only();
+        assert!(registry.0.is_empty());
+        let request = |method: &str, path: &str, length: &str| {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("content-length", length)
+                .body(())
+                .unwrap()
+        };
+        assert!(check_request(&request("POST", "/v1/receiver-preauth", "64")).is_ok());
+        assert_eq!(
+            check_request(&request("POST", "/v1/receiver-preauth", "65"))
+                .unwrap_err()
+                .0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            check_request(&request("POST", "/v1/receiver-preauth?x=1", "64"))
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            check_request(&request("GET", "/v1/receiver-preauth", "64"))
+                .unwrap_err()
+                .0,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
     #[test]
     fn cross_route_credentials_are_rejected() {

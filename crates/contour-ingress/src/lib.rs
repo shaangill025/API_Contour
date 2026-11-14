@@ -25,6 +25,7 @@ pub mod gateway;
 mod pool;
 mod receiver_causal_pool504;
 mod receiver_causal_service504;
+mod receiver_preauth504;
 pub mod runtime_capture;
 mod service;
 #[cfg(unix)]
@@ -63,7 +64,8 @@ pub use causal_owner::{BoundLaunchRecord, CausalIssueOwner, CausalJournalError};
 pub use causal_permit::CausalPermitOwner;
 #[cfg(unix)]
 pub use causal_receiver_deploy::{
-    Prelaunch504, ReceiverInertCreated, ReceiverInertStarted, ReceiverNetwork504, ReceiverPeer504,
+    Prelaunch504, ReceiverInertCreated, ReceiverInertStarted, ReceiverIssued504,
+    ReceiverNetwork504, ReceiverPeer504, ReceiverPreauthenticated504,
 };
 pub use causal_receiver_material::{
     LocalReceiverMaterialIdentity, ReceiverMaterialInputs, check_local_receiver_material,
@@ -81,6 +83,7 @@ pub use pool::DatabaseCapacity;
 pub use receiver_causal_service504::{
     ReceiverBinding504, ReceiverCausalConfig504, ReceiverCausalServer504, ReceiverRegistry504,
 };
+pub use receiver_preauth504::{ReceiverPossession504, ReceiverPreauth504};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},

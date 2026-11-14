@@ -196,6 +196,23 @@ pub struct ReceiverInertStarted<'a> {
     _process_start: u64,
     _started_at: String,
 }
+/// A receiver instance whose export credential was proved before any permit.
+/// It retains the original attached proxy and the original setup deadline.
+/// ```compile_fail
+/// use contour_ingress::{ReceiverPreauthenticated504, ReceiverInertStarted};
+/// fn forge<'a>(started: ReceiverInertStarted<'a>) -> ReceiverPreauthenticated504<'a> {
+///     ReceiverPreauthenticated504 { started }
+/// }
+/// ```
+pub struct ReceiverPreauthenticated504<'a> {
+    _started: ReceiverInertStarted<'a>,
+    _broker: crate::ReceiverPreauth504,
+}
+/// A confirmed receiver issue retained with its preauthenticated instance.
+pub struct ReceiverIssued504<'a> {
+    _authenticated: ReceiverPreauthenticated504<'a>,
+    _session: contour_postgres::CausalReceiverSession504,
+}
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -828,6 +845,153 @@ impl<'a> ReceiverInertCreated<'a> {
             _pid: pid,
             _process_start: start,
             _started_at: first.1,
+        })
+    }
+}
+
+impl<'a> ReceiverInertStarted<'a> {
+    /// Prove possession from a fixed Node process in this exact inspected CID.
+    /// The broker is tied to the running internal receiver listener; neither
+    /// process stdout nor any caller-supplied hash can create this stage.
+    pub async fn preauthenticate(
+        self,
+        broker: &crate::ReceiverPreauth504,
+    ) -> Result<ReceiverPreauthenticated504<'a>, LaunchObserveError> {
+        let created = &self._created;
+        let deadline = created.prelaunch.deadline;
+        created
+            .prelaunch
+            .revalidate()
+            .map_err(LaunchObserveError::Preflight)?;
+        if created.material.identity().export_leaf() != created.prelaunch.peer
+            || self._attached.cleanup().result().is_some()
+        {
+            return Err(LaunchObserveError::Invalid);
+        }
+        let before = created.inspect(&self._policy, true).await?;
+        if before.1 != self._started_at {
+            return Err(LaunchObserveError::Invalid);
+        }
+        self._policy
+            .verify_receiver_proxy_process(
+                created.cid,
+                self._pid,
+                self._process_start,
+                deadline.into(),
+            )
+            .await
+            .map_err(LaunchObserveError::Process)?;
+        let ticket = broker
+            .register(
+                created.prelaunch.original,
+                created.cid,
+                created.prelaunch.peer,
+                deadline,
+            )
+            .map_err(|_| LaunchObserveError::Invalid)?;
+        self._policy
+            .receiver_preauth_exec(created.cid, &ticket.challenge(), deadline.into())
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        let proof = ticket
+            .receive()
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        self._policy
+            .verify_receiver_proxy_process(
+                created.cid,
+                self._pid,
+                self._process_start,
+                deadline.into(),
+            )
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        let after = created
+            .inspect(&self._policy, true)
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        created
+            .prelaunch
+            .revalidate()
+            .map_err(LaunchObserveError::Preflight)?;
+        if before != after
+            || after.1 != self._started_at
+            || self._attached.cleanup().result().is_some()
+        {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        proof
+            .consume(broker, created.prelaunch.original, created.cid, deadline)
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        Ok(ReceiverPreauthenticated504 {
+            _started: self,
+            _broker: broker.clone(),
+        })
+    }
+}
+
+impl<'a> ReceiverPreauthenticated504<'a> {
+    /// Issue once with the original locked request; any uncertain outcome yields no stage.
+    pub async fn issue(
+        mut self,
+        issuer: &mut contour_postgres::CausalIssuer,
+    ) -> Result<ReceiverIssued504<'a>, LaunchObserveError> {
+        let started = &mut self._started;
+        let created = &mut started._created;
+        if !self._broker.is_active() || started._attached.cleanup().result().is_some() {
+            return Err(LaunchObserveError::Invalid);
+        }
+        created
+            .prelaunch
+            .revalidate()
+            .map_err(LaunchObserveError::Preflight)?;
+        let before = created.inspect(&started._policy, true).await?;
+        if before.1 != started._started_at {
+            return Err(LaunchObserveError::Invalid);
+        }
+        started
+            ._policy
+            .verify_receiver_proxy_process(
+                created.cid,
+                started._pid,
+                started._process_start,
+                created.prelaunch.deadline.into(),
+            )
+            .await
+            .map_err(LaunchObserveError::Process)?;
+        let pre = &mut created.prelaunch;
+        let session = pre
+            .owner
+            .issue_receiver_504_until(issuer, &pre.peer, pre.grants, pre.policies, pre.deadline)
+            .await
+            .map_err(LaunchObserveError::Preflight)?;
+        // A successful commit followed by a failed reinspection is not authority to continue.
+        if !self._broker.is_active()
+            || pre.revalidate().is_err()
+            || started._attached.cleanup().result().is_some()
+        {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        started
+            ._policy
+            .verify_receiver_proxy_process(
+                created.cid,
+                started._pid,
+                started._process_start,
+                created.prelaunch.deadline.into(),
+            )
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        let after = created
+            .inspect(&started._policy, true)
+            .await
+            .map_err(|_| LaunchObserveError::MutationUnknown)?;
+        if before != after || !self._broker.is_active() {
+            return Err(LaunchObserveError::MutationUnknown);
+        }
+        Ok(ReceiverIssued504 {
+            _authenticated: self,
+            _session: session,
         })
     }
 }

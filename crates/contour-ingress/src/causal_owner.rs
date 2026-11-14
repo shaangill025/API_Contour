@@ -428,6 +428,18 @@ impl CausalIssueOwner {
             .issue(&self.request, peer, grant_keys, policy_keys)
             .await
     }
+    pub(crate) async fn issue_receiver_504_until(
+        &mut self,
+        issuer: &mut CausalIssuer,
+        peer: &[u8; 32],
+        grant_keys: &CausalGrantKeys,
+        policy_keys: &PolicyKeys,
+        deadline: tokio::time::Instant,
+    ) -> Result<contour_postgres::CausalReceiverSession504, CausalError> {
+        issuer
+            .issue_receiver_504_until(&self.request, peer, grant_keys, policy_keys, deadline)
+            .await
+    }
     pub(crate) async fn issue_until(
         &mut self,
         issuer: &mut CausalIssuer,
