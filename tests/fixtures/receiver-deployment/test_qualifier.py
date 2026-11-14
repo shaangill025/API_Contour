@@ -44,6 +44,59 @@ class QualifierTests(unittest.TestCase):
         except RuntimeError as error: kind,frames,mapped=diagnostic(error)
         self.assertEqual(frames[-1],{'file':'qualify-origin21-onboarding.py','line':1})
         self.assertIsNone(mapped)
+    def test_preauth_is_opt_in_and_input_shape_is_closed(self):
+        keys=('docker','docker_sha256','socket','docker_config','python','python_sha256','openssl','openssl_sha256','source_root','stage_root','image_sha256','architecture','owner_sha256','grant_public','policy_public','grant','policy','peer','nonce','issue_dir','journal_dir','source_identity','key_identity','network','network_name','network_owner')
+        value={key:'ab'*32 for key in keys}; value['architecture']='arm64'; value['ids']=['id']*10
+        value['material']={key:'/private/'+key for key in ('marker_seed','product_cert','product_key','export_cert','export_key','server_cert','server_key','evidence_cert','evidence_key','ca','server_name')}
+        self.assertIs(Q['input_schema'](value),value)
+        value['preauth']={'collector_cert':'/private/collector.pem','collector_key':'/private/collector.key','collector_ca':'/private/ca.pem'}
+        with self.assertRaises(ValueError): Q['input_schema'](value)
+        self.assertIs(Q['input_schema'](value,True),value)
+        for bad in ({},dict(value['preauth'],relay_cid='ab'*32),dict(value['preauth'],url='https://other'),dict(value['preauth'],collector_key=None)):
+            candidate=dict(value,preauth=bad)
+            with self.assertRaises(ValueError): Q['input_schema'](candidate,True)
+        with self.assertRaises(ValueError): Q['input_schema'](dict(value,preauth=None),True)
+
+    def test_preauth_probe_result_requires_exact_opt_in_marker(self):
+        image=b'receiver504_image_config=sha256:'+b'a'*64+b'\n'
+        ordinary=image+b'receiver504_deployment=pass\n\n'
+        authenticated=image+b'receiver504_preauth=pass\nreceiver504_deployment=pass\n\n'
+        self.assertEqual(Q['probe_result'](ordinary)[0],('pass',None))
+        self.assertEqual(Q['probe_result'](authenticated,True)[0],('pass',None))
+        for body,mode in ((authenticated,False),(ordinary,True),(image+b'receiver504_preauth=pass\nreceiver504_deployment=fail phase=preauth\n\n',True)):
+            with self.assertRaises(ValueError): Q['probe_result'](body,mode)
+
+    def test_fixed_relay_literal_matches_probe_and_emits_newline(self):
+        import ast,re
+        source=(Path(Q['ROOT'])/'crates/contour-ingress/examples/receiver_deployment_probe.rs').read_text()
+        match=re.search(r'^const RELAY: &str = ("(?:[^"\\]|\\.)*");$',source,re.MULTILINE)
+        self.assertIsNotNone(match)
+        rust_literal=ast.literal_eval(match.group(1))
+        self.assertEqual(rust_literal,Q['RELAY_SCRIPT'])
+        self.assertIn("process.stdout.write('READY\\n')",rust_literal)
+        self.assertNotIn("process.stdout.write('READY\n')",rust_literal)
+
+    def test_relay_ownership_topology_and_generation(self):
+        import copy
+        token='a'*64; cid='b'*64; image='sha256:'+'c'*64; config='sha256:'+'d'*64; internal='e'*64; external='f'*64
+        name='internal'; external_name='external'; stamp='2026-11-14T08:03:00Z'; descriptor={'digest':'sha256:'+'3'*64}
+        relay={'Id':cid,'Name':'/contour-receiver-relay-'+token,'Image':config,'ImageManifestDescriptor':descriptor,'RestartCount':0,
+            'Config':{'Image':image,'Labels':{Q['LABEL']:token},'Entrypoint':['/usr/bin/env'],'Cmd':['-i','/usr/local/bin/node','-e',Q['RELAY_SCRIPT']],'User':'1000:1000'},
+            'HostConfig':{'NetworkMode':name,'ReadonlyRootfs':True,'Privileged':False,'CapDrop':['ALL'],'CapAdd':None,'Devices':None,'SecurityOpt':['no-new-privileges'],'Memory':134217728,'PidsLimit':32,'Tmpfs':{'/data':'rw,noexec,nosuid,size=16m'},'PortBindings':None,'PublishAllPorts':False,'Binds':None,'AutoRemove':False,'RestartPolicy':{'Name':'no'}},
+            'State':{'Running':True,'Status':'running','Pid':5,'StartedAt':stamp},'Mounts':[],
+            'NetworkSettings':{'Networks':{name:{'NetworkID':internal,'Aliases':['causal-ingress']},external_name:{'NetworkID':external,'Aliases':[]}}}}
+        check=lambda item: Q['validate_relay'](item,cid,token,image,descriptor,name,internal,external_name,external)
+        self.assertEqual(check(relay),(config[7:],stamp))
+        for path,val in [(('Config','Cmd'),['other']),(('Config','Labels',Q['LABEL']),'0'*64),(('State','StartedAt'),'0001-01-01T00:00:00Z'),(('State','Running'),False),(('HostConfig','Privileged'),True),(('HostConfig','PortBindings'),{'8443/tcp':[{}]}),(('NetworkSettings','Networks',name,'Aliases'),['wrong']),(('NetworkSettings','Networks',external_name,'NetworkID'),'0'*64)]:
+            bad=copy.deepcopy(relay); cur=bad
+            for part in path[:-1]: cur=cur[part]
+            cur[path[-1]]=val
+            with self.assertRaises(ValueError): check(bad)
+        stopped=copy.deepcopy(relay); stopped['State'].update(Running=False,Status='exited',Pid=0)
+        Q['validate_stopped_relay'](stopped,cid,token,relay,stamp)
+        stopped['State']['StartedAt']='2026-11-14T08:04:00Z'
+        with self.assertRaises(ValueError): Q['validate_stopped_relay'](stopped,cid,token,relay,stamp)
+
     def test_duplicate_and_oversize_json_rejected(self):
         with self.assertRaises(ValueError): Q['parse'](b'{"x":1,"x":2}')
         with self.assertRaises(ValueError): Q['parse'](b' '*32769)

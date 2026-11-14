@@ -61,7 +61,8 @@ impl ReceiverPreauth504 {
         l.active = true;
         Ok(())
     }
-    pub(crate) fn is_active(&self) -> bool {
+    /// Read-only readiness; does not grant or register authority.
+    pub fn is_active(&self) -> bool {
         self.0.lock().is_ok_and(|l| l.active && !l.closed)
     }
     pub(crate) fn seal(&self) {

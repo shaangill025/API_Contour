@@ -5,8 +5,16 @@ use contour_ingress::{
     CausalIssueOwner, DockerPolicy, OwnerLabel, Prelaunch504, ReceiverCandidateSources,
     ReceiverImageRequest, ReceiverMaterialPaths, check_receiver_material, observe_receiver_image,
 };
-use contour_postgres::{CausalBinding, CausalIssue};
+use contour_ingress::{
+    DockerInspect, HttpLimits, ReceiverCausalConfig504, ReceiverCausalServer504,
+    ReceiverRegistry504,
+};
+use contour_postgres::{
+    CausalBinding, CausalIssue, DatabaseSettings, ReceiverEvidenceTls, TrustedCa,
+};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use serde::Deserialize;
+use serde_json::Value;
 use std::{
     fs::File,
     io::{self, Read},
@@ -63,6 +71,20 @@ struct Input {
     network: String,
     network_name: String,
     network_owner: String,
+    #[serde(default)]
+    preauth: Option<Preauth>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Preauth {
+    collector_cert: PathBuf,
+    collector_key: PathBuf,
+    collector_ca: PathBuf,
+    relay_cid: String,
+    relay_image: String,
+    relay_owner: String,
+    external_network: String,
+    external_name: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -107,6 +129,82 @@ fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, ()> {
 }
 fn public(path: &Path) -> Result<[u8; 32], ()> {
     read_file(path, 32)?.try_into().map_err(|_| ())
+}
+// Fixture-only raw TLS relay. It never sees plaintext or receives credentials.
+const RELAY: &str = "'use strict';const n=require('node:net');let live=0;const server=n.createServer(c=>{if(live>=16){c.destroy();return}live++;let done=false;const end=()=>{if(!done){done=true;live--;c.destroy();u.destroy()}};const u=n.connect({host:'host.docker.internal',port:18443});c.setTimeout(8000,end);u.setTimeout(8000,end);c.on('error',end);u.on('error',end);c.on('close',end);u.on('close',end);c.pipe(u);u.pipe(c)});server.listen(8443,'0.0.0.0',()=>process.stdout.write('READY\\n'));setTimeout(()=>server.close(),540000).unref();";
+struct ListenerGuard {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Result<(), contour_ingress::IngressError>>,
+}
+impl Drop for ListenerGuard {
+    fn drop(&mut self) {
+        self.stop.take();
+        self.task.abort();
+    }
+}
+async fn relay_snapshot(
+    docker: &DockerPolicy,
+    p: &Preauth,
+    internal_name: &str,
+    internal: [u8; 32],
+    image_ref: &str,
+    deadline: Instant,
+) -> Result<Value, ()> {
+    let cid = digest(&p.relay_cid)?;
+    let image = digest(&p.relay_image)?;
+    let owner = digest(&p.relay_owner)?;
+    let external = digest(&p.external_network)?;
+    let raw = docker
+        .inspect(DockerInspect::Container(cid), deadline)
+        .map_err(|_| ())?
+        .wait()
+        .await
+        .map_err(|_| ())?;
+    let value: Value = serde_json::from_slice(&raw).map_err(|_| ())?;
+    let rows = value.as_array().ok_or(())?;
+    if rows.len() != 1 {
+        return Err(());
+    }
+    let item = &rows[0];
+    let cfg = &item["Config"];
+    let host = &item["HostConfig"];
+    let state = &item["State"];
+    let networks = item["NetworkSettings"]["Networks"].as_object().ok_or(())?;
+    let id_hex = |x: &[u8; 32]| x.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    if item["Id"].as_str() != Some(id_hex(&cid).as_str())
+        || item["Image"].as_str() != Some(format!("sha256:{}", id_hex(&image)).as_str())
+        || cfg["Image"].as_str() != Some(image_ref)
+        || cfg["Labels"]["org.apicontour.fixture-owner"].as_str() != Some(id_hex(&owner).as_str())
+        || cfg["Entrypoint"] != serde_json::json!(["/usr/bin/env"])
+        || cfg["Cmd"] != serde_json::json!(["-i", "/usr/local/bin/node", "-e", RELAY])
+        || cfg["User"].as_str() != Some("1000:1000")
+        || host["ReadonlyRootfs"] != true
+        || host["Privileged"] != false
+        || host["PublishAllPorts"] != false
+        || !host["PortBindings"].is_null() && host["PortBindings"] != serde_json::json!({})
+        || state["Running"] != true
+        || state["Status"].as_str() != Some("running")
+        || state["Pid"].as_u64().is_none_or(|v| v == 0)
+        || state["StartedAt"]
+            .as_str()
+            .is_none_or(|v| v.is_empty() || v.starts_with("0001-"))
+        || networks.len() != 2
+        || networks
+            .get(internal_name)
+            .and_then(|x| x["NetworkID"].as_str())
+            != Some(id_hex(&internal).as_str())
+        || networks
+            .get(&p.external_name)
+            .and_then(|x| x["NetworkID"].as_str())
+            != Some(id_hex(&external).as_str())
+        || !networks
+            .get(internal_name)
+            .and_then(|x| x["Aliases"].as_array())
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("causal-ingress")))
+    {
+        return Err(());
+    }
+    Ok(item.clone())
 }
 fn run() -> Result<(), &'static str> {
     if std::env::args_os().len() != 1 {
@@ -197,6 +295,108 @@ fn run() -> Result<(), &'static str> {
         .map_err(|_| "material")?;
         let prelaunch =
             Prelaunch504::prepare(owner, peer, &grants, &policies).map_err(|_| "preflight")?;
+        let mut peers = Vec::new();
+        let mut listener = None;
+        let mut broker = None;
+        let relay_before = if let Some(ref p) = input.preauth {
+            let cert_pem = read_file(&p.collector_cert, 65536).map_err(|_| "preauth_config")?;
+            let key_pem = read_file(&p.collector_key, 65536).map_err(|_| "preauth_config")?;
+            let ca_pem = read_file(&p.collector_ca, 65536).map_err(|_| "preauth_config")?;
+            if ca_pem != read_file(&paths.ca, 65536).map_err(|_| "preauth_config")? {
+                return Err("preauth_config");
+            }
+            let cert = CertificateDer::from_pem_slice(&cert_pem).map_err(|_| "preauth_config")?;
+            let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|_| "preauth_config")?;
+            let ca = CertificateDer::from_pem_slice(&ca_pem).map_err(|_| "preauth_config")?;
+            let tls = ReceiverEvidenceTls::from_der(
+                &[cert.as_ref()],
+                key.secret_der(),
+                &[ca.as_ref()],
+                Duration::from_secs(5),
+            )
+            .map_err(|_| "preauth_config")?;
+            let settings = || {
+                DatabaseSettings::new(
+                    "localhost",
+                    1,
+                    "unused",
+                    "unused",
+                    b"unused",
+                    Duration::from_secs(5),
+                )
+                .map_err(|_| "preauth_config")
+            };
+            let trust = || TrustedCa::from_pem(&ca_pem).map_err(|_| "preauth_config");
+            let cfg = ReceiverCausalConfig504 {
+                tls,
+                registry: ReceiverRegistry504::pending_only(),
+                event_database: settings()?,
+                event_trust: trust()?,
+                fact_database: settings()?,
+                fact_trust: trust()?,
+                grant_keys: CausalGrantKeys::new(&[("fixture", grant_key)])
+                    .map_err(|_| "preauth_config")?,
+                policy_keys: PolicyKeys::new(&[("fixture", policy_key)])
+                    .map_err(|_| "preauth_config")?,
+                limits: HttpLimits::new(8, Duration::from_secs(5))
+                    .map_err(|_| "preauth_config")?
+                    .with_database_sessions(2)
+                    .map_err(|_| "preauth_config")?,
+                event_slots: 1,
+            };
+            let socket = tokio::net::TcpListener::bind("127.0.0.1:18443")
+                .await
+                .map_err(|_| "preauth_listener")?;
+            let (server, handle) =
+                ReceiverCausalServer504::new_with_preauth(cfg).map_err(|_| "preauth_config")?;
+            let (stop, shutdown) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                server
+                    .serve(socket, async {
+                        let _ = shutdown.await;
+                    })
+                    .await
+            });
+            listener = Some(ListenerGuard {
+                stop: Some(stop),
+                task,
+            });
+            let ready = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !handle.is_active() {
+                if tokio::time::Instant::now() >= ready
+                    || listener.as_ref().is_none_or(|v| v.task.is_finished())
+                {
+                    return Err("preauth_listener");
+                }
+                tokio::task::yield_now().await;
+            }
+            let relay = relay_snapshot(
+                &docker,
+                p,
+                &input.network_name,
+                network_id,
+                &format!("sha256:{}", input.image_sha256),
+                deadline,
+            )
+            .await
+            .map_err(|_| "preauth_relay")?;
+            peers.push(
+                prelaunch
+                    .inspect_peer(
+                        &docker,
+                        digest(&p.relay_cid).map_err(|_| "input")?,
+                        digest(&p.relay_image).map_err(|_| "input")?,
+                        OwnerLabel::Fixture,
+                        digest(&p.relay_owner).map_err(|_| "input")?,
+                    )
+                    .await
+                    .map_err(|_| "preauth_relay")?,
+            );
+            broker = Some(handle);
+            Some(relay)
+        } else {
+            None
+        };
         let network = prelaunch
             .inspect_network(
                 &docker,
@@ -204,7 +404,7 @@ fn run() -> Result<(), &'static str> {
                 &input.network_name,
                 OwnerLabel::Fixture,
                 network_owner,
-                Vec::new(),
+                peers,
             )
             .await
             .map_err(|_| "network")?;
@@ -223,7 +423,43 @@ fn run() -> Result<(), &'static str> {
             .verify_created(&docker)
             .await
             .map_err(|_| "verify_created")?;
-        let started = created.start(docker).await.map_err(|_| "start")?;
+        let started = created.start(docker.clone()).await.map_err(|_| "start")?;
+        if let Some(p) = input.preauth.as_ref() {
+            let broker = broker.as_ref().ok_or("preauth_config")?;
+            let before = relay_before.ok_or("preauth_relay")?;
+            let authenticated = started
+                .preauthenticate(broker)
+                .await
+                .map_err(|_| "preauth")?;
+            let after = relay_snapshot(
+                &docker,
+                p,
+                &input.network_name,
+                network_id,
+                &format!("sha256:{}", input.image_sha256),
+                deadline,
+            )
+            .await
+            .map_err(|_| "preauth_relay")?;
+            if before != after {
+                return Err("preauth_relay");
+            }
+            drop(authenticated);
+            let mut server = listener.take().ok_or("preauth_listener")?;
+            server
+                .stop
+                .take()
+                .ok_or("preauth_listener")?
+                .send(())
+                .map_err(|_| "preauth_listener")?;
+            tokio::time::timeout(Duration::from_secs(5), &mut server.task)
+                .await
+                .map_err(|_| "preauth_listener")?
+                .map_err(|_| "preauth_listener")?
+                .map_err(|_| "preauth_listener")?;
+            println!("receiver504_preauth=pass");
+            return Ok(());
+        }
         // Dropping the attach closes the private stream; it can cause the proxy to exit.
         drop(started);
         Ok(())
@@ -269,6 +505,20 @@ mod tests {
         assert!(parse_input(&serde_json::to_vec(&missing).unwrap()).is_err());
         assert!(parse_input(&vec![b' '; INPUT_LIMIT as usize + 1]).is_err());
         assert!(read_bounded(&b"abcd"[..], 3).is_err());
+    }
+    #[test]
+    fn preauth_input_is_explicit_and_closed() {
+        let mut value = input();
+        value["preauth"] = json!({"collector_cert":"/collector.pem","collector_key":"/collector.key","collector_ca":"/ca.pem","relay_cid":"ab".repeat(32),"relay_image":"ab".repeat(32),"relay_owner":"ab".repeat(32),"external_network":"ab".repeat(32),"external_name":"private"});
+        assert!(parse_input(&serde_json::to_vec(&value).unwrap()).is_ok());
+        value["preauth"]["url"] = json!("https://elsewhere");
+        assert!(parse_input(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["preauth"].as_object_mut().unwrap().remove("url");
+        value["preauth"]
+            .as_object_mut()
+            .unwrap()
+            .remove("relay_cid");
+        assert!(parse_input(&serde_json::to_vec(&value).unwrap()).is_err());
     }
     #[test]
     fn digest_and_architecture_are_closed() {

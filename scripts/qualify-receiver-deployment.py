@@ -19,6 +19,8 @@ LABEL = 'org.apicontour.fixture-owner'
 LIMIT = 32768
 CURRENT_OWNER = None
 CURRENT_PHASE = 'input'
+# This fixed fixture relay forwards encrypted bytes only; it owns no key material.
+RELAY_SCRIPT = "'use strict';const n=require('node:net');let live=0;const server=n.createServer(c=>{if(live>=16){c.destroy();return}live++;let done=false;const end=()=>{if(!done){done=true;live--;c.destroy();u.destroy()}};const u=n.connect({host:'host.docker.internal',port:18443});c.setTimeout(8000,end);u.setTimeout(8000,end);c.on('error',end);u.on('error',end);c.on('close',end);u.on('close',end);c.pipe(u);u.pipe(c)});server.listen(8443,'0.0.0.0',()=>process.stdout.write('READY\\n'));setTimeout(()=>server.close(),540000).unref();"
 
 def pairs(items):
     result = {}
@@ -31,11 +33,14 @@ def parse(raw):
     if len(raw) > LIMIT: raise ValueError('input size')
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('number')))
 
-def input_schema(value):
+def input_schema(value, preauth=False):
+    if type(preauth) is not bool: raise ValueError('preauth mode')
     fields = {'docker','docker_sha256','socket','docker_config','python','python_sha256','openssl','openssl_sha256','source_root','stage_root','image_sha256','architecture','owner_sha256','material','grant_public','policy_public','grant','policy','peer','ids','nonce','issue_dir','journal_dir','source_identity','key_identity','network','network_name','network_owner'}
     material = {'marker_seed','product_cert','product_key','export_cert','export_key','server_cert','server_key','evidence_cert','evidence_key','ca','server_name'}
+    if preauth: fields.add('preauth')
     if type(value) is not dict or set(value) != fields or type(value['material']) is not dict or set(value['material']) != material: raise ValueError('input schema')
-    if any(type(v) is not str for k,v in value.items() if k not in ('material','ids')) or any(type(v) is not str for v in value['material'].values()): raise ValueError('input types')
+    if preauth and (type(value['preauth']) is not dict or set(value['preauth']) != {'collector_cert','collector_key','collector_ca'} or any(type(v) is not str for v in value['preauth'].values())): raise ValueError('preauth input')
+    if any(type(v) is not str for k,v in value.items() if k not in ('material','ids','preauth')) or any(type(v) is not str for v in value['material'].values()): raise ValueError('input types')
     if type(value['ids']) is not list or len(value['ids']) != 10 or any(type(v) is not str for v in value['ids']): raise ValueError('input ids')
     if value['architecture'] not in ('arm64','amd64'): raise ValueError('architecture')
     for key in ('docker_sha256','python_sha256','openssl_sha256','image_sha256','owner_sha256','peer','source_identity','key_identity'):
@@ -89,6 +94,45 @@ def inspect_one(raw):
 def validate_network(item, ident, name, token, members):
     if item.get('Id')!=ident or item.get('Name')!=name or item.get('Internal') is not True or item.get('Driver')!='bridge' or (item.get('Labels') or {}).get(LABEL)!=token or type(item.get('Containers')) is not dict or set(item['Containers'])!=set(members): raise ValueError('network drift')
 
+def validate_external_network(item, ident, name, token, members):
+    if (item.get('Id')!=ident or item.get('Name')!=name or item.get('Internal') is not False or item.get('Driver')!='bridge'
+        or (item.get('Labels') or {}).get(LABEL)!=token or type(item.get('Containers')) is not dict or set(item['Containers'])!=set(members)):
+        raise ValueError('external network drift')
+
+def validate_relay(item, cid, token, image, descriptor, internal_name, internal_id, external_name, external_id):
+    cfg=item.get('Config') or {};host=item.get('HostConfig') or {};state=item.get('State') or {}
+    nets=(item.get('NetworkSettings') or {}).get('Networks')
+    image_id=item.get('Image','')
+    if (item.get('Id')!=cid or item.get('Name')!='/contour-receiver-relay-'+token
+        or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id) or cfg.get('Image')!=image
+        or not same_json(item.get('ImageManifestDescriptor'),descriptor) or (cfg.get('Labels') or {}).get(LABEL)!=token
+        or cfg.get('Entrypoint')!=['/usr/bin/env'] or cfg.get('Cmd')!=['-i','/usr/local/bin/node','-e',RELAY_SCRIPT]
+        or cfg.get('User')!='1000:1000' or host.get('NetworkMode')!=internal_name
+        or host.get('ReadonlyRootfs') is not True or host.get('Privileged') is not False
+        or host.get('CapDrop')!=['ALL'] or host.get('CapAdd') not in (None,[]) or host.get('Devices') not in (None,[])
+        or host.get('SecurityOpt') not in (['no-new-privileges'],['no-new-privileges:true'])
+        or host.get('Memory')!=134217728 or host.get('PidsLimit')!=32 or host.get('Tmpfs')!={'/data':'rw,noexec,nosuid,size=16m'}
+        or host.get('PortBindings') not in (None,{}) or host.get('PublishAllPorts') is not False
+        or host.get('Binds') not in (None,[]) or host.get('AutoRemove') is not False
+        or (host.get('RestartPolicy') or {}).get('Name')!='no' or item.get('RestartCount')!=0
+        or type(nets) is not dict or set(nets)!={internal_name,external_name}
+        or (nets.get(internal_name) or {}).get('NetworkID')!=internal_id or (nets.get(external_name) or {}).get('NetworkID')!=external_id
+        or 'causal-ingress' not in ((nets.get(internal_name) or {}).get('Aliases') or [])
+        or state.get('Running') is not True or state.get('Status')!='running' or type(state.get('Pid')) is not int or state['Pid']<1):
+        raise ValueError('relay configuration')
+    stamp=state.get('StartedAt')
+    if not isinstance(stamp,str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z',stamp) or stamp.startswith('0001-'): raise ValueError('relay generation')
+    mounts=item.get('Mounts')
+    if type(mounts) is not list or any(m.get('Type')!='tmpfs' or m.get('Destination')!='/data' for m in mounts) or len(mounts)>1: raise ValueError('relay mounts')
+    return image_id.removeprefix('sha256:'),stamp
+
+def validate_stopped_relay(item, cid, token, original, started):
+    cfg=item.get('Config') or {};state=item.get('State') or {}
+    if (item.get('Id')!=cid or (cfg.get('Labels') or {}).get(LABEL)!=token or state.get('Running') is not False
+        or state.get('Status')!='exited' or state.get('Pid')!=0 or state.get('StartedAt')!=started
+        or any(not same_json(item.get(k),original.get(k)) for k in ('Id','Name','Image','Config','HostConfig','Mounts'))):
+        raise ValueError('relay stopped generation')
+
 def journal_records(intent, cid, image, network):
     prefix=b'apicontour/local-create-intent/1\n'
     if len(intent)!=len(prefix)+160 or not intent.startswith(prefix): raise ValueError('intent')
@@ -130,7 +174,7 @@ def validate_container(item,cid,token,image,name,network,descriptor,started=None
 
 
 def record(owner,name,value):
-    if name not in ('network-intent.json','network-id.json','probe-input.json','inspect-before.json','inspect-after.json','receipt.json'): raise ValueError('record')
+    if name not in ('network-intent.json','network-id.json','probe-input.json','inspect-before.json','inspect-after.json','receipt.json','relay-intent.json','relay-id.json','relay-before.json','relay-after.json','external-network-intent.json','external-network-id.json'): raise ValueError('record')
     owner.verify()
     raw=json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
     if len(raw)>1048576: raise ValueError('record size')
@@ -146,24 +190,25 @@ def fresh_dir(owner,name):
     if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o700: raise ValueError('directory')
     return path,(st.st_dev,st.st_ino,st.st_mode,st.st_uid)
 
-def probe_result(raw):
+def probe_result(raw, preauth=False):
     # Runner log consists of stdout, one separator newline, then stderr.
     if not raw.endswith(b'\n'): raise ValueError('probe log')
-    lines=raw[:-1].splitlines(); image=[]; result=[]
+    lines=raw[:-1].splitlines(); image=[]; result=[]; proof=[]
     for line in lines:
         if line.startswith(b'receiver504_image_config='):
             text=line[len(b'receiver504_image_config='):].decode('ascii')
             if not re.fullmatch(r'sha256:[0-9a-f]{64}',text): raise ValueError('probe config')
             image.append(text)
+        if line==b'receiver504_preauth=pass': proof.append(True)
         if line==b'receiver504_deployment=pass': result.append(('pass',None))
         elif line.startswith(b'receiver504_deployment=fail phase='):
             phase=line.split(b'=')[-1].decode('ascii')
-            if phase not in ('input','request','docker','runtime','image','sources','material','preflight','network','create','verify_created','start'): raise ValueError('probe phase')
+            if phase not in ('input','request','docker','runtime','image','sources','material','preflight','network','create','verify_created','start') and (not preauth or phase not in ('preauth_config','preauth_listener','preauth_relay','preauth')): raise ValueError('probe phase')
             result.append(('fail',phase))
-    if len(result)!=1 or len(image)>1 or len(lines)!=len(result)+len(image) or (result[0][0]=='pass' and len(image)!=1): raise ValueError('probe result')
+    if len(result)!=1 or len(image)>1 or len(proof)>1 or len(lines)!=len(result)+len(image)+len(proof) or (result[0][0]=='pass' and (len(image)!=1 or len(proof)!=(1 if preauth else 0))) or (proof and (not preauth or result[0][0]!='pass')): raise ValueError('probe result')
     return result[0], image[0] if image else None
 
-def execute_probe(runner, artifact, input_path, owner, timeout):
+def execute_probe(runner, artifact, input_path, owner, timeout, preauth=False):
     if timeout <= 0: raise TimeoutError('probe deadline')
     # Fixed shell only supplies private stdin and reports the child's actual exit.
     # Runner retains the leader while checking its process group; exceptions
@@ -175,17 +220,17 @@ def execute_probe(runner, artifact, input_path, owner, timeout):
     if match is None: raise ValueError('probe trailer or stderr')
     status=int(match.group(1))
     if status>255: raise ValueError('probe exit')
-    parsed,config=probe_result(raw[:match.start()]+b'\n')
+    parsed,config=probe_result(raw[:match.start()]+b'\n',preauth)
     if (parsed[0]=='pass') != (status==0): raise ValueError('probe exit status')
     return parsed,config
 
 
-def main(path):
+def main(path, preauth=False):
     global CURRENT_OWNER, CURRENT_PHASE
     phase='input'; output=None; network_id=None; network_attempted=False; probe_attempted=False
     probe_ok=False; config_digest=None; outcome='fail'; cleanup='not_attempted'; result_phase='input'
     start=time.monotonic(); deadline=start+600
-    raw, original=snapshot_file(path,LIMIT,mode=0o600); data=input_schema(parse(raw))
+    raw, original=snapshot_file(path,LIMIT,mode=0o600); data=input_schema(parse(raw),preauth)
     if Path(data['source_root'])!=ROOT: raise ValueError('source root')
     parent=Path(path).parent
     pst=os.lstat(parent)
@@ -220,7 +265,11 @@ def main(path):
     tools=[(p,h,tool(p,h),tuple(meta['_path'](p))) for p,h in supplied]
     socket=tuple(meta['_socket'](data['socket'])); config=tuple(meta['_config'](data['docker_config']))
     filepaths=[data[k] for k in ('grant_public','policy_public','grant','policy')]+[v for k,v in data['material'].items() if k!='server_name']
+    if preauth:
+        snapshot_file(data['preauth']['collector_key'],65536,mode=0o600)
+        filepaths+=list(data['preauth'].values())
     snapshots=[(p,snapshot_file(p,1048576)[1],tuple(meta['_path'](p))) for p in filepaths]
+    if preauth and snapshot_file(data['preauth']['collector_ca'],65536)[0]!=snapshot_file(data['material']['ca'],65536)[0]: raise ValueError('preauth CA mismatch')
     target,target_id=fresh_dir(output,'target'); stage,stage_id=fresh_dir(output,'stage'); issue,issue_id=fresh_dir(output,'issue'); journal,journal_id=fresh_dir(output,'journal')
     dirs=[(target,target_id),(stage,stage_id),(issue,issue_id),(journal,journal_id)]
     owned_inputs=[]
@@ -258,15 +307,49 @@ def main(path):
     if not HEX.fullmatch(network_id): network_id=None;raise ValueError('network receipt')
     record(output,'network-id.json',{'id':network_id})
     validate_network(inspect(['network','inspect',network_id]),network_id,name,token,[])
+    relay_id=external_id=None
+    external_name='';relay_identity=None;relay_started=None
+    if preauth:
+        external_name='contour-receiver504-host-'+secrets.token_hex(16)
+        record(output,'external-network-intent.json',{'version':1,'name':external_name,'owner':token})
+        external_id=docker(['network','create','--driver','bridge','--label',LABEL+'='+token,external_name]).decode('ascii')
+        if not HEX.fullmatch(external_id): external_id=None; raise ValueError('external network receipt')
+        record(output,'external-network-id.json',{'id':external_id})
+        validate_external_network(inspect(['network','inspect',external_id]),external_id,external_name,token,[])
+        image_ref='sha256:'+data['image_sha256']
+        descriptor=selected_descriptor(inspect(['image','inspect','--platform','linux/'+data['architecture'],image_ref]),data['architecture'])
+        record(output,'relay-intent.json',{'version':1,'image':image_ref,'owner':token,'internal':network_id,'external':external_id})
+        relay_id=docker(['create','--name','contour-receiver-relay-'+token,'--label',LABEL+'='+token,'--network',name,'--network-alias','causal-ingress','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','128m','--pids-limit','32','--tmpfs','/data:rw,noexec,nosuid,size=16m','--user','1000:1000','--entrypoint','/usr/bin/env',image_ref,'-i','/usr/local/bin/node','-e',RELAY_SCRIPT]).decode('ascii')
+        if not HEX.fullmatch(relay_id): relay_id=None; raise ValueError('relay receipt')
+        record(output,'relay-id.json',{'id':relay_id})
+        docker(['network','connect',external_id,relay_id])
+        docker(['start',relay_id])
+        ready_deadline=min(deadline,time.monotonic()+15)
+        while True:
+            relay=inspect(['container','inspect',relay_id])
+            relay_identity,relay_started=validate_relay(relay,relay_id,token,image_ref,descriptor,name,network_id,external_name,external_id)
+            logs=docker(['logs',relay_id])
+            if logs==b'READY': break
+            if logs or time.monotonic()>=ready_deadline: raise ValueError('relay readiness')
+            time.sleep(.05)
+        validate_network(inspect(['network','inspect',network_id]),network_id,name,token,[relay_id])
+        validate_external_network(inspect(['network','inspect',external_id]),external_id,external_name,token,[relay_id])
+        record(output,'relay-before.json',relay)
+        data['preauth'].update(relay_cid=relay_id,relay_image=relay_identity,relay_owner=token,external_network=external_id,external_name=external_name)
     data.update(stage_root=str(stage),issue_dir=str(issue),journal_dir=str(journal),network=network_id,network_name=name,network_owner=token)
     record(output,'probe-input.json',data)
     owned_inputs.append((output.path/'probe-input.json',snapshot_file(output.path/'probe-input.json',LIMIT,mode=0o600)[1]))
     if snapshot_file(artifact,268435456,executable=True)[1]!=artifact_id: raise ValueError('probe drift')
     fences(); phase='probe';CURRENT_PHASE=phase;probe_attempted=True
-    (status,result_phase),config_digest=execute_probe(runner,artifact,output.path/'probe-input.json',output,min(540,deadline-time.monotonic()))
+    (status,result_phase),config_digest=execute_probe(runner,artifact,output.path/'probe-input.json',output,min(540,deadline-time.monotonic()),preauth)
     fences()
     if snapshot_file(artifact,268435456,executable=True)[1]!=artifact_id: raise ValueError('probe drift')
     probe_ok=status=='pass';outcome=status
+    if preauth:
+        relay_after=inspect(['container','inspect',relay_id])
+        identity,started=validate_relay(relay_after,relay_id,token,'sha256:'+data['image_sha256'],descriptor,name,network_id,external_name,external_id)
+        if identity!=relay_identity or started!=relay_started or relay_after!=relay: raise ValueError('relay drift')
+        record(output,'relay-after.json',relay_after)
     if not probe_ok and result_phase in ('create','start'): raise ValueError('unknown mutation')
     phase='cleanup';CURRENT_PHASE=phase
     image_args=['image','inspect','--platform','linux/'+data['architecture'],'sha256:'+data['image_sha256']]
@@ -295,7 +378,7 @@ def main(path):
         second=inspect(['container','inspect',cid]);validate_container(second,cid,owner_token,data['image_sha256'],name,network_id,descriptor,stamp)
         if any(first.get(k)!=second.get(k) for k in ('Id','Name','Image','Config','HostConfig','Mounts')): raise ValueError('container changed')
         if snapshot_file(intent_path,512,mode=0o600)[1]!=intent_id or snapshot_file(cid_path,128,mode=0o600)[1]!=cid_id: raise ValueError('journal drift')
-        members=[cid] if (second.get('State') or {}).get('Running') is True else []
+        members=([relay_id] if preauth else [])+([cid] if (second.get('State') or {}).get('Running') is True else [])
         validate_network(inspect(['network','inspect',network_id]),network_id,name,token,members)
         verify_image()
         if (second.get('State') or {}).get('Running') is True: docker(['stop','--time','2',cid])
@@ -303,18 +386,30 @@ def main(path):
         record(output,'inspect-after.json',stopped);verify_image();docker(['container','rm',cid])
         if docker(['container','ls','-a','--no-trunc','--filter','id='+cid,'--format','{{.ID}}']): raise ValueError('container removal unknown')
     elif cid_path.exists() or start_path.exists(): raise ValueError('incomplete journal')
+    if preauth:
+        validate_network(inspect(['network','inspect',network_id]),network_id,name,token,[relay_id])
+        validate_external_network(inspect(['network','inspect',external_id]),external_id,external_name,token,[relay_id])
+        final=inspect(['container','inspect',relay_id]); identity,started=validate_relay(final,relay_id,token,'sha256:'+data['image_sha256'],descriptor,name,network_id,external_name,external_id)
+        if identity!=relay_identity or started!=relay_started or final!=relay: raise ValueError('relay drift')
+        docker(['stop','--time','2',relay_id])
+        stopped=inspect(['container','inspect',relay_id]); validate_stopped_relay(stopped,relay_id,token,relay,relay_started)
+        docker(['container','rm',relay_id])
+        if docker(['container','ls','-a','--no-trunc','--filter','id='+relay_id,'--format','{{.ID}}']): raise ValueError('relay removal unknown')
+        validate_external_network(inspect(['network','inspect',external_id]),external_id,external_name,token,[])
+        docker(['network','rm',external_id])
+        if docker(['network','ls','--no-trunc','--filter','id='+external_id,'--format','{{.ID}}']): raise ValueError('external network removal unknown')
     validate_network(inspect(['network','inspect',network_id]),network_id,name,token,[])
     docker(['network','rm',network_id])
     if docker(['network','ls','--no-trunc','--filter','id='+network_id,'--format','{{.ID}}']): raise ValueError('network removal unknown')
     cleanup='complete'
     phase='receipt';CURRENT_PHASE=phase;fences()
-    record(output,'receipt.json',{'version':1,'head':head,'outcome':outcome,'phase':result_phase,'cleanup':cleanup})
+    record(output,'receipt.json',{'version':1,'head':head,'outcome':outcome,'phase':result_phase,'cleanup':cleanup,**({'scope':'fixture-exact-container-export-preauth'} if preauth else {})})
     return {'status':outcome,'phase':result_phase,'cleanup':cleanup,'output':str(output.path)}
 
 def entry():
     os.umask(0o077);sys.dont_write_bytecode=True
-    if len(sys.argv)!=3 or sys.argv[1]!='--run-owned': raise ValueError('arguments')
-    return main(sys.argv[2])
+    if len(sys.argv)!=3 or sys.argv[1] not in ('--run-owned','--run-owned-preauth'): raise ValueError('arguments')
+    return main(sys.argv[2],sys.argv[1]=='--run-owned-preauth')
 
 def failure_diagnostic(error):
     allowed={'ValueError','RuntimeError','TimeoutError','OSError','PermissionError','FileNotFoundError','TypeError','KeyError','IndexError','AttributeError','ExceptionGroup','BaseExceptionGroup'}
